@@ -1,0 +1,27 @@
+node_modules/
+dist/
+.vite/
+.npm-cache/
+coverage/
+playwright-report/
+test-results/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Local reference material; never commit these folders.
+/Story agent/
+/openclaw skill/
+
+# Future Python backend artifacts.
+__pycache__/
+.venv/
+*.py[cod]
+*.db
+*.sqlite*
+
+# Local agent workspace metadata.
+/.agents/
+/.codex/

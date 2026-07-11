@@ -9,7 +9,7 @@ Latest local commit: see `git log -1 --oneline`
 
 Phase 2 is the local data foundation. The goal is to replace prototype-only business state with a local-first backend while keeping the current planning UI and simulated Agent workflow.
 
-Current status: implementation is committed locally and passes API unit tests, web unit tests, and production build. GitHub publishing is not complete yet because this copied workspace has no `origin` remote configured. GitHub CLI installation was attempted, but `winget` stalled on the package source/network path.
+Current status: implementation is committed and pushed to GitHub on `agent/local-data-foundation`. It passes API unit tests, web unit tests, and production build. Draft PR creation is still pending because GitHub CLI installation stalled on the package source/network path.
 
 ## Architecture
 
@@ -57,7 +57,8 @@ Backend rules:
 
 ## Not Complete
 
-- GitHub remote has not yet been configured in this copied workspace.
+- GitHub remote has been configured as `https://github.com/zuming58/Story-Agent.git`.
+- Feature branch `agent/local-data-foundation` has been pushed.
 - GitHub CLI is not installed yet on this computer. `winget install --id GitHub.cli --source winget` stalled and was stopped.
 - Draft PR has not yet been created.
 - `npm run test:e2e` still needs a fresh run after Playwright Chromium is installed. API startup reached `/api/v1/health`, but Playwright could not launch Chromium.
@@ -160,13 +161,10 @@ Last verified in this workspace on 2026-07-11:
 
 ## Next Agent Tasks
 
-1. Configure `origin` as `https://github.com/zuming58/Story-Agent.git`.
-2. Commit this phase if not already committed.
-3. Push `agent/local-data-foundation`.
-4. Install or verify GitHub CLI only if draft PR automation is desired.
-5. Install Playwright Chromium and rerun E2E with API available.
-6. Create a draft PR to `main`.
-7. Ask GPT-5.6 to review the PR against `docs/prd/PRD-001.md`, `docs/ui/UI-DESIGN-BASELINE.md`, `design-qa.md`, and this handoff.
+1. Create a draft PR from `agent/local-data-foundation` to `main`.
+2. Install or verify GitHub CLI only if PR automation is desired.
+3. Install Playwright Chromium and rerun E2E with API available.
+4. Ask GPT-5.6 to review the PR against `docs/prd/PRD-001.md`, `docs/ui/UI-DESIGN-BASELINE.md`, `design-qa.md`, and this handoff.
 
 ## Do Not Commit
 

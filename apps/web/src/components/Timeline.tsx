@@ -1,6 +1,7 @@
 import { BookOpen, LinkSimple, Target } from "@phosphor-icons/react";
 import { useMemo } from "react";
 import { useStoryStore } from "../store/useStoryStore";
+import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 
 const windows = [
   { label: "开场", range: "1–20", start: 1, end: 20 },
@@ -13,11 +14,11 @@ const windows = [
 const position = (chapter: number) => `${Math.min(99, Math.max(1, chapter))}%`;
 
 export function Timeline() {
-  const milestones = useStoryStore((state) => state.plan.milestones);
-  const markers = useStoryStore((state) => state.plan.markers);
+  const { plan, proposal } = useStoryWorkspace();
+  const milestones = plan?.milestones ?? [];
+  const markers = plan?.markers ?? [];
   const selectedId = useStoryStore((state) => state.selectedMilestoneId);
   const select = useStoryStore((state) => state.selectMilestone);
-  const proposal = useStoryStore((state) => state.proposal);
   const proposedChapter = useMemo(() => {
     if (!proposal || proposal.status !== "pending") return null;
     const operation = proposal.operations.find((item) => item.field === "targetChapter");

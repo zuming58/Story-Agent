@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+def to_camel(value: str) -> str:
+    parts = value.split("_")
+    return parts[0] + "".join(part.capitalize() for part in parts[1:])
+
+
+class ApiModel(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, from_attributes=True)
+
+
+class ProjectCreate(ApiModel):
+    title: str = Field(min_length=1, max_length=200)
+    mode: Literal["long-form", "short-form", "short-drama"] = "long-form"
+    total_chapters: int = Field(default=100, ge=1, le=5000)
+
+
+class ProjectUpdate(ApiModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    total_chapters: int | None = Field(default=None, ge=1, le=5000)
+
+
+class ProjectOut(ApiModel):
+    id: str
+    title: str
+    mode: str
+    current_chapter: int
+    total_chapters: int
+    folder_path: str
+    created_at: datetime
+    updated_at: datetime
+    last_opened_at: datetime
+
+
+class PlanNodeUpdate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    type: str | None = None
+    target_chapter: int | None = Field(default=None, ge=1, le=5000)
+    range_min: int | None = Field(default=None, ge=1, le=5000)
+    range_max: int | None = Field(default=None, ge=1, le=5000)
+    importance: int | None = Field(default=None, ge=1, le=5)
+    note: str | None = None
+    prerequisites: list[str] | None = None
+    completion_conditions: list[str] | None = None
+    foreshadows: list[str] | None = None
+    contracts: list[str] | None = None
+    pace: str | None = None
+
+
+class PlanNodeOut(ApiModel):
+    id: str
+    title: str
+    type: str
+    target_chapter: int
+    range_min: int
+    range_max: int
+    importance: int
+    note: str
+    prerequisites: list[str]
+    completion_conditions: list[str]
+    foreshadows: list[str]
+    contracts: list[str]
+    pace: str
+    revision: int
+
+
+class StoryMarkerOut(ApiModel):
+    id: str
+    kind: str
+    chapter: int
+    label: str
+
+
+class StoryPlanOut(ApiModel):
+    id: str
+    book_title: str
+    volume_title: str
+    arc_title: str
+    chapter_start: int
+    chapter_end: int
+    revision: int
+    milestones: list[PlanNodeOut]
+    markers: list[StoryMarkerOut]
+
+
+class AgentMessageOut(ApiModel):
+    id: str
+    role: str
+    content: str
+    timestamp: datetime
+
+
+class AgentSessionOut(ApiModel):
+    id: str
+    project_id: str
+    scope: list[str]
+    status: str
+    messages: list[AgentMessageOut]
+
+
+class AgentSessionCreate(ApiModel):
+    scope: list[str] = Field(default_factory=list)
+
+
+class AgentMessageCreate(ApiModel):
+    project_id: str
+    content: str = Field(min_length=1, max_length=5000)
+    selected_node_id: str | None = None
+
+
+class ChangeOperationOut(ApiModel):
+    id: str
+    field: str
+    label: str
+    before: int
+    after: int
+    selected: bool
+
+
+class ImpactOut(ApiModel):
+    id: str
+    kind: str
+    label: str
+
+
+class ChangeProposalOut(ApiModel):
+    id: str
+    target_id: str
+    target_title: str
+    reason: str
+    operations: list[ChangeOperationOut]
+    impacts: list[ImpactOut]
+    status: str
+    revision: int
+
+
+class AgentResponse(ApiModel):
+    message: AgentMessageOut
+    proposal: ChangeProposalOut | None = None
+
+
+class ProposalApply(ApiModel):
+    project_id: str
+    expected_revision: int = Field(ge=1)
+    selected_operation_ids: list[str] = Field(default_factory=list)
+
+
+class ProposalReject(ApiModel):
+    project_id: str
+    expected_revision: int = Field(ge=1)
+
+
+class AuditEventOut(ApiModel):
+    id: str
+    event_type: str
+    entity_type: str
+    entity_id: str
+    payload: dict[str, Any]
+    request_id: str
+    created_at: datetime
+
+
+class BackupManifest(ApiModel):
+    backup_id: str
+    project_id: str
+    project_title: str
+    created_at: datetime
+    files: dict[str, str]
+    archive_path: str
+
+
+class ApiError(ApiModel):
+    code: str
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    request_id: str

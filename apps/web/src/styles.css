@@ -306,6 +306,36 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .placeholder-rule { width: 180px; height: 1px; background: #705536; margin: 32px 0; }
 .placeholder-note { font-size: 12px; color: #647585 !important; }
 
+.connection-state { min-height: 100%; display: grid; place-content: center; justify-items: center; gap: 9px; padding: 40px; text-align: center; background: #081522; }
+.connection-state strong { color: #e4b66f; font: 600 24px/1.4 "Noto Serif SC", serif; }
+.connection-state p { margin: 0; color: #7d8b98; font-size: 12px; }
+.connection-state button { margin-top: 10px; border: 1px solid #9b7544; background: #2b241a; color: #e1b978; border-radius: 4px; padding: 8px 14px; cursor: pointer; }
+.empty-editor { min-height: 170px; display: grid; place-items: center; color: #6d7b88; font-size: 12px; }
+
+.project-overview-page { min-height: 100%; padding: 56px 6vw; background: #081522; }
+.project-overview-page > header { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; padding-bottom: 30px; border-bottom: 1px solid #223445; }
+.project-overview-page h1 { margin: 12px 0 8px; color: #eee8dd; font: 600 34px/1.35 "Noto Serif SC", serif; letter-spacing: .04em; }
+.project-overview-page header p { margin: 0; color: #798895; font-size: 12px; }
+.project-create-button { height: 38px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #a57a43; background: #2b241a; color: #e0b875; border-radius: 4px; padding: 0 15px; cursor: pointer; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 13px; padding-top: 24px; }
+.project-card { min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 108px; padding: 16px; border: 1px solid #26394a; border-radius: 5px; background: #0a1725; text-align: left; cursor: pointer; }
+.project-card:hover, .project-card.is-active { border-color: #9a7340; background: #111b24; }
+.project-card-icon { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid #5d4931; color: #d4a45f; background: #171a1d; border-radius: 50%; }
+.project-card strong, .project-card span, .project-card small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-card strong { color: #d8dde2; font: 600 16px/1.5 "Noto Serif SC", serif; }
+.project-card span { color: #8c99a5; font-size: 10px; margin-top: 3px; }
+.project-card small { display: flex; align-items: center; gap: 4px; color: #566777; font-size: 8px; margin-top: 9px; }
+.dialog-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(2, 8, 14, .74); }
+.project-dialog { position: fixed; z-index: 81; left: 50%; top: 50%; width: min(430px, calc(100vw - 40px)); transform: translate(-50%, -50%); border: 1px solid #4a5a69; border-radius: 7px; background: #0c1927; padding: 22px; box-shadow: 0 28px 80px rgba(0,0,0,.55); }
+.project-dialog h2 { margin: 0; color: #e9dfcf; font: 600 21px/1.4 "Noto Serif SC", serif; }
+.project-dialog > p { margin: 7px 0 18px; color: #738290; font-size: 11px; }
+.project-dialog label { display: grid; gap: 6px; margin-bottom: 13px; color: #9aa7b2; font-size: 11px; }
+.project-dialog input, .project-dialog select { height: 34px; border: 1px solid #304456; border-radius: 4px; background: #081522; color: #d0d6dc; padding: 0 9px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.dialog-actions button { height: 34px; border: 1px solid #35485a; background: #111f2d; color: #93a0ac; border-radius: 4px; padding: 0 14px; cursor: pointer; }
+.dialog-actions button.primary { border-color: #a57a43; background: #2b241a; color: #e0b875; }
+.dialog-close { position: absolute; right: 12px; top: 12px; width: 30px; height: 30px; display: grid; place-items: center; border: 0; background: transparent; color: #788895; cursor: pointer; }
+
 @media (max-width: 1380px) {
   :root { --sidebar-width: 94px; }
   .nav-item { min-height: 68px; font-size: 12px; }

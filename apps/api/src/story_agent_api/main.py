@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import shutil
+import tempfile
+from contextlib import asynccontextmanager
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import FastAPI, File, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .config import Settings
+from .schemas import (
+    AgentMessageCreate,
+    AgentResponse,
+    AgentSessionCreate,
+    AgentSessionOut,
+    AuditEventOut,
+    BackupManifest,
+    ChangeProposalOut,
+    PlanNodeOut,
+    PlanNodeUpdate,
+    ProjectCreate,
+    ProjectOut,
+    ProjectUpdate,
+    ProposalApply,
+    ProposalReject,
+    StoryPlanOut,
+)
+from .services import StoryError, StoryService
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings()
+    service = StoryService(settings)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        service.initialize()
+        yield
+        service.close()
+
+    app = FastAPI(title="Story Agent API", version="0.1.0", lifespan=lifespan)
+    app.state.story_service = service
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Request-ID"],
+    )
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
+        request.state.request_id = request.headers.get("X-Request-ID") or str(uuid4())
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
+    @app.exception_handler(StoryError)
+    async def story_error_handler(request: Request, exc: StoryError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status, content={"code": exc.code, "message": exc.message, "details": exc.details, "requestId": request.state.request_id})
+
+    @app.get("/api/v1/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok", "storage": "sqlite"}
+
+    @app.get("/api/v1/projects", response_model=list[ProjectOut])
+    def list_projects() -> list[object]:
+        return service.list_projects()
+
+    @app.post("/api/v1/projects", response_model=ProjectOut, status_code=201)
+    def create_project(payload: ProjectCreate) -> object:
+        return service.create_project(payload)
+
+    @app.get("/api/v1/projects/{project_id}", response_model=ProjectOut)
+    def get_project(project_id: str) -> object:
+        return service.get_project(project_id, touch=True)
+
+    @app.patch("/api/v1/projects/{project_id}", response_model=ProjectOut)
+    def update_project(project_id: str, payload: ProjectUpdate) -> object:
+        return service.update_project(project_id, payload)
+
+    @app.get("/api/v1/projects/{project_id}/plan", response_model=StoryPlanOut)
+    def get_plan(project_id: str) -> object:
+        return service.get_plan(project_id)
+
+    @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
+    def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:
+        return service.update_plan_node(project_id, node_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/agent/sessions", response_model=list[AgentSessionOut])
+    def list_sessions(project_id: str) -> object:
+        return service.list_sessions(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/agent/sessions", response_model=AgentSessionOut, status_code=201)
+    def create_session(project_id: str, payload: AgentSessionCreate) -> object:
+        return service.create_session(project_id, payload.scope)
+
+    @app.post("/api/v1/agent/sessions/{session_id}/messages", response_model=AgentResponse)
+    def send_message(session_id: str, payload: AgentMessageCreate) -> object:
+        return service.send_message(session_id, payload)
+
+    @app.get("/api/v1/projects/{project_id}/change-proposals", response_model=list[ChangeProposalOut])
+    def list_proposals(project_id: str, status: str | None = Query(default=None)) -> object:
+        return service.list_proposals(project_id, status)
+
+    @app.post("/api/v1/change-proposals/{proposal_id}/apply", response_model=ChangeProposalOut)
+    def apply_proposal(proposal_id: str, payload: ProposalApply, request: Request) -> object:
+        return service.apply_proposal(proposal_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/change-proposals/{proposal_id}/reject", response_model=ChangeProposalOut)
+    def reject_proposal(proposal_id: str, payload: ProposalReject, request: Request) -> object:
+        return service.reject_proposal(proposal_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/audit-events", response_model=list[AuditEventOut])
+    def audit_events(project_id: str, limit: int = Query(default=100, ge=1, le=500)) -> object:
+        return service.list_audit_events(project_id, limit)
+
+    @app.post("/api/v1/projects/{project_id}/audit-events/{event_id}/undo", response_model=AuditEventOut)
+    def undo_event(project_id: str, event_id: str, request: Request) -> object:
+        return service.undo_event(project_id, event_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/backups", response_model=BackupManifest, status_code=201)
+    def create_backup(project_id: str) -> object:
+        return service.create_backup(project_id)
+
+    @app.post("/api/v1/projects/restore", response_model=ProjectOut, status_code=201)
+    async def restore_project(backup: UploadFile = File(...)) -> object:
+        suffix = Path(backup.filename or "backup.zip").suffix or ".zip"
+        with tempfile.NamedTemporaryFile(dir=settings.data_dir, suffix=suffix, delete=False) as handle:
+            temp_path = Path(handle.name)
+            shutil.copyfileobj(backup.file, handle)
+        try:
+            return service.restore_backup(temp_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    return app
+
+
+app = create_app()

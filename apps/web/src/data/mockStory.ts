@@ -9,6 +9,10 @@ export const project: ProjectSummary = {
   model: "DeepSeek",
   modelOnline: true,
   automationSchedule: "每日 06:00",
+  folderPath: ".data/projects/project-night-watch",
+  createdAt: "2026-07-11T10:00:00Z",
+  updatedAt: "2026-07-11T10:00:00Z",
+  lastOpenedAt: "2026-07-11T10:00:00Z",
 };
 
 export const storyPlan: StoryPlan = {
@@ -33,6 +37,7 @@ export const storyPlan: StoryPlan = {
       foreshadows: ["来信上的潮湿指印"],
       contracts: ["契约 A01"],
       pace: "smooth",
+      revision: 1,
     },
     {
       id: "milestone-paper-man",
@@ -48,6 +53,7 @@ export const storyPlan: StoryPlan = {
       foreshadows: ["纸人的规则", "日记中的名字", "遗夜路线图"],
       contracts: ["契约 A02", "契约 C03", "伏笔 P02"],
       pace: "fast",
+      revision: 1,
     },
     {
       id: "milestone-clue",
@@ -63,6 +69,7 @@ export const storyPlan: StoryPlan = {
       foreshadows: ["血字契约"],
       contracts: ["契约 A02", "伏笔 P03"],
       pace: "slow",
+      revision: 1,
     },
     {
       id: "milestone-watch-office",
@@ -78,6 +85,7 @@ export const storyPlan: StoryPlan = {
       foreshadows: ["旧宅档案缺页"],
       contracts: ["契约 B01"],
       pace: "fast",
+      revision: 1,
     },
     {
       id: "milestone-truth",
@@ -93,8 +101,10 @@ export const storyPlan: StoryPlan = {
       foreshadows: ["雾城地下旧路"],
       contracts: ["契约 C03", "伏笔 P04"],
       pace: "smooth",
+      revision: 1,
     },
   ],
+  revision: 1,
   markers: [
     { id: "hook-1", kind: "hook", chapter: 8, label: "来信钩子" },
     { id: "hook-2", kind: "hook", chapter: 18, label: "纸人现身" },
@@ -110,13 +120,13 @@ export const initialMessages: AgentMessage[] = [
     id: "message-1",
     role: "user",
     content: "我觉得‘首次直面纸人’发生得太早了，主角还没建立足够的好奇心与紧张感。",
-    timestamp: "10:21",
+    timestamp: "2026-07-11T02:21:00Z",
   },
   {
     id: "message-2",
     role: "assistant",
     content: "我检查了第一卷节奏和前置契约。建议把该里程碑放到第二幕中段，并同步延长调查铺垫。",
-    timestamp: "10:22",
+    timestamp: "2026-07-11T02:22:00Z",
   },
 ];
 
@@ -136,4 +146,5 @@ export const initialProposal: ChangeProposal = {
     { id: "impact-3", kind: "dependency", label: "2 个前置依赖" },
   ],
   status: "pending",
+  revision: 1,
 };

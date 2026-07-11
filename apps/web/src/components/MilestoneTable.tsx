@@ -1,8 +1,10 @@
 import { DotsThree, PencilSimple } from "@phosphor-icons/react";
 import { useStoryStore } from "../store/useStoryStore";
+import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 
 export function MilestoneTable() {
-  const milestones = useStoryStore((state) => state.plan.milestones);
+  const { plan } = useStoryWorkspace();
+  const milestones = plan?.milestones ?? [];
   const selectedId = useStoryStore((state) => state.selectedMilestoneId);
   const select = useStoryStore((state) => state.selectMilestone);
   return (

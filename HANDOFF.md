@@ -1,108 +1,141 @@
-# Story Agent 开发交接
+# Story Agent 第三阶段交接
 
 更新时间：2026-07-12
-当前阶段：第三阶段——真实模型完整闭环
-执行方式：另一台电脑连续完成全部工作包，完成后统一审计
+当前状态：第三阶段已完成，停止开发，等待 GPT-5.6 审计
 工作分支：`agent/model-provider-foundation`
-审计基线：`5fd8015`
+审计起点：`5fd8015`
+代码完成终点：`bf3569d`
+最终审计终点：推送后的 `agent/model-provider-foundation` 分支 HEAD，本文件所在交接提交；最终答复同步给出实际 hash。
 完整计划：`docs/plans/PHASE-3-MODEL-PROVIDER.md`
 
-## 当前任务
+## 完成内容
 
-完整实施第三阶段全部四个工作包，不在工作包之间等待 GPT-5.6：
+工作包一 `029c78f Add model provider configuration foundation`
 
-1. 模型配置、Credential Manager 密钥安全、角色绑定和高保真设置 UI；
-2. OpenAI 兼容 Provider、SSE 流式规划 Agent、调用审计和停止/重试 UI；
-3. JSON 结构化规划提案、白名单校验及现有接受/拒绝/撤销闭环；
-4. 备份恢复、审计时间线、模型调用记录和错误诊断 UI。
+- 新增目录库模型配置基础：Provider、模型配置、角色绑定。
+- 新增 `SecretStore` 抽象，生产默认 Windows Credential Manager，测试使用 `MemorySecretStore`。
+- 支持 DeepSeek 预设：`https://api.deepseek.com` 与 `deepseek-v4-pro`。
+- Provider API 响应只返回 `hasApiKey` 和脱敏尾号，不回显完整密钥。
+- Base URL 默认要求 HTTPS，仅 `localhost` 与 `127.0.0.1` 允许 HTTP。
+- 完成模型设置 UI：Provider 创建/编辑、密钥保存后清空、连接测试、模型参数和角色绑定。
 
-每个工作包完成后先运行相关测试并独立提交，然后继续下一包。全部完成后运行全量测试、更新本文件、推送并停止，等待 GPT-5.6 统一审计。
+工作包二 `58ad383 Add streaming model-backed planning agent`
 
-## 不得扩大范围
+- 新增 OpenAI 兼容 Provider 适配器，支持 SSE `/chat/completions` 流式解析、用量统计、超时/鉴权/限流/网络错误分类和一次重试。
+- 新增项目库 `model_runs`，记录角色、Provider、模型、状态、token、耗时、错误码、request id、retry，不记录密钥或完整上下文。
+- 新增 SSE Agent 接口，事件包含 `run_started`、`text_delta`、`completed`、`failed`、`cancelled`。
+- 调用期间不持有 SQLite 长事务；成功/失败以短事务写入助手消息和运行结果。
+- 支持停止、客户端断开取消和启动时恢复 running 调用为 `interrupted`。
+- UI 逐字显示回复，并展示 Provider/模型、运行状态、停止和失败重试。
 
-- 不实施 Canon、全文/向量检索、章节正文自动写作或短剧功能。
-- 不重构与第三阶段无关的第一、二阶段代码。
-- 不更换 React/FastAPI/SQLite 技术栈。
-- 不把特定厂商写死在业务层。
+工作包三 `05a185b Add structured planning proposal generation`
 
-## 当前架构基线
+- `action` 支持 `chat`、`replan`、`logic_check`、`complete_dependencies`。
+- 普通对话只做自然语言流式回复；修改类动作在自然语言完成后发起独立 JSON 提案调用。
+- JSON 调用使用 `response_format: {"type":"json_object"}`，空 JSON、非法 JSON、截断输出只修复重试一次。
+- 提案只允许白名单字段：章节窗口、依赖/完成条件/伏笔/契约、备注、节奏状态。
+- 校验目标节点、revision、章节范围、依赖引用和字段类型；非法提案只记录失败审计和 model run 诊断，不写入正式提案，不改变规划。
+- 接受、拒绝、撤销继续走原有事务闭环；新增 JSON 值列兼容列表/文本类提案，旧数字提案仍可用。
+- UI 区分自然语言建议、结构化提案生成中/成功/失败、正式提案结果。
 
-```text
-React UI
-├── React Query：业务服务端状态
-└── Zustand：选区、Agent 折叠和宽度等 UI 状态
-        │
-        ▼
-FastAPI /api/v1
-        │
-        ├── .data/catalog.db
-        └── .data/projects/{project-id}-{slug}/story.db
-```
+工作包四 `bf3569d Add backup recovery audit and diagnostics UI`
 
-现有能力包括作品隔离、规划 revision、模拟 Agent、提案接受/拒绝、审计、撤销和带 SHA-256 的备份恢复。第三阶段必须在此基础上增量实现，不得破坏这些闭环。
+- 新增备份列表、下载、上传恢复 API；恢复仍创建新项目，不覆盖原项目。
+- 备份列表读取 ZIP manifest，显示大小和 SHA-256 校验状态。
+- 恢复继续校验 ZIP、manifest、SHA-256 和路径穿越；恢复 canon 文件不再使用递归删除。
+- 审计事件支持按 event/entity 类型过滤。
+- 模型调用记录支持按状态和角色过滤，诊断 UI 展示 request id、retry、错误码、中断/失败状态和安全诊断摘要。
+- 新增“安全与审计”页面，承载备份管理、审计时间线、模型调用记录和错误诊断；1440×1024 与 1280×800 e2e 均验证右侧 Agent 不遮挡。
 
-## 开始前必须阅读
+## 未完成内容与范围边界
 
-1. `HANDOFF.md`
-2. `docs/plans/PHASE-3-MODEL-PROVIDER.md`
-3. `docs/prd/PRD-001.md`
-4. `docs/ui/UI-DESIGN-BASELINE.md`
-5. `design-qa.md`
+- 第三阶段范围内未留下已知未完成项。
+- 未开发 Canon、向量检索、章节正文生成、短剧制作、媒体生成或发布能力；这些仍属于后续阶段。
+- 未合并 `main`。
+- 未提交 API Key、本地数据库、日志、备份 ZIP、截图、trace 或 `.e2e-data`。
 
-## 环境与启动
+## 数据库迁移
 
-目标运行时为 Node.js 24 LTS、Python 3.13 和 `uv`。API 使用 `127.0.0.1:8765`。
+Catalog:
 
-```powershell
-npm install
-npm --prefix apps/web install
-uv sync --project apps/api --dev
-npm run dev
-```
+- `0001_catalog`：既有目录库基础。
+- `0002_model_provider`：`model_providers`、`model_configs`、`model_role_bindings`。
 
-## 全阶段安全规则
+Project:
 
-- API Key 只能进入 Windows Credential Manager；自动化测试使用内存 SecretStore。
-- SQLite、日志、HTTP 响应、错误详情、备份 ZIP、截图和 Git 中不得出现完整密钥。
-- 自动化测试使用本地假 OpenAI 服务，不得调用真实付费模型。
-- 模型失败必须明确失败，不允许回退模拟内容冒充成功。
-- 模型生成的规划修改必须先成为待确认提案。
-- 正式状态改变必须遵守 revision、事务和审计规则。
+- `0001_project`：既有项目规划、会话、提案、审计基础。
+- `0002_model_runs`：`model_runs`。
+- `0003_structured_proposals`：`change_operations.before_json`、`change_operations.after_json`、`model_runs.diagnostic_json`。
 
-## 完成前验证
+## API 清单
 
-必须运行并记录真实结果：
+模型配置:
 
-```powershell
-npm run build
-npm run test
-npm run test:e2e
-```
+- `GET|POST /api/v1/model-providers`
+- `GET|PATCH|DELETE /api/v1/model-providers/{provider_id}`
+- `POST /api/v1/model-providers/{provider_id}/test`
+- `POST /api/v1/model-providers/deepseek-preset`
+- `GET|POST /api/v1/model-providers/{provider_id}/models`
+- `PATCH|DELETE /api/v1/models/{model_id}`
+- `GET /api/v1/model-role-bindings`
+- `PUT /api/v1/model-role-bindings/{role}`
 
-必须验证 1440×1024 和 1280×800，且右侧 Agent 不遮挡设置、审计和恢复界面。
+Agent 与调用审计:
 
-## 完成后的交接要求
+- `POST /api/v1/agent/sessions/{session_id}/messages/stream`
+- `POST /api/v1/projects/{project_id}/model-runs/{run_id}/cancel`
+- `GET /api/v1/projects/{project_id}/model-runs?status=&role=&limit=`
 
-完成后把本文件更新为：
+提案闭环:
 
-- 四个工作包的实际完成内容；
-- 未完成内容和已知问题；
-- 数据库迁移、表和 API 清单；
-- 密钥安全实现及验证结果；
-- 构建、API、Web、Playwright 的真实测试结果；
-- 每个工作包的提交号；
-- 审计起点 `5fd8015` 和最终审计终点；
-- 明确状态“第三阶段已完成，停止开发，等待 GPT-5.6 审计”。
+- `GET /api/v1/projects/{project_id}/change-proposals`
+- `POST /api/v1/change-proposals/{proposal_id}/apply`
+- `POST /api/v1/change-proposals/{proposal_id}/reject`
+- `POST /api/v1/projects/{project_id}/audit-events/{event_id}/undo`
 
-推送 `agent/model-provider-foundation` 后立即停止，不合并 `main`。
+备份与审计:
 
-## 禁止事项
+- `POST /api/v1/projects/{project_id}/backups`
+- `GET /api/v1/projects/{project_id}/backups`
+- `GET /api/v1/projects/{project_id}/backups/{backup_id}/download`
+- `POST /api/v1/projects/restore`
+- `GET /api/v1/projects/{project_id}/audit-events?event_type=&entity_type=&limit=`
 
-- 不修改或提交 `Story agent/` 和 `openclaw skill/`。
-- 不提交 API Key、`.data/`、`apps/web/.e2e-data/`、日志、备份 ZIP 或临时文件。
-- 不绕过 revision、事务和提案确认机制。
-- 不合并 `main`，不提前进入第四阶段。
-- 如果交接文件与实际代码冲突，以代码为准，记录差异后选择最保守兼容实现。
+## 密钥安全与验证
+
+- API Key 只经 `SecretStore` 保存；默认实现使用 Windows Credential Manager。
+- 自动化测试使用 `MemorySecretStore` 和本地假 OpenAI 服务。
+- Provider 响应只返回 `hasApiKey` 与 `apiKeyPreview`。
+- `model_runs` 和诊断记录不保存密钥或完整模型上下文。
+- 备份 ZIP 来源为 `project.json`、`story.db` 和 canon 文件，不包含目录库 Provider 密钥引用或 Credential Manager 内容。
+- 已运行敏感扫描：`rg "sk-[A-Za-z0-9_-]{16,}"` 无命中真实密钥；仅测试中保留 `unit-test-*` 假密钥。
+
+## 测试结果
+
+最终验收命令：
+
+- `npm run build`：通过。Vite 仅提示 chunk size warning。
+- `npm run test`：通过。
+  - API：20 passed，1 个 StarletteDeprecationWarning。
+  - Web：3 files passed，8 tests passed。
+- `npm run test:e2e`：通过。
+  - 1440×1024：规划提案接受/撤销、直接编辑持久化、安全审计页，共 3 条通过。
+  - 1280×800：同 3 条通过。
+  - 总计 6 passed。
+
+环境说明：
+
+- 本机 Playwright 期望 `chromium_headless_shell-1228`，缓存中已有 `1223`。`playwright install chromium` 下载超时后，为完成本地 e2e 验证，临时在用户缓存目录创建了指向既有 `1223` 的本地 Junction；该操作不在仓库内，不进入提交。
+
+## 审计建议入口
+
+请 GPT-5.6 以 `5fd8015` 为基线，审计 `agent/model-provider-foundation` 到最终推送 HEAD 的全部提交，重点关注：
+
+- 密钥是否只存在 Credential Manager / `MemorySecretStore`，是否可能进入 SQLite、备份、日志或响应。
+- 流式 Agent 是否在失败时明确失败，不回退模拟内容冒充成功。
+- 结构化 JSON 提案是否严格白名单、revision 校验、事务落库和失败不改变规划。
+- 备份恢复是否保留 SHA-256、路径穿越防护和新项目恢复语义。
+- 1440×1024 与 1280×800 UI 是否无右侧 Agent 遮挡。
 
 ## 返回 GPT-5.6 的口令
 

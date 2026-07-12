@@ -337,6 +337,52 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .dialog-actions button.primary { border-color: #a57a43; background: #2b241a; color: #e0b875; }
 .dialog-close { position: absolute; right: 12px; top: 12px; width: 30px; height: 30px; display: grid; place-items: center; border: 0; background: transparent; color: #788895; cursor: pointer; }
 
+.settings-page { min-width: 760px; min-height: 100%; padding: 26px 22px 18px; background: #081522; }
+.settings-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid #223445; }
+.settings-heading h1 { margin: 9px 0 6px; color: #eee8dd; font: 600 30px/1.25 "Noto Serif SC", serif; letter-spacing: .04em; }
+.settings-heading p { margin: 0; color: #7f8d99; font-size: 12px; }
+.settings-primary { height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #a57a43; background: #2b241a; color: #e0b875; border-radius: 4px; padding: 0 12px; cursor: pointer; font-size: 11px; white-space: nowrap; }
+.settings-grid { display: grid; grid-template-columns: minmax(240px, .85fr) minmax(300px, 1.2fr) minmax(260px, .95fr); gap: 12px; padding-top: 14px; align-items: start; }
+.settings-panel { min-width: 0; border: 1px solid #26394a; border-radius: 5px; background: #0a1725; overflow: hidden; }
+.settings-panel > header { height: 37px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #243646; }
+.settings-panel > header strong { color: #d8dde2; font-size: 13px; }
+.settings-panel > header span { color: #6f7f8d; font-size: 10px; }
+.provider-list, .model-list, .role-list { display: flex; flex-direction: column; gap: 7px; padding: 10px; }
+.provider-list { max-height: 272px; overflow-y: auto; scrollbar-width: thin; }
+.provider-row { width: 100%; display: grid; gap: 3px; border: 1px solid #243646; border-radius: 4px; background: #081522; padding: 9px; color: #9ba8b3; text-align: left; cursor: pointer; }
+.provider-row:hover, .provider-row.is-selected { border-color: #9a7340; background: #111b24; }
+.provider-row span { display: flex; align-items: center; gap: 6px; min-width: 0; color: #d2d7dc; font-size: 12px; }
+.provider-row small, .provider-row em { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; font-style: normal; }
+.provider-row small { color: #6e7d8b; }
+.provider-row em { color: #c3a371; }
+.settings-form { display: grid; gap: 9px; padding: 10px; border-top: 1px solid #1e3040; }
+.settings-form.compact { border-top-color: #26394a; }
+.settings-form label, .provider-detail label { display: grid; gap: 5px; color: #97a5b0; font-size: 10px; }
+.settings-form input, .provider-detail input, .role-row select { width: 100%; min-width: 0; height: 31px; border: 1px solid #2b4053; border-radius: 4px; background: #081522; color: #cbd2d8; padding: 0 8px; font-size: 11px; }
+.settings-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.settings-check { display: flex !important; align-items: center; grid-template-columns: auto 1fr; gap: 7px !important; }
+.settings-check input { width: 15px; height: 15px; accent-color: #d4a45f; }
+.provider-detail { display: grid; gap: 9px; padding: 10px; border-bottom: 1px solid #1f3041; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.settings-actions button { height: 30px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid #314558; background: #0d1b2a; color: #99a7b2; border-radius: 4px; padding: 0 9px; cursor: pointer; font-size: 10px; }
+.settings-actions button:hover { border-color: #596ce0; color: #d7dcff; }
+.settings-actions button.danger { border-color: #6b4548; color: #e48682; background: #211719; }
+.connection-result { min-height: 31px; display: flex; align-items: center; gap: 7px; border: 1px solid #293d4f; border-radius: 4px; background: #081522; color: #7b8a98; padding: 0 8px; font-size: 10px; }
+.connection-result.success { border-color: #356d4b; color: #77ca94; background: #10291e; }
+.connection-result.failed { border-color: #79474b; color: #e0827f; background: #26181a; }
+.model-row { display: grid; gap: 4px; border: 1px solid #213344; border-radius: 4px; background: #081522; padding: 9px; }
+.model-row div { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+.model-row strong, .model-row span, .model-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-row strong { color: #d7dce1; font-size: 12px; }
+.model-row span, .model-row small { color: #71808e; font-size: 9px; }
+.role-list { gap: 8px; }
+.role-row { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 8px; color: #9ba8b3; font-size: 10px; }
+.role-row > span { color: #c4a874; }
+.settings-diagnostic { margin: 4px 10px 12px; padding: 10px; border-left: 2px solid #596ce0; background: rgba(108, 124, 255, .07); }
+.settings-diagnostic strong { color: #cfd5ff; font-size: 11px; }
+.settings-diagnostic p { margin: 6px 0 0; color: #7e8b99; font-size: 9px; line-height: 1.6; }
+.settings-empty { min-height: 78px; display: grid; place-items: center; padding: 14px; color: #647484; text-align: center; font-size: 11px; line-height: 1.7; }
+
 @media (max-width: 1380px) {
   :root { --sidebar-width: 94px; }
   .nav-item { min-height: 68px; font-size: 12px; }
@@ -347,6 +393,8 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
   .editor-grid { grid-template-columns: 41% 59%; }
   .editor-column label > span, .importance-row > span { width: 76px; flex-basis: 76px; }
   .lane-row { grid-template-columns: 136px 1fr; }
+  .settings-grid { grid-template-columns: minmax(230px, .8fr) minmax(300px, 1.15fr) minmax(230px, .9fr); gap: 10px; }
+  .role-row { grid-template-columns: 74px minmax(0, 1fr); }
 }
 
 @media (max-width: 1179px) {
@@ -355,6 +403,8 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
   .topbar-divider, .chapter-progress .progress-track { display: none; }
   .planning-page { min-width: 760px; }
   .nav-item { min-height: 64px; }
+  .settings-page { min-width: 760px; padding-left: 16px; padding-right: 16px; }
+  .settings-grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

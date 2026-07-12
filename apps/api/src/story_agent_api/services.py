@@ -10,8 +10,10 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -24,6 +26,9 @@ from .models import (
     CatalogProject,
     ChangeOperation,
     ChangeProposal,
+    ModelConfig,
+    ModelProvider,
+    ModelRoleBinding,
     Plan,
     PlanNode,
     ProjectMeta,
@@ -31,7 +36,20 @@ from .models import (
     StoryMarker,
     utc_now,
 )
-from .schemas import AgentMessageCreate, PlanNodeUpdate, ProjectCreate, ProjectUpdate, ProposalApply, ProposalReject
+from .schemas import (
+    AgentMessageCreate,
+    ModelConfigCreate,
+    ModelConfigUpdate,
+    ModelProviderCreate,
+    ModelProviderUpdate,
+    ModelRoleBindingUpdate,
+    PlanNodeUpdate,
+    ProjectCreate,
+    ProjectUpdate,
+    ProposalApply,
+    ProposalReject,
+)
+from .secrets import SecretStore, SecretStoreUnavailable, default_secret_store, secret_preview
 
 
 class StoryError(Exception):
@@ -64,21 +82,251 @@ def slugify(title: str) -> str:
     return slug[:60] or "story"
 
 
+MODEL_ROLES = [
+    "architect",
+    "planner",
+    "chinese_writer",
+    "fact_extractor",
+    "logic_reviewer",
+    "style_reviewer",
+    "reviser",
+    "embedding",
+]
+
+
 class StoryService:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, secret_store: SecretStore | None = None):
         self.settings = settings
         self.db = DatabaseManager(settings)
+        self.secret_store = secret_store or default_secret_store()
 
     def close(self) -> None:
         self.db.dispose()
 
     def initialize(self) -> None:
+        self._ensure_model_role_bindings()
         if self.settings.seed_demo and not self.list_projects():
             self.create_project(ProjectCreate(title="夜巡人", mode="long-form", total_chapters=1000), seed_demo=True)
+
+    def _ensure_model_role_bindings(self) -> None:
+        now = utc_now()
+        with self.db.catalog() as session:
+            existing = set(session.scalars(select(ModelRoleBinding.role)).all())
+            for role in MODEL_ROLES:
+                if role not in existing:
+                    session.add(ModelRoleBinding(role=role, model_id=None, created_at=now, updated_at=now))
+            session.commit()
 
     def list_projects(self) -> list[CatalogProject]:
         with self.db.catalog() as session:
             return list(session.scalars(select(CatalogProject).order_by(CatalogProject.last_opened_at.desc())).all())
+
+    def list_model_providers(self) -> list[dict[str, Any]]:
+        with self.db.catalog() as session:
+            providers = session.scalars(select(ModelProvider).order_by(ModelProvider.created_at.desc())).all()
+            return [self._provider_dict(item) for item in providers]
+
+    def create_model_provider(self, payload: ModelProviderCreate) -> dict[str, Any]:
+        self._validate_base_url(payload.base_url)
+        now = utc_now()
+        provider_id = str(uuid4())
+        key_ref = f"model-provider:{provider_id}"
+        provider = ModelProvider(
+            id=provider_id,
+            name=payload.name,
+            provider_type=payload.provider_type,
+            base_url=payload.base_url.rstrip("/"),
+            timeout_seconds=payload.timeout_seconds,
+            max_retries=payload.max_retries,
+            is_enabled=payload.is_enabled,
+            created_at=now,
+            updated_at=now,
+        )
+        if payload.api_key:
+            self._store_provider_secret(provider, key_ref, payload.api_key)
+        with self.db.catalog() as session:
+            session.add(provider)
+            session.commit()
+            session.refresh(provider)
+            return self._provider_dict(provider)
+
+    def get_model_provider(self, provider_id: str) -> dict[str, Any]:
+        with self.db.catalog() as session:
+            provider = session.get(ModelProvider, provider_id)
+            if not provider:
+                raise StoryError(404, "MODEL_PROVIDER_NOT_FOUND", "模型供应商不存在。", {"providerId": provider_id})
+            return self._provider_dict(provider)
+
+    def update_model_provider(self, provider_id: str, payload: ModelProviderUpdate) -> dict[str, Any]:
+        with self.db.catalog() as session:
+            provider = session.get(ModelProvider, provider_id)
+            if not provider:
+                raise StoryError(404, "MODEL_PROVIDER_NOT_FOUND", "模型供应商不存在。", {"providerId": provider_id})
+            changes = payload.model_dump(exclude_unset=True, exclude={"api_key", "clear_api_key"})
+            if "base_url" in changes:
+                self._validate_base_url(changes["base_url"])
+                changes["base_url"] = changes["base_url"].rstrip("/")
+            for key, value in changes.items():
+                setattr(provider, key, value)
+            if payload.clear_api_key and provider.api_key_ref:
+                self._delete_provider_secret(provider.api_key_ref)
+                provider.api_key_ref = None
+                provider.api_key_preview = None
+            if payload.api_key:
+                key_ref = provider.api_key_ref or f"model-provider:{provider.id}"
+                self._store_provider_secret(provider, key_ref, payload.api_key)
+            provider.updated_at = utc_now()
+            session.commit()
+            session.refresh(provider)
+            return self._provider_dict(provider)
+
+    def delete_model_provider(self, provider_id: str) -> None:
+        with self.db.catalog() as session:
+            provider = session.get(ModelProvider, provider_id)
+            if not provider:
+                raise StoryError(404, "MODEL_PROVIDER_NOT_FOUND", "模型供应商不存在。", {"providerId": provider_id})
+            model_count = len(session.scalars(select(ModelConfig.id).where(ModelConfig.provider_id == provider_id)).all())
+            if model_count:
+                raise StoryError(409, "MODEL_PROVIDER_IN_USE", "模型供应商仍被模型配置引用，不能删除。", {"modelCount": model_count})
+            key_ref = provider.api_key_ref
+            session.delete(provider)
+            session.commit()
+        if key_ref:
+            self._delete_provider_secret(key_ref)
+
+    def create_deepseek_preset(self) -> dict[str, Any]:
+        payload = ModelProviderCreate(name="DeepSeek 官方", base_url="https://api.deepseek.com", timeout_seconds=60, max_retries=1)
+        provider = self.create_model_provider(payload)
+        self.create_model_config(provider["id"], ModelConfigCreate(
+            model_id="deepseek-v4-pro",
+            display_name="DeepSeek V4 Pro",
+            temperature=0.7,
+            max_output_tokens=4096,
+            supports_reasoning=True,
+            is_enabled=True,
+        ))
+        return self.get_model_provider(provider["id"])
+
+    def list_model_configs(self, provider_id: str) -> list[dict[str, Any]]:
+        with self.db.catalog() as session:
+            provider = session.get(ModelProvider, provider_id)
+            if not provider:
+                raise StoryError(404, "MODEL_PROVIDER_NOT_FOUND", "模型供应商不存在。", {"providerId": provider_id})
+            models = session.scalars(select(ModelConfig).where(ModelConfig.provider_id == provider_id).options(selectinload(ModelConfig.provider)).order_by(ModelConfig.created_at.desc())).all()
+            return [self._model_dict(item) for item in models]
+
+    def create_model_config(self, provider_id: str, payload: ModelConfigCreate) -> dict[str, Any]:
+        with self.db.catalog() as session:
+            provider = session.get(ModelProvider, provider_id)
+            if not provider:
+                raise StoryError(404, "MODEL_PROVIDER_NOT_FOUND", "模型供应商不存在。", {"providerId": provider_id})
+            now = utc_now()
+            model = ModelConfig(
+                id=str(uuid4()),
+                provider_id=provider_id,
+                model_id=payload.model_id,
+                display_name=payload.display_name,
+                temperature=payload.temperature,
+                max_output_tokens=payload.max_output_tokens,
+                supports_reasoning=payload.supports_reasoning,
+                is_enabled=payload.is_enabled,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(model)
+            session.commit()
+            model.provider = provider
+            return self._model_dict(model)
+
+    def update_model_config(self, model_id: str, payload: ModelConfigUpdate) -> dict[str, Any]:
+        with self.db.catalog() as session:
+            model = session.scalar(select(ModelConfig).where(ModelConfig.id == model_id).options(selectinload(ModelConfig.provider)))
+            if not model:
+                raise StoryError(404, "MODEL_CONFIG_NOT_FOUND", "模型配置不存在。", {"modelId": model_id})
+            for key, value in payload.model_dump(exclude_unset=True).items():
+                setattr(model, key, value)
+            model.updated_at = utc_now()
+            session.commit()
+            session.refresh(model)
+            return self._model_dict(model)
+
+    def delete_model_config(self, model_id: str) -> None:
+        with self.db.catalog() as session:
+            model = session.get(ModelConfig, model_id)
+            if not model:
+                raise StoryError(404, "MODEL_CONFIG_NOT_FOUND", "模型配置不存在。", {"modelId": model_id})
+            bindings = session.scalars(select(ModelRoleBinding.role).where(ModelRoleBinding.model_id == model_id)).all()
+            if bindings:
+                raise StoryError(409, "MODEL_CONFIG_IN_USE", "模型仍被角色绑定引用，不能删除。", {"roles": bindings})
+            session.delete(model)
+            session.commit()
+
+    def list_model_role_bindings(self) -> list[dict[str, Any]]:
+        self._ensure_model_role_bindings()
+        with self.db.catalog() as session:
+            bindings = session.scalars(select(ModelRoleBinding).options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider)).order_by(ModelRoleBinding.role)).all()
+            return [self._role_binding_dict(item) for item in bindings]
+
+    def update_model_role_binding(self, role: str, payload: ModelRoleBindingUpdate) -> dict[str, Any]:
+        if role not in MODEL_ROLES:
+            raise StoryError(404, "MODEL_ROLE_NOT_FOUND", "模型角色不存在。", {"role": role})
+        with self.db.catalog() as session:
+            binding = session.get(ModelRoleBinding, role)
+            if not binding:
+                binding = ModelRoleBinding(role=role, created_at=utc_now())
+                session.add(binding)
+            if payload.model_id:
+                model = session.get(ModelConfig, payload.model_id)
+                if not model:
+                    raise StoryError(404, "MODEL_CONFIG_NOT_FOUND", "模型配置不存在。", {"modelId": payload.model_id})
+                binding.model_id = payload.model_id
+            else:
+                binding.model_id = None
+            binding.daily_cost_limit = payload.daily_cost_limit
+            binding.updated_at = utc_now()
+            session.commit()
+            binding = session.scalar(select(ModelRoleBinding).where(ModelRoleBinding.role == role).options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider)))
+            assert binding
+            return self._role_binding_dict(binding)
+
+    def test_model_provider(self, provider_id: str) -> dict[str, Any]:
+        with self.db.catalog() as session:
+            provider = session.get(ModelProvider, provider_id)
+            if not provider:
+                raise StoryError(404, "MODEL_PROVIDER_NOT_FOUND", "模型供应商不存在。", {"providerId": provider_id})
+            provider_data = self._provider_dict(provider)
+            key_ref = provider.api_key_ref
+            base_url = provider.base_url.rstrip("/")
+            timeout_seconds = min(max(provider.timeout_seconds, 1), 5)
+        if not key_ref:
+            return self._connection_result(provider_data, False, "missing_api_key", None, "尚未保存 API Key。")
+        try:
+            api_key = self.secret_store.get_secret(key_ref)
+        except SecretStoreUnavailable:
+            return self._connection_result(provider_data, False, "credential_unavailable", None, "Credential Manager 不可用。")
+        if not api_key:
+            return self._connection_result(provider_data, False, "missing_api_key", None, "Credential Manager 中未找到密钥。")
+        try:
+            with httpx.Client(timeout=timeout_seconds) as client:
+                response = client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
+        except httpx.TimeoutException:
+            return self._connection_result(provider_data, False, "timeout", None, "连接测试超时。")
+        except httpx.RequestError:
+            return self._connection_result(provider_data, False, "network_error", None, "无法连接模型服务。")
+        if response.status_code in {401, 403}:
+            return self._connection_result(provider_data, False, "auth_failed", None, "模型服务拒绝鉴权。")
+        if response.status_code >= 400:
+            return self._connection_result(provider_data, False, "network_error", None, f"模型服务返回 HTTP {response.status_code}。")
+        try:
+            data = response.json()
+        except ValueError:
+            return self._connection_result(provider_data, False, "invalid_response", None, "模型服务返回了非 JSON 响应。")
+        models = data.get("data") if isinstance(data, dict) else None
+        actual_model = None
+        if isinstance(models, list) and models:
+            first = models[0]
+            actual_model = first.get("id") if isinstance(first, dict) else str(first)
+        return self._connection_result(provider_data, True, "success", actual_model, "连接测试成功。")
 
     def get_project(self, project_id: str, *, touch: bool = False) -> CatalogProject:
         with self.db.catalog() as session:
@@ -474,6 +722,40 @@ class StoryService:
             self._write_project_files(restored)
             return restored
 
+    def _validate_base_url(self, value: str) -> None:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise StoryError(422, "INVALID_MODEL_BASE_URL", "模型服务地址必须是有效的 HTTP(S) URL。")
+        if parsed.scheme == "https":
+            return
+        host = (parsed.hostname or "").lower()
+        if host not in {"localhost", "127.0.0.1"}:
+            raise StoryError(422, "INSECURE_MODEL_BASE_URL", "模型服务地址默认必须使用 HTTPS；仅 localhost 与 127.0.0.1 允许 HTTP。")
+
+    def _store_provider_secret(self, provider: ModelProvider, key_ref: str, secret: str) -> None:
+        try:
+            self.secret_store.set_secret(key_ref, secret)
+        except SecretStoreUnavailable:
+            raise StoryError(503, "CREDENTIAL_STORE_UNAVAILABLE", "Credential Manager 不可用，无法保存 API Key。")
+        provider.api_key_ref = key_ref
+        provider.api_key_preview = secret_preview(secret)
+
+    def _delete_provider_secret(self, key_ref: str) -> None:
+        try:
+            self.secret_store.delete_secret(key_ref)
+        except SecretStoreUnavailable:
+            raise StoryError(503, "CREDENTIAL_STORE_UNAVAILABLE", "Credential Manager 不可用，无法删除 API Key。")
+
+    def _connection_result(self, provider: dict[str, Any], ok: bool, status: str, model: str | None, message: str) -> dict[str, Any]:
+        return {
+            "ok": ok,
+            "status": status,
+            "providerId": provider["id"],
+            "providerName": provider["name"],
+            "model": model,
+            "message": message,
+        }
+
     def _validate_node(self, node: PlanNode) -> None:
         if node.range_min > node.range_max:
             raise StoryError(422, "INVALID_CHAPTER_RANGE", "允许范围起点不能晚于终点。")
@@ -514,3 +796,43 @@ class StoryService:
 
     def _audit_dict(self, item: AuditEvent) -> dict[str, Any]:
         return {"id": item.id, "eventType": item.event_type, "entityType": item.entity_type, "entityId": item.entity_id, "payload": loads(item.payload_json), "requestId": item.request_id, "createdAt": item.created_at}
+
+    def _provider_dict(self, item: ModelProvider) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "name": item.name,
+            "providerType": item.provider_type,
+            "baseUrl": item.base_url,
+            "timeoutSeconds": item.timeout_seconds,
+            "maxRetries": item.max_retries,
+            "isEnabled": item.is_enabled,
+            "hasApiKey": bool(item.api_key_ref),
+            "apiKeyPreview": item.api_key_preview,
+            "createdAt": item.created_at,
+            "updatedAt": item.updated_at,
+        }
+
+    def _model_dict(self, item: ModelConfig) -> dict[str, Any]:
+        provider_name = item.provider.name if item.provider else ""
+        return {
+            "id": item.id,
+            "providerId": item.provider_id,
+            "providerName": provider_name,
+            "modelId": item.model_id,
+            "displayName": item.display_name,
+            "temperature": item.temperature,
+            "maxOutputTokens": item.max_output_tokens,
+            "supportsReasoning": item.supports_reasoning,
+            "isEnabled": item.is_enabled,
+            "createdAt": item.created_at,
+            "updatedAt": item.updated_at,
+        }
+
+    def _role_binding_dict(self, item: ModelRoleBinding) -> dict[str, Any]:
+        return {
+            "role": item.role,
+            "modelId": item.model_id,
+            "model": self._model_dict(item.model) if item.model else None,
+            "dailyCostLimit": item.daily_cost_limit,
+            "updatedAt": item.updated_at,
+        }

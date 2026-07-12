@@ -19,6 +19,14 @@ from .schemas import (
     AuditEventOut,
     BackupManifest,
     ChangeProposalOut,
+    ModelConfigCreate,
+    ModelConfigOut,
+    ModelConfigUpdate,
+    ModelProviderCreate,
+    ModelProviderOut,
+    ModelProviderUpdate,
+    ModelRoleBindingOut,
+    ModelRoleBindingUpdate,
     PlanNodeOut,
     PlanNodeUpdate,
     ProjectCreate,
@@ -26,14 +34,16 @@ from .schemas import (
     ProjectUpdate,
     ProposalApply,
     ProposalReject,
+    ProviderConnectionTestOut,
     StoryPlanOut,
 )
+from .secrets import SecretStore
 from .services import StoryError, StoryService
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, secret_store: SecretStore | None = None) -> FastAPI:
     settings = settings or Settings()
-    service = StoryService(settings)
+    service = StoryService(settings, secret_store=secret_store)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -47,7 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-Request-ID"],
     )
 
@@ -65,6 +75,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "storage": "sqlite"}
+
+    @app.get("/api/v1/model-providers", response_model=list[ModelProviderOut])
+    def list_model_providers() -> object:
+        return service.list_model_providers()
+
+    @app.post("/api/v1/model-providers", response_model=ModelProviderOut, status_code=201)
+    def create_model_provider(payload: ModelProviderCreate) -> object:
+        return service.create_model_provider(payload)
+
+    @app.post("/api/v1/model-providers/deepseek-preset", response_model=ModelProviderOut, status_code=201)
+    def create_deepseek_preset() -> object:
+        return service.create_deepseek_preset()
+
+    @app.get("/api/v1/model-providers/{provider_id}", response_model=ModelProviderOut)
+    def get_model_provider(provider_id: str) -> object:
+        return service.get_model_provider(provider_id)
+
+    @app.patch("/api/v1/model-providers/{provider_id}", response_model=ModelProviderOut)
+    def update_model_provider(provider_id: str, payload: ModelProviderUpdate) -> object:
+        return service.update_model_provider(provider_id, payload)
+
+    @app.delete("/api/v1/model-providers/{provider_id}", status_code=204)
+    def delete_model_provider(provider_id: str) -> None:
+        service.delete_model_provider(provider_id)
+
+    @app.post("/api/v1/model-providers/{provider_id}/test", response_model=ProviderConnectionTestOut)
+    def test_model_provider(provider_id: str) -> object:
+        return service.test_model_provider(provider_id)
+
+    @app.get("/api/v1/model-providers/{provider_id}/models", response_model=list[ModelConfigOut])
+    def list_model_configs(provider_id: str) -> object:
+        return service.list_model_configs(provider_id)
+
+    @app.post("/api/v1/model-providers/{provider_id}/models", response_model=ModelConfigOut, status_code=201)
+    def create_model_config(provider_id: str, payload: ModelConfigCreate) -> object:
+        return service.create_model_config(provider_id, payload)
+
+    @app.patch("/api/v1/models/{model_id}", response_model=ModelConfigOut)
+    def update_model_config(model_id: str, payload: ModelConfigUpdate) -> object:
+        return service.update_model_config(model_id, payload)
+
+    @app.delete("/api/v1/models/{model_id}", status_code=204)
+    def delete_model_config(model_id: str) -> None:
+        service.delete_model_config(model_id)
+
+    @app.get("/api/v1/model-role-bindings", response_model=list[ModelRoleBindingOut])
+    def list_model_role_bindings() -> object:
+        return service.list_model_role_bindings()
+
+    @app.put("/api/v1/model-role-bindings/{role}", response_model=ModelRoleBindingOut)
+    def update_model_role_binding(role: str, payload: ModelRoleBindingUpdate) -> object:
+        return service.update_model_role_binding(role, payload)
 
     @app.get("/api/v1/projects", response_model=list[ProjectOut])
     def list_projects() -> list[object]:

@@ -5,9 +5,13 @@ import type {
   AuditEvent,
   BackupManifest,
   ChangeProposal,
+  ModelConfig,
+  ModelProvider,
+  ModelRoleBinding,
   PlanNode,
   ProjectCreateRequest,
   ProjectSummary,
+  ProviderConnectionTest,
   StoryPlan,
 } from "../types";
 
@@ -28,6 +32,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     })) as ApiErrorShape;
     throw new ApiClientError(response.status, payload);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -50,4 +55,48 @@ export const api = {
   audits: (projectId: string) => request<AuditEvent[]>(`/projects/${projectId}/audit-events`),
   undo: (projectId: string, eventId: string) => request<AuditEvent>(`/projects/${projectId}/audit-events/${eventId}/undo`, { method: "POST" }),
   backup: (projectId: string) => request<BackupManifest>(`/projects/${projectId}/backups`, { method: "POST" }),
+  modelProviders: () => request<ModelProvider[]>("/model-providers"),
+  createModelProvider: (payload: {
+    name: string;
+    providerType?: "openai-compatible";
+    baseUrl: string;
+    timeoutSeconds?: number;
+    maxRetries?: number;
+    isEnabled?: boolean;
+    apiKey?: string;
+  }) => request<ModelProvider>("/model-providers", { method: "POST", body: JSON.stringify(payload) }),
+  createDeepSeekPreset: () => request<ModelProvider>("/model-providers/deepseek-preset", { method: "POST" }),
+  updateModelProvider: (providerId: string, payload: Partial<{
+    name: string;
+    providerType: "openai-compatible";
+    baseUrl: string;
+    timeoutSeconds: number;
+    maxRetries: number;
+    isEnabled: boolean;
+    apiKey: string;
+    clearApiKey: boolean;
+  }>) => request<ModelProvider>(`/model-providers/${providerId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteModelProvider: (providerId: string) => request<void>(`/model-providers/${providerId}`, { method: "DELETE" }),
+  testModelProvider: (providerId: string) => request<ProviderConnectionTest>(`/model-providers/${providerId}/test`, { method: "POST" }),
+  providerModels: (providerId: string) => request<ModelConfig[]>(`/model-providers/${providerId}/models`),
+  createProviderModel: (providerId: string, payload: {
+    modelId: string;
+    displayName: string;
+    temperature: number;
+    maxOutputTokens: number;
+    supportsReasoning: boolean;
+    isEnabled: boolean;
+  }) => request<ModelConfig>(`/model-providers/${providerId}/models`, { method: "POST", body: JSON.stringify(payload) }),
+  updateModel: (modelId: string, payload: Partial<{
+    modelId: string;
+    displayName: string;
+    temperature: number;
+    maxOutputTokens: number;
+    supportsReasoning: boolean;
+    isEnabled: boolean;
+  }>) => request<ModelConfig>(`/models/${modelId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteModel: (modelId: string) => request<void>(`/models/${modelId}`, { method: "DELETE" }),
+  roleBindings: () => request<ModelRoleBinding[]>("/model-role-bindings"),
+  updateRoleBinding: (role: string, payload: { modelId: string | null; dailyCostLimit?: number | null }) =>
+    request<ModelRoleBinding>(`/model-role-bindings/${role}`, { method: "PUT", body: JSON.stringify(payload) }),
 };

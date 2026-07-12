@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -39,6 +39,51 @@ class AppSetting(CatalogBase):
 
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
+
+
+class ModelProvider(CatalogBase):
+    __tablename__ = "model_providers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    provider_type: Mapped[str] = mapped_column(String(60), default="openai-compatible")
+    base_url: Mapped[str] = mapped_column(Text)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    max_retries: Mapped[int] = mapped_column(Integer, default=1)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    api_key_ref: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    api_key_preview: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    models: Mapped[list[ModelConfig]] = relationship(back_populates="provider", cascade="all, delete-orphan")
+
+
+class ModelConfig(CatalogBase):
+    __tablename__ = "model_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(ForeignKey("model_providers.id", ondelete="RESTRICT"), index=True)
+    model_id: Mapped[str] = mapped_column(String(200))
+    display_name: Mapped[str] = mapped_column(String(200))
+    temperature: Mapped[float] = mapped_column(Float, default=0.7)
+    max_output_tokens: Mapped[int] = mapped_column(Integer, default=2048)
+    supports_reasoning: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    provider: Mapped[ModelProvider] = relationship(back_populates="models")
+    role_bindings: Mapped[list[ModelRoleBinding]] = relationship(back_populates="model")
+
+
+class ModelRoleBinding(CatalogBase):
+    __tablename__ = "model_role_bindings"
+
+    role: Mapped[str] = mapped_column(String(80), primary_key=True)
+    model_id: Mapped[str | None] = mapped_column(ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True)
+    daily_cost_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    model: Mapped[ModelConfig | None] = relationship(back_populates="role_bindings")
 
 
 class ProjectMeta(ProjectBase):

@@ -134,6 +134,61 @@ export interface BackupManifest {
   archivePath: string;
 }
 
+export interface ModelProvider {
+  id: string;
+  name: string;
+  providerType: "openai-compatible";
+  baseUrl: string;
+  timeoutSeconds: number;
+  maxRetries: number;
+  isEnabled: boolean;
+  hasApiKey: boolean;
+  apiKeyPreview?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelConfig {
+  id: string;
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  displayName: string;
+  temperature: number;
+  maxOutputTokens: number;
+  supportsReasoning: boolean;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ModelRole =
+  | "architect"
+  | "planner"
+  | "chinese_writer"
+  | "fact_extractor"
+  | "logic_reviewer"
+  | "style_reviewer"
+  | "reviser"
+  | "embedding";
+
+export interface ModelRoleBinding {
+  role: ModelRole;
+  modelId: string | null;
+  model: ModelConfig | null;
+  dailyCostLimit: number | null;
+  updatedAt: string;
+}
+
+export interface ProviderConnectionTest {
+  ok: boolean;
+  status: "success" | "missing_api_key" | "auth_failed" | "timeout" | "network_error" | "invalid_response" | "credential_unavailable";
+  providerId: string;
+  providerName: string;
+  model?: string | null;
+  message: string;
+}
+
 export interface ApiErrorShape {
   code: string;
   message: string;

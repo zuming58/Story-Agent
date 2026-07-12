@@ -3,8 +3,8 @@
 更新时间：2026-07-12  
 当前阶段：第二阶段——本地数据基础  
 当前分支：`agent/local-data-foundation`  
-最新提交：将在最终发布提交后更新  
-草稿 PR：将在分支首次推送后更新
+最新代码提交：`751eee0`（并发迁移锁、端到端测试与布局加固）  
+草稿 PR：`https://github.com/zuming58/Story-Agent/pull/1`
 
 ## 阶段目标与完成状态
 
@@ -109,7 +109,7 @@ npm run test:e2e
 - 尚未接入 DeepSeek 或其他 OpenAI 兼容模型，目前为确定性后端模拟 Agent。
 - Canon、全文检索、向量索引、章节契约自动写作和双层质量复核尚未实现。
 - 备份与恢复已有 API，但尚未完成独立的前端管理页面。
-- Node.js 运行时目标是 24 LTS；若接力机器仍为 25，应先切换到 24。
+- Node.js 运行时目标是 24 LTS；当前电脑已有 Node 25，Node 24 MSI 安装返回 1603，因此接力机器应直接使用 Node 24。
 - Starlette TestClient 产生上游弃用警告，不影响当前测试结果。
 
 ## 下一位 Agent 的任务

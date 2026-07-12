@@ -4,7 +4,7 @@
 
 ```powershell
 uv sync --dev
-uv run uvicorn story_agent_api.main:app --reload --host 127.0.0.1 --port 8000
+uv run uvicorn story_agent_api.main:app --reload --host 127.0.0.1 --port 8765
 ```
 
 测试：

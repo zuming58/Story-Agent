@@ -26,4 +26,5 @@ __pycache__/
 /.agents/
 /.codex/
 /.data/
+apps/web/.e2e-data/
 *.zip

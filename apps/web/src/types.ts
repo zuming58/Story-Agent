@@ -6,9 +6,9 @@ export interface ProjectSummary {
   mode: StoryMode;
   currentChapter: number;
   totalChapters: number;
-  model: string;
-  modelOnline: boolean;
-  automationSchedule: string;
+  model?: string;
+  modelOnline?: boolean;
+  automationSchedule?: string;
   folderPath: string;
   createdAt: string;
   updatedAt: string;

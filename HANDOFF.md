@@ -1,86 +1,56 @@
-# Story Agent Handoff
+# Story Agent 开发交接
 
-Updated: 2026-07-11
-Branch: `agent/local-data-foundation`
-Base commit before this phase: `702d1ef`
-Latest local commit: see `git log -1 --oneline`
+更新时间：2026-07-12  
+当前阶段：第二阶段——本地数据基础  
+当前分支：`agent/local-data-foundation`  
+最新提交：将在最终发布提交后更新  
+草稿 PR：将在分支首次推送后更新
 
-## Current Phase
+## 阶段目标与完成状态
 
-Phase 2 is the local data foundation. The goal is to replace prototype-only business state with a local-first backend while keeping the current planning UI and simulated Agent workflow.
+本阶段目标是把第一阶段的高保真模拟原型升级为可重启、可审计、可备份的本地数据闭环。核心实现已经完成：
 
-Current status: implementation is committed and pushed to GitHub on `agent/local-data-foundation`. It passes API unit tests, web unit tests, and production build. Draft PR creation is still pending because GitHub CLI installation stalled on the package source/network path.
+- FastAPI、SQLAlchemy、Alembic 与 SQLite；
+- `catalog.db` 作品目录库及每部作品独立 `story.db`；
+- 作品创建、列表、打开和规划保存；
+- 后端模拟 Agent、会话、消息、字段级提案、接受和拒绝；
+- revision 乐观并发控制与 HTTP 409；
+- 规划更新、提案状态和审计事件同事务提交；
+- 基于审计事件的撤销；
+- 带 SHA-256 清单的 ZIP 备份、损坏拒绝和恢复为新项目；
+- React Query 接管业务数据，Zustand 只保存 UI 状态；
+- 1440×1024 与 1280×800 端到端验证。
 
-## Architecture
+## 架构与数据权威关系
 
-Data authority now belongs to the FastAPI service and local SQLite files:
+```text
+React UI
+├── React Query：作品、规划、会话、提案、审计的服务端缓存
+└── Zustand：当前选区、Agent 折叠和宽度等非业务状态
+        │
+        ▼
+FastAPI /api/v1
+        │
+        ├── .data/catalog.db
+        │   └── 作品目录、路径、最近打开状态
+        └── .data/projects/{project-id}-{slug}/
+            ├── project.json
+            ├── story.db
+            ├── canon/story-core.md
+            ├── backups/
+            └── exports/
+```
 
-- `.data/catalog.db` stores the project catalog and recent-open state.
-- `.data/projects/{project-id}-{slug}/story.db` stores each project's plan, Agent sessions, proposals, and audit events.
-- `.data/projects/{project-id}-{slug}/project.json` is a readable project manifest.
-- `.data/projects/{project-id}-{slug}/canon/story-core.md` is the author-readable canon seed file.
-- `.data/projects/{project-id}-{slug}/backups/` stores generated ZIP backups.
+SQLite 是正式业务数据权威；浏览器 localStorage 不保存作品、规划、消息或提案。`project.json` 是项目可读元数据，Canon Markdown 为后续故事内核和 RAG 预留。
 
-Frontend authority:
+## 数据库表
 
-- React Query owns business data loaded from `/api/v1`.
-- Zustand only stores UI state such as active project id, selected milestone id, Agent panel collapsed state, panel width, and notices.
-- Business content should not be restored from `localStorage`.
-
-Backend rules:
-
-- API JSON is camelCase.
-- IDs use UUID4 for persistent project/session/proposal/audit records.
-- Datetimes are UTC ISO 8601 values.
-- SQLite enables WAL, foreign keys, and a write timeout.
-- Plan node writes use `revision` for optimistic concurrency.
-- Proposal apply, node update, and audit logging are committed transactionally.
-- Alembic has separate migration scopes for catalog and project databases.
-
-## Completed
-
-- Added FastAPI app under `apps/api`.
-- Added SQLAlchemy models, Pydantic schemas, database manager, and service layer.
-- Added Alembic migrations for catalog and project databases.
-- Added project create/list/open/update endpoints.
-- Added plan read and plan node edit endpoints.
-- Added Agent sessions, messages, and simulated change proposal generation.
-- Added proposal apply/reject with revision checks.
-- Added audit event listing and undo for reversible changes.
-- Added project backup and restore with SHA-256 manifest verification.
-- Seeded "夜巡人" as the first local demo project.
-- Added frontend API client and `StoryWorkspaceContext`.
-- Added project overview page.
-- Moved business data from Zustand/localStorage into React Query plus backend API.
-- Updated Vite dev proxy for `/api`.
-- Updated package scripts for combined API and web dev/test.
-
-## Not Complete
-
-- GitHub remote has been configured as `https://github.com/zuming58/Story-Agent.git`.
-- Feature branch `agent/local-data-foundation` has been pushed.
-- GitHub CLI is not installed yet on this computer. `winget install --id GitHub.cli --source winget` stalled and was stopped.
-- Draft PR has not yet been created.
-- `npm run test:e2e` still needs a fresh run after Playwright Chromium is installed. API startup reached `/api/v1/health`, but Playwright could not launch Chromium.
-- The UI should still be visually checked at 1440x1024 and 1280x800 after the backend is running.
-- The next stronger model should review transactional edges, restore safety, and frontend error states before merge.
-
-## Known Issues And Risks
-
-- The Playwright config starts the web dev server but not the API server. Run the root `npm run dev` or otherwise start the API before E2E tests.
-- Playwright Chromium is missing in this environment, and `npm --prefix apps/web exec playwright install chromium` failed with `ECONNRESET`.
-- Existing `.data` is intentionally ignored and should not be committed.
-- `apps/api/.venv`, SQLite files, logs, backups, temp files, and local reference folders must stay out of Git.
-- This folder was copied between machines, so verify remotes and credentials before pushing.
-
-## Database Tables
-
-Catalog database:
+目录库：
 
 - `projects`
 - `app_settings`
 
-Project database:
+作品库：
 
 - `project_meta`
 - `plans`
@@ -93,85 +63,67 @@ Project database:
 - `proposal_impacts`
 - `audit_events`
 
-## API Surface
+## API 清单
 
 - `GET /api/v1/health`
-- `GET /api/v1/projects`
-- `POST /api/v1/projects`
-- `GET /api/v1/projects/{project_id}`
-- `PATCH /api/v1/projects/{project_id}`
-- `GET /api/v1/projects/{project_id}/plan`
-- `PATCH /api/v1/projects/{project_id}/plan/nodes/{node_id}`
-- `GET /api/v1/projects/{project_id}/agent/sessions`
-- `POST /api/v1/projects/{project_id}/agent/sessions`
-- `POST /api/v1/agent/sessions/{session_id}/messages`
-- `GET /api/v1/projects/{project_id}/change-proposals`
-- `POST /api/v1/change-proposals/{proposal_id}/apply`
-- `POST /api/v1/change-proposals/{proposal_id}/reject`
-- `GET /api/v1/projects/{project_id}/audit-events`
-- `POST /api/v1/projects/{project_id}/audit-events/{event_id}/undo`
-- `POST /api/v1/projects/{project_id}/backups`
+- `GET|POST /api/v1/projects`
+- `GET|PATCH /api/v1/projects/{projectId}`
+- `GET /api/v1/projects/{projectId}/plan`
+- `PATCH /api/v1/projects/{projectId}/plan/nodes/{nodeId}`
+- `GET|POST /api/v1/projects/{projectId}/agent/sessions`
+- `POST /api/v1/agent/sessions/{sessionId}/messages`
+- `GET /api/v1/projects/{projectId}/change-proposals`
+- `POST /api/v1/change-proposals/{proposalId}/apply`
+- `POST /api/v1/change-proposals/{proposalId}/reject`
+- `GET /api/v1/projects/{projectId}/audit-events`
+- `POST /api/v1/projects/{projectId}/audit-events/{eventId}/undo`
+- `POST /api/v1/projects/{projectId}/backups`
 - `POST /api/v1/projects/restore`
 
-## Commands
+## 启动、构建和测试
 
-Install:
+要求 Node.js 24、Python 3.13 与 `uv`。API 使用 `127.0.0.1:8765`，因为当前电脑的 `8000` 被 Incredibuild 占用。
 
 ```powershell
 npm install
+npm --prefix apps/web install
 uv sync --project apps/api --dev
-```
-
-Run:
-
-```powershell
 npm run dev
 ```
 
-Verify:
-
 ```powershell
-npm run test:api
-npm run test:web
 npm run build
+npm run test
 npm run test:e2e
 ```
 
-Publish:
+## 测试结果
 
-```powershell
-git remote add origin https://github.com/zuming58/Story-Agent.git
-git push -u origin agent/local-data-foundation
-```
+- API：7 passed；另有 1 条 Starlette TestClient/httpx 弃用警告。
+- Web 单元测试：3 files、5 tests passed。
+- Playwright：4 passed，覆盖 1440×1024 与 1280×800。
+- Web 生产构建：通过。
 
-If GitHub CLI is installed and authenticated:
+## 未完成与已知问题
 
-```powershell
-gh pr create --draft --base main --head agent/local-data-foundation --title "Phase 2 local data foundation" --body-file HANDOFF.md
-```
+- 尚未接入 DeepSeek 或其他 OpenAI 兼容模型，目前为确定性后端模拟 Agent。
+- Canon、全文检索、向量索引、章节契约自动写作和双层质量复核尚未实现。
+- 备份与恢复已有 API，但尚未完成独立的前端管理页面。
+- Node.js 运行时目标是 24 LTS；若接力机器仍为 25，应先切换到 24。
+- Starlette TestClient 产生上游弃用警告，不影响当前测试结果。
 
-## Latest Test Results
+## 下一位 Agent 的任务
 
-Last verified in this workspace on 2026-07-11:
+1. 首先复核运行本文件中的三条验证命令，不要直接开始大改。
+2. 完成备份列表、恢复上传和审计时间线 UI，使已有 API 可在界面中操作。
+3. 增加并发读取回归测试，确保 Alembic 迁移锁和“每项目仅首次迁移”机制不退化。
+4. 设计 OpenAI 兼容模型配置层，但不要把密钥写入仓库或数据库备份。
+5. 每次结束前更新本文件并推送同一功能分支。
 
-- `npm run test:api`: passed, 7 tests.
-- `npm run test:web`: passed, 5 tests.
-- `npm run build`: passed.
-- `npm run test:e2e`: blocked before assertions because Playwright Chromium is not installed. Browser install attempt failed with `ECONNRESET`.
+## 禁止事项与恢复点
 
-## Next Agent Tasks
-
-1. Create a draft PR from `agent/local-data-foundation` to `main`.
-2. Install or verify GitHub CLI only if PR automation is desired.
-3. Install Playwright Chromium and rerun E2E with API available.
-4. Ask GPT-5.6 to review the PR against `docs/prd/PRD-001.md`, `docs/ui/UI-DESIGN-BASELINE.md`, `design-qa.md`, and this handoff.
-
-## Do Not Commit
-
-- `.data/`
-- `.agents/`
-- `.codex/`
-- `apps/api/.venv/`
-- `node_modules/`
-- `*.db`, `*.sqlite*`, `*.zip`, logs, and temp files
-- Local reference directories `Story agent/` and `openclaw skill/`
+- 不修改或提交 `Story agent/` 和 `openclaw skill/` 两个本地参考目录。
+- 不提交 `.data/`、`apps/web/.e2e-data/`、密钥、日志、ZIP 备份和临时文件。
+- 不绕过 revision 检查，不把提案未经确认直接写入正式规划。
+- 不拆开“规划更新 + 提案状态 + 审计事件”的事务边界。
+- 当前可恢复点为本分支最终发布提交及对应草稿 PR。

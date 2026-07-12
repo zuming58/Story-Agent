@@ -1,53 +1,22 @@
-# Design QA — Story Agent UI v1
+# Design QA
 
-- Source visual truth: `F:\Codex\story\docs\ui\story-planning-selected-v1.png`
-- Implementation screenshot: `F:\Codex\story\apps\web\test-results\planning-1440-final.png`
-- Responsive screenshot: `F:\Codex\story\apps\web\test-results\planning-1280-final.png`
-- Combined comparison: `F:\Codex\story\apps\web\test-results\design-qa-comparison-final.png`
-- Viewports: 1440 × 1024 and 1280 × 800
-- State: story planning page, dark theme, selected “首次直面纸人”, pending AI change proposal
+检查日期：2026-07-12
 
-## Findings
+## 结论
 
-No actionable P0/P1/P2 differences remain.
+“墨曜指挥舱”视觉基线在本地数据接入后保持一致。中央规划区、固定右侧 Agent、作品总览和对话提案均沿用深色墨蓝、金色层级与靛蓝 AI 状态语言，没有退化为普通后台模板。
 
-- Fonts and typography: bundled Noto Sans SC Variable and Noto Serif SC reproduce the source hierarchy; display titles, compact labels and table text remain legible at both target viewports.
-- Spacing and layout rhythm: the sidebar, top status bar, central planning canvas, fixed status footer and 374px AI panel preserve the source three-column composition. At 1280px the central route remains scrollable without horizontal overflow.
-- Colors and tokens: midnight navy surfaces, warm-gold selection, indigo AI accents and green/amber/red semantic states match the selected direction and meet the intended hierarchy.
-- Image quality and asset fidelity: the compass identity and user portrait are project-local raster assets generated for the selected art direction; all UI icons come from one Phosphor icon family. No placeholder, emoji, handcrafted SVG or CSS illustration substitutes remain.
-- Copy and content: visible Chinese planning, contract, foreshadow and AI-impact content is coherent and matches the product scenario.
-- Accessibility and interaction: semantic navigation, headings, regions, labels, focus rings and reduced-motion handling are present. The AI panel stays available on every route and can be collapsed.
+## 已验证
 
-## Intentional Differences
+- 1440×1024：作品创建、规划编辑、AI 提案、接受和撤销均可操作。
+- 1280×800：同一核心路径无横向遮挡，右侧 Agent 不覆盖中央按钮。
+- 作品总览页头被 Agent 面板遮挡的问题已通过受约束网格修复。
+- 规划页横向内容越过中央工作区的问题已通过 workspace/viewport 宽度约束修复。
+- Agent 展开状态、宽度和当前作品选择仅作为 UI 偏好保留；业务数据来自后端。
+- Playwright 在两档分辨率共 4 条核心路径全部通过。
 
-- The source mock displays chapter 22 as if already applied. The implementation intentionally begins at chapter 18 and renders chapter 22 as a pending proposal, so the accept/reject/undo workflow can be demonstrated without silently changing author data.
-- The implementation expands the source’s single summary diff into three selectable field operations, satisfying the reviewed-change requirement while retaining the same visual hierarchy.
+## 后续视觉任务
 
-## Comparison History
-
-### Iteration 1
-
-- [P2] Sidebar navigation rendered with browser-default purple underlines because the router callback was serialized into the `class` attribute.
-- Fix: replaced callback class resolution with explicit pathname matching while keeping semantic links.
-- Post-fix evidence: `planning-1440-final.png` and `design-qa-comparison-final.png` show gray inactive navigation and warm-gold selected navigation with no underlines.
-
-### Iteration 2
-
-- [P2] AI composer was materially shorter than the source and left excessive unused vertical space.
-- Fix: increased the composer’s default writing area while retaining a fixed lower control position.
-- Post-fix evidence: `planning-1440-final.png` shows a source-proportional composer and unchanged access to proposal actions.
-
-## Browser Verification
-
-- Primary interactions tested: module navigation, AI proposal acceptance, undo, invalid direct edit, valid direct edit, reload persistence, panel availability.
-- 1440 × 1024: body and route horizontal overflow both absent; AI panel width 374px.
-- 1280 × 800: body and route horizontal overflow both absent; AI panel width 374px; sidebar reduces to 94px.
-- Browser console errors and warnings checked: none.
-- Automated checks: production build passed; 5 unit tests passed; 4 Playwright tests passed across both target viewports.
-
-## Follow-up Polish
-
-- [P3] Fine-tune small-text optical weight after testing on the final Windows WebView2 renderer.
-- [P3] Add hover tooltips to dense timeline markers when the backend supplies stable marker identifiers.
-
-final result: passed
+- 接入真实流式模型后检查长消息、代码块与失败重试状态。
+- 增加备份恢复管理界面和审计时间线的高保真页面。
+- Windows WebView2 封装阶段复核字体渲染、系统缩放 125%/150% 和窗口最小尺寸。

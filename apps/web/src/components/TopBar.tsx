@@ -1,5 +1,4 @@
 import { CaretDown, Clock, GearSix, NotePencil } from "@phosphor-icons/react";
-import { useStoryStore } from "../store/useStoryStore";
 import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 
 export function TopBar() {

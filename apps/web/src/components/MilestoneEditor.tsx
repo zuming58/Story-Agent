@@ -1,7 +1,6 @@
 import { CaretUp, FloppyDisk, PencilSimple, Star, Trash, Warning } from "@phosphor-icons/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { validateMilestones } from "../domain/planning";
-import { useStoryStore } from "../store/useStoryStore";
 import type { PlanNode } from "../types";
 import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 

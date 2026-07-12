@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings
 
+_alembic_lock = threading.RLock()
+
 
 def sqlite_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
@@ -39,14 +41,17 @@ def make_engine(path: Path) -> Engine:
 
 
 def run_migrations(path: Path, scope: str, *, backup: bool = False) -> None:
-    if backup and path.exists() and path.stat().st_size:
-        backup_path = path.with_suffix(f".{scope}-migration.bak")
-        shutil.copy2(path, backup_path)
-    config_path = Path(__file__).resolve().parents[2] / "alembic.ini"
-    config = Config(str(config_path))
-    config.set_main_option("script_location", str(config_path.parent / "migrations" / scope))
-    config.set_main_option("sqlalchemy.url", sqlite_url(path))
-    command.upgrade(config, "head")
+    # Alembic's EnvironmentContext uses module-level proxies and is not safe to
+    # run concurrently, even when separate SQLite files are being migrated.
+    with _alembic_lock:
+        if backup and path.exists() and path.stat().st_size:
+            backup_path = path.with_suffix(f".{scope}-migration.bak")
+            shutil.copy2(path, backup_path)
+        config_path = Path(__file__).resolve().parents[2] / "alembic.ini"
+        config = Config(str(config_path))
+        config.set_main_option("script_location", str(config_path.parent / "migrations" / scope))
+        config.set_main_option("sqlalchemy.url", sqlite_url(path))
+        command.upgrade(config, "head")
 
 
 class DatabaseManager:
@@ -73,9 +78,11 @@ class DatabaseManager:
         return Path(folder_path).resolve() / "story.db"
 
     def ensure_project_database(self, project_id: str, folder_path: str | Path) -> None:
-        path = self.project_db_path(folder_path)
-        run_migrations(path, "project", backup=path.exists())
-        if project_id not in self._project_engines:
+        with self._locks[project_id]:
+            if project_id in self._project_engines:
+                return
+            path = self.project_db_path(folder_path)
+            run_migrations(path, "project", backup=path.exists())
             engine = make_engine(path)
             self._project_engines[project_id] = engine
             self._project_factories[project_id] = sessionmaker(engine, expire_on_commit=False)

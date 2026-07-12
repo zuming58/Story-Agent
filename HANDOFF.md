@@ -6,6 +6,8 @@
 第四阶段基线：`90a4d3e`
 第四阶段审计提交：`65ed46f`
 第四阶段合并提交／第五阶段基线：`565d7b3`
+第五阶段初始交接提交：`35834f7`
+第五阶段草稿 PR：https://github.com/zuming58/Story-Agent/pull/4
 第四阶段完整计划：`docs/plans/PHASE-4-CANON-MEMORY.md`
 第五阶段完整计划：`docs/plans/PHASE-5-CHAPTER-PIPELINE.md`
 UI 所有权：仅当前 GPT-5.6 电脑允许修改 `apps/web/**`、样式、设计令牌和视觉基线

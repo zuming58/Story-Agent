@@ -339,6 +339,11 @@ class Phase5Service:
             self._validate_extraction(project, extraction["id"])
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 job = self._get_job(session, project.id, job_id)
+                job.status = "reviewing"
+                job.updated_at = _now()
+            self._run_quality_pipeline(project, job_id, draft["id"], request_id)
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                job = self._get_job(session, project.id, job_id)
                 job.status = "human_review"
                 job.updated_at = _now()
                 session.add(self.service._audit("chapter_job.draft_ready", "chapter_job", job.id, {"draftId": draft["id"], "requestId": request_id}, request_id))
@@ -413,13 +418,77 @@ class Phase5Service:
             job = self._get_job(session, project.id, job_id)
             current = self._current_draft(session, job.id)
             findings = session.scalars(select(QualityFinding).where(QualityFinding.project_id == project.id, QualityFinding.chapter_draft_id == current.id).order_by(QualityFinding.created_at.asc())).all() if current else []
-            return {"jobId": job.id, "currentDraftId": current.id if current else None, "openBlockingCount": self._open_blocking_count(findings), "runs": [], "findings": [self._finding_dict(item) for item in findings]}
+            runs = session.scalars(select(QualityRun).where(QualityRun.project_id == project.id, QualityRun.chapter_job_id == job.id).order_by(QualityRun.created_at.asc())).all()
+            run_payloads = []
+            for run in runs:
+                run_findings = [item for item in findings if item.quality_run_id == run.id]
+                run_payloads.append(self._quality_run_dict(run, run_findings))
+            return {"jobId": job.id, "currentDraftId": current.id if current else None, "openBlockingCount": self._open_blocking_count(findings), "runs": run_payloads, "findings": [self._finding_dict(item) for item in findings]}
 
     def accept_quality_risk(self, project_id: str, finding_id: str, payload: QualityFindingAcceptRisk, request_id: str) -> dict[str, Any]:
-        raise StoryError(501, "PHASE5_QUALITY_NOT_IMPLEMENTED", "Quality risk acceptance is implemented in the quality work package.")
+        project = self.service.get_project(project_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            finding = session.get(QualityFinding, finding_id)
+            if not finding or finding.project_id != project.id:
+                raise StoryError(404, "QUALITY_FINDING_NOT_FOUND", "Quality finding not found.")
+            finding.status = "accepted_risk"
+            finding.accepted_reason = payload.reason
+            finding.updated_at = _now()
+            session.add(self.service._audit("quality_finding.accepted_risk", "quality_finding", finding.id, {"reason": payload.reason, "requestId": request_id}, request_id))
+            return self._finding_dict(finding)
 
     def revise_chapter_job(self, project_id: str, job_id: str, payload: ChapterRevisionRequest, request_id: str) -> dict[str, Any]:
-        raise StoryError(501, "PHASE5_REVISION_NOT_IMPLEMENTED", "Revision is implemented in the quality work package.")
+        project = self.service.get_project(project_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            if job.current_revision_round >= MAX_REVISION_ROUNDS:
+                raise StoryError(409, "CHAPTER_REVISION_LIMIT_REACHED", "Chapter revision limit reached.")
+            draft = self._current_draft(session, job.id)
+            if not draft:
+                raise StoryError(409, "CHAPTER_DRAFT_EMPTY", "No chapter draft exists for revision.")
+            findings = session.scalars(select(QualityFinding).where(
+                QualityFinding.project_id == project.id,
+                QualityFinding.chapter_draft_id == draft.id,
+                QualityFinding.status == "open",
+            )).all()
+            if not findings:
+                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "No open findings require revision.")
+            job.status = "revising"
+            job.current_revision_round += 1
+            job.revision += 1
+            job.updated_at = _now()
+            for finding in findings:
+                finding.status = "superseded"
+                finding.updated_at = _now()
+            contract = self._get_contract(session, project.id, job.chapter_contract_id)
+            contract_data = self._contract_dict(contract)
+            draft_data = self._draft_dict(draft)
+            finding_data = [self._finding_dict(item) for item in findings]
+
+        revised_text, run_id = self._complete_role_text(
+            project,
+            "reviser",
+            request_id,
+            self._revision_messages(contract_data, draft_data, finding_data, payload.reason),
+            response_json=True,
+        )
+        try:
+            data = _json_object_from_text(revised_text)
+            content = str(data.get("contentMarkdown") or data.get("content_markdown") or "").strip()
+        except (ValueError, json.JSONDecodeError):
+            content = revised_text.strip()
+        revised = self._store_draft(project.id, project.folder_path, job_id, contract_data["id"], content, run_id, draft_data.get("contextTraceId"), "revised", parent_id=draft_data["id"])
+        extraction = self._extract_for_draft(project, revised["id"], request_id)
+        self._validate_extraction(project, extraction["id"])
+        self._run_quality_pipeline(project, job_id, revised["id"], request_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            current = self._current_draft(session, job.id)
+            open_blocking = self._open_blocking_count(session.scalars(select(QualityFinding).where(QualityFinding.chapter_draft_id == current.id)).all()) if current else 0
+            job.status = "human_review" if open_blocking or job.current_revision_round >= MAX_REVISION_ROUNDS else "human_review"
+            job.updated_at = _now()
+            session.add(self.service._audit("chapter_job.revised", "chapter_job", job.id, {"draftId": revised["id"], "revisionRound": job.current_revision_round, "requestId": request_id}, request_id))
+            return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
 
     def approve_chapter_job(self, project_id: str, job_id: str, payload: ChapterApproveRequest, request_id: str) -> dict[str, Any]:
         raise StoryError(501, "PHASE5_APPROVAL_NOT_IMPLEMENTED", "Approval is implemented in the commit work package.")
@@ -616,6 +685,199 @@ class Phase5Service:
             "boundaries": data.get("boundaries") if isinstance(data.get("boundaries"), list) else [],
         }
 
+    def _run_quality_pipeline(self, project: Any, job_id: str, draft_id: str, request_id: str) -> None:
+        self._run_deterministic_quality(project, job_id, draft_id, request_id)
+        for role in ("continuity_reviewer", "story_editor", "style_reviewer"):
+            try:
+                self._run_model_quality(project, job_id, draft_id, role, request_id)
+            except StoryError as exc:
+                if exc.code != "CHAPTER_MODEL_ROLE_NOT_CONFIGURED":
+                    raise
+                self._record_missing_reviewer(project, job_id, draft_id, role, request_id)
+
+    def _run_deterministic_quality(self, project: Any, job_id: str, draft_id: str, request_id: str) -> None:
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            draft = self._get_draft(session, project.id, draft_id)
+            contract = self._get_contract(session, project.id, draft.chapter_contract_id)
+            extraction = session.scalar(select(ChapterExtraction).where(ChapterExtraction.chapter_draft_id == draft_id).order_by(ChapterExtraction.created_at.desc()))
+            now = _now()
+            run = QualityRun(
+                id=str(uuid4()),
+                project_id=project.id,
+                chapter_job_id=job_id,
+                chapter_draft_id=draft_id,
+                gate_type="deterministic",
+                reviewer_role=None,
+                status="succeeded",
+                summary_json="{}",
+                created_at=now,
+                completed_at=now,
+            )
+            session.add(run)
+            findings: list[dict[str, Any]] = []
+            content = draft.content_markdown.strip()
+            if not content:
+                findings.append(self._finding_payload("CHAPTER_DRAFT_EMPTY", "blocker", "mechanical", "Chapter draft is empty.", [], {}, "Generate a non-empty chapter body."))
+            if re.search(r"TODO|待补|\[[^\]]*(?:xxx|TODO)[^\]]*\]", content, flags=re.I):
+                findings.append(self._finding_payload("PLACEHOLDER_TEXT", "error", "mechanical", "Draft contains placeholder text.", [], {}, "Remove placeholders and complete the scene."))
+            if draft.word_count < contract.target_words_min:
+                findings.append(self._finding_payload("WORD_COUNT_UNDER_TARGET", "warning", "pace", "Draft is shorter than the contract target.", [{"wordCount": draft.word_count, "target": contract.target_words_min}], {}, "Expand required scene beats."))
+            if draft.word_count > contract.target_words_max:
+                findings.append(self._finding_payload("WORD_COUNT_OVER_TARGET", "warning", "pace", "Draft is longer than the contract target.", [{"wordCount": draft.word_count, "target": contract.target_words_max}], {}, "Tighten pacing."))
+            lowered = content.lower()
+            forbidden = _safe_loads(contract.forbidden_scope_json, {})
+            for keyword in forbidden.get("futureKeywords", []) if isinstance(forbidden, dict) else []:
+                if isinstance(keyword, str) and keyword and keyword.lower() in lowered:
+                    findings.append(self._finding_payload("SCOPE_FUTURE_NODE_CONSUMED", "blocker", "scope", "Draft appears to consume a future plan node.", [keyword], {}, "Remove future-node payoff from this chapter."))
+            for condition in _safe_loads(contract.completion_conditions_json, []):
+                if isinstance(condition, str) and condition.strip() and condition.strip().lower() not in lowered:
+                    findings.append(self._finding_payload("REQUIRED_CONDITION_MISSING", "error", "contract", "A required completion condition is not evident in the draft.", [condition], {}, "Add clear evidence for this completion condition."))
+            if not extraction or extraction.status != "validated":
+                findings.append(self._finding_payload("CHAPTER_EXTRACTION_INVALID", "blocker", "state", "Validated extraction is missing.", [], {}, "Run fact extraction and validation."))
+            elif not _safe_loads(extraction.payload_json, {}).get("events"):
+                findings.append(self._finding_payload("CHAPTER_EXTRACTION_EMPTY_EVENTS", "error", "state", "Extraction does not include any story events.", [], {}, "Extract at least one event from the chapter."))
+            for payload in findings:
+                self._add_finding(session, project.id, run.id, draft_id, payload, now)
+            run.summary_json = dumps({"findingCount": len(findings), "blockingCount": sum(1 for item in findings if item["severity"] in BLOCKING_SEVERITIES)})
+
+    def _run_model_quality(self, project: Any, job_id: str, draft_id: str, role: str, request_id: str) -> None:
+        with self.service.db.project(project.id, project.folder_path) as session:
+            draft = self._get_draft(session, project.id, draft_id)
+            contract = self._get_contract(session, project.id, draft.chapter_contract_id)
+            prompt = {
+                "role": role,
+                "chapterContract": self._contract_dict(contract),
+                "chapterDraft": self._draft_dict(draft),
+                "requiredOutput": {"findings": [{"ruleCode": "string", "severity": "info|warning|error|blocker", "category": "string", "message": "string", "evidence": [], "location": {}, "suggestedFix": "string"}]},
+            }
+        text, run_id = self._complete_role_text(
+            project,
+            role,
+            request_id,
+            [
+                {"role": "system", "content": "Review the chapter for Story Agent. Return JSON object only. Do not rewrite the chapter. Do not downgrade deterministic blockers."},
+                {"role": "user", "content": dumps(prompt)},
+            ],
+            response_json=True,
+        )
+        try:
+            data = _json_object_from_text(text)
+            raw_findings = data.get("findings", [])
+            if not isinstance(raw_findings, list):
+                raw_findings = []
+        except (ValueError, json.JSONDecodeError):
+            raw_findings = [self._finding_payload("MODEL_REVIEW_INVALID_JSON", "error", "review", f"{role} returned invalid JSON.", [], {}, "Retry model review or inspect role output.")]
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            now = _now()
+            run = QualityRun(
+                id=str(uuid4()),
+                project_id=project.id,
+                chapter_job_id=job_id,
+                chapter_draft_id=draft_id,
+                gate_type="model",
+                reviewer_role=role,
+                model_run_id=run_id,
+                status="succeeded",
+                summary_json="{}",
+                created_at=now,
+                completed_at=now,
+            )
+            session.add(run)
+            count = 0
+            blocking = 0
+            for item in raw_findings:
+                if not isinstance(item, dict):
+                    continue
+                payload = self._coerce_model_finding(item)
+                self._add_finding(session, project.id, run.id, draft_id, payload, now)
+                count += 1
+                if payload["severity"] in BLOCKING_SEVERITIES:
+                    blocking += 1
+            run.summary_json = dumps({"findingCount": count, "blockingCount": blocking})
+
+    def _record_missing_reviewer(self, project: Any, job_id: str, draft_id: str, role: str, request_id: str) -> None:
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            now = _now()
+            run = QualityRun(
+                id=str(uuid4()),
+                project_id=project.id,
+                chapter_job_id=job_id,
+                chapter_draft_id=draft_id,
+                gate_type="model",
+                reviewer_role=role,
+                model_run_id=None,
+                status="failed",
+                summary_json=dumps({"errorCode": "CHAPTER_MODEL_ROLE_NOT_CONFIGURED"}),
+                created_at=now,
+                completed_at=now,
+            )
+            session.add(run)
+            self._add_finding(session, project.id, run.id, draft_id, self._finding_payload(
+                "CHAPTER_MODEL_ROLE_NOT_CONFIGURED",
+                "error",
+                "review",
+                f"Required reviewer role is not configured: {role}.",
+                [{"role": role}],
+                {},
+                "Bind a model for this reviewer role or accept the risk manually.",
+            ), now)
+            session.add(self.service._audit("quality.reviewer_missing", "chapter_job", job_id, {"role": role, "requestId": request_id}, request_id))
+
+    def _finding_payload(self, rule_code: str, severity: str, category: str, message: str, evidence: list[Any], location: dict[str, Any], suggested_fix: str) -> dict[str, Any]:
+        return {
+            "ruleCode": rule_code,
+            "severity": severity,
+            "category": category,
+            "message": message,
+            "evidence": evidence,
+            "location": location,
+            "suggestedFix": suggested_fix,
+        }
+
+    def _coerce_model_finding(self, item: dict[str, Any]) -> dict[str, Any]:
+        severity = str(item.get("severity") or "warning")
+        if severity not in {"info", "warning", "error", "blocker"}:
+            severity = "warning"
+        return self._finding_payload(
+            str(item.get("ruleCode") or item.get("rule_code") or "MODEL_REVIEW_FINDING")[:120],
+            severity,
+            str(item.get("category") or "review")[:80],
+            str(item.get("message") or "Model reviewer reported an issue."),
+            item.get("evidence") if isinstance(item.get("evidence"), list) else [],
+            item.get("location") if isinstance(item.get("location"), dict) else {},
+            str(item.get("suggestedFix") or item.get("suggested_fix") or ""),
+        )
+
+    def _add_finding(self, session: Session, project_id: str, run_id: str, draft_id: str, payload: dict[str, Any], now: datetime) -> None:
+        fingerprint = stable_digest({
+            "draftId": draft_id,
+            "ruleCode": payload["ruleCode"],
+            "evidence": payload["evidence"],
+            "location": payload["location"],
+        })
+        existing = session.scalar(select(QualityFinding).where(QualityFinding.chapter_draft_id == draft_id, QualityFinding.fingerprint == fingerprint))
+        if existing:
+            existing.quality_run_id = run_id
+            existing.updated_at = now
+            return
+        session.add(QualityFinding(
+            id=str(uuid4()),
+            project_id=project_id,
+            quality_run_id=run_id,
+            chapter_draft_id=draft_id,
+            rule_code=payload["ruleCode"],
+            severity=payload["severity"],
+            category=payload["category"],
+            message=payload["message"],
+            evidence_json=dumps(payload["evidence"]),
+            location_json=dumps(payload["location"]),
+            suggested_fix=payload["suggestedFix"],
+            fingerprint=fingerprint,
+            status="open",
+            created_at=now,
+            updated_at=now,
+        ))
+
     # ------------------------------------------------------------------
     # Dict and lookup helpers
     # ------------------------------------------------------------------
@@ -692,6 +954,18 @@ class Phase5Service:
         return [
             {"role": "system", "content": "You are the chinese_writer for Story Agent. Write only the current chapter body in Chinese markdown. Do not output state JSON. Do not summarize future chapters."},
             {"role": "user", "content": dumps({"chapterContract": contract, "contextPackage": context, "authorNote": author_note})},
+        ]
+
+    def _revision_messages(self, contract: dict[str, Any], draft: dict[str, Any], findings: list[dict[str, Any]], reason: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": "You are the reviser for Story Agent. Return JSON object only with contentMarkdown. Revise only the current chapter body and do not change story state directly."},
+            {"role": "user", "content": dumps({
+                "chapterContract": contract,
+                "currentDraft": draft,
+                "openFindings": findings,
+                "reason": reason,
+                "requiredOutput": {"contentMarkdown": "revised full chapter markdown"},
+            })},
         ]
 
     def _open_blocking_count(self, findings: list[QualityFinding]) -> int:
@@ -798,4 +1072,20 @@ class Phase5Service:
             "acceptedReason": item.accepted_reason,
             "createdAt": item.created_at,
             "updatedAt": item.updated_at,
+        }
+
+    def _quality_run_dict(self, item: QualityRun, findings: list[QualityFinding]) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "projectId": item.project_id,
+            "chapterJobId": item.chapter_job_id,
+            "chapterDraftId": item.chapter_draft_id,
+            "gateType": item.gate_type,
+            "reviewerRole": item.reviewer_role,
+            "modelRunId": item.model_run_id,
+            "status": item.status,
+            "summary": _safe_loads(item.summary_json, {}),
+            "createdAt": item.created_at,
+            "completedAt": item.completed_at,
+            "findings": [self._finding_dict(finding) for finding in findings],
         }

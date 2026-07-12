@@ -24,19 +24,28 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         wants_json = request.get("response_format", {}).get("type") == "json_object"
-        content = json.dumps({
-            "summary": "Lin Mo enters the old house.",
-            "entities": [{
-                "entityTypeName": "person",
-                "canonicalName": "Lin Mo",
-                "aliases": ["LM"],
-                "attributes": {"name": "Lin Mo"},
-            }],
-            "facts": [{"entity": "Lin Mo", "fieldPath": "location", "value": "old house", "confidence": 0.9}],
-            "events": [{"eventOrder": 1, "summary": "Lin Mo enters the old house.", "participants": ["Lin Mo"]}],
-            "foreshadows": [],
-            "boundaries": [{"entity": "Lin Mo", "knowledge": {"knows": ["old house"]}}],
-        }) if wants_json else "Lin Mo pushed open the old house door.\n\nA cold clue waited under the lamp."
+        messages = request.get("messages", [])
+        joined = "\n".join(str(item.get("content", "")) for item in messages if isinstance(item, dict))
+        if wants_json and "contentMarkdown" in joined:
+            content = json.dumps({"contentMarkdown": "Lin Mo pushed open the old house door. The required condition is now visible."})
+        elif wants_json and "requiredOutput" in joined:
+            content = json.dumps({"findings": []})
+        elif wants_json:
+            content = json.dumps({
+                "summary": "Lin Mo enters the old house.",
+                "entities": [{
+                    "entityTypeName": "person",
+                    "canonicalName": "Lin Mo",
+                    "aliases": ["LM"],
+                    "attributes": {"name": "Lin Mo"},
+                }],
+                "facts": [{"entity": "Lin Mo", "fieldPath": "location", "value": "old house", "confidence": 0.9}],
+                "events": [{"eventOrder": 1, "summary": "Lin Mo enters the old house.", "participants": ["Lin Mo"]}],
+                "foreshadows": [],
+                "boundaries": [{"entity": "Lin Mo", "knowledge": {"knows": ["old house"]}}],
+            })
+        else:
+            content = "Lin Mo pushed open the old house door.\n\nA cold clue waited under the lamp."
         response = json.dumps({
             "model": "phase5-fake-model",
             "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
@@ -64,7 +73,7 @@ def start_phase5_server() -> tuple[ThreadingHTTPServer, str]:
     return server, f"http://{host}:{port}"
 
 
-def configure_phase5_roles(client: TestClient, base_url: str) -> None:
+def configure_phase5_roles(client: TestClient, base_url: str, *, reviewers: bool = False, reviser: bool = False) -> None:
     provider = client.post("/api/v1/model-providers", json={
         "name": "Phase 5 Fake",
         "baseUrl": base_url,
@@ -76,7 +85,12 @@ def configure_phase5_roles(client: TestClient, base_url: str) -> None:
         "modelId": "phase5-fake-model",
         "displayName": "Phase 5 Fake",
     }).json()
-    for role in ("chinese_writer", "fact_extractor"):
+    roles = ["chinese_writer", "fact_extractor"]
+    if reviewers:
+        roles.extend(["continuity_reviewer", "story_editor", "style_reviewer"])
+    if reviser:
+        roles.append("reviser")
+    for role in roles:
         response = client.put(f"/api/v1/model-role-bindings/{role}", json={"modelId": model["id"]})
         assert response.status_code == 200, response.text
 
@@ -147,8 +161,53 @@ def test_chapter_job_idempotency_and_candidate_pipeline_do_not_commit_state(clie
         detail = client.get(f"/api/v1/projects/{project_id}/chapter-drafts/{drafts[0]['id']}").json()
         assert detail["extraction"]["status"] == "validated"
         assert client.get(f"/api/v1/projects/{project_id}/state/entities").json() == []
+        quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{first.json()['id']}/quality").json()
+        assert any(item["ruleCode"] == "CHAPTER_MODEL_ROLE_NOT_CONFIGURED" for item in quality["findings"])
         runs = client.get(f"/api/v1/projects/{project_id}/model-runs").json()
-        assert {item["role"] for item in runs[:2]} == {"chinese_writer", "fact_extractor"}
+        assert {"chinese_writer", "fact_extractor"}.issubset({item["role"] for item in runs})
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_quality_accept_risk_and_revision_creates_new_draft(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviser=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        assert client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={}).status_code == 200
+        quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        finding = next(item for item in quality["findings"] if item["ruleCode"] == "CHAPTER_MODEL_ROLE_NOT_CONFIGURED")
+        accepted = client.post(f"/api/v1/projects/{project_id}/quality-findings/{finding['id']}/accept-risk", json={"reason": "unit test accepts missing reviewer"})
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["status"] == "accepted_risk"
+
+        revised = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/revise", json={"reason": "address accepted and open issues"})
+        assert revised.status_code == 200, revised.text
+        drafts = client.get(f"/api/v1/projects/{project_id}/chapters/1/drafts").json()
+        assert len(drafts) == 2
+        assert drafts[0]["parentDraftId"] == drafts[1]["id"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_configured_reviewers_do_not_create_missing_role_findings(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        assert client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={}).status_code == 200
+        quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        assert all(item["ruleCode"] != "CHAPTER_MODEL_ROLE_NOT_CONFIGURED" for item in quality["findings"])
+        reviewer_runs = [item for item in quality["runs"] if item["gateType"] == "model"]
+        assert {item["reviewerRole"] for item in reviewer_runs} == {"continuity_reviewer", "story_editor", "style_reviewer"}
     finally:
         server.shutdown()
         server.server_close()

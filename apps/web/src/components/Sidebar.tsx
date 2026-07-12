@@ -7,6 +7,7 @@ import {
   House,
   PenNib,
   Question,
+  SlidersHorizontal,
   ShareNetwork,
   ShieldCheck,
 } from "@phosphor-icons/react";
@@ -21,6 +22,7 @@ const navigation = [
   { to: "/quality", label: "质量中心", icon: ShieldCheck },
   { to: "/state", label: "故事状态", icon: ChartBar },
   { to: "/automation", label: "自动托管", icon: CloudArrowUp },
+  { to: "/settings", label: "模型设置", icon: SlidersHorizontal },
   { to: "/drama", label: "短剧制作", icon: FilmStrip },
 ];
 

@@ -80,27 +80,109 @@ export interface AgentSession {
   scope: string[];
   messages: AgentMessage[];
   status: "idle" | "thinking" | "error";
+  activeRunId?: string | null;
 }
 
 export interface AgentResponse {
   message: AgentMessage;
   proposal?: ChangeProposal;
+  runId?: string | null;
 }
 
-export type EditablePlanField = "targetChapter" | "rangeMin" | "rangeMax";
+export type AgentAction = "chat" | "replan" | "logic_check" | "complete_dependencies";
+
+export interface StreamRunStarted {
+  event: "run_started";
+  runId: string;
+  provider: string;
+  model: string;
+  requestId: string;
+}
+
+export interface StreamTextDelta {
+  event: "text_delta";
+  runId: string;
+  delta: string;
+}
+
+export interface StreamCompleted {
+  event: "completed";
+  runId: string;
+  message: AgentMessage;
+  usage?: { promptTokens?: number | null; completionTokens?: number | null; totalTokens?: number | null };
+}
+
+export interface StreamProposalStarted {
+  event: "proposal_started";
+  runId: string;
+  provider: string;
+  model: string;
+  requestId: string;
+}
+
+export interface StreamProposalCompleted {
+  event: "proposal_completed";
+  runId: string;
+  proposal: ChangeProposal;
+  attempts: number;
+}
+
+export interface StreamProposalFailed {
+  event: "proposal_failed";
+  runId?: string | null;
+  errorCode: string;
+  message: string;
+  attempts: number;
+}
+
+export interface StreamProposalSkipped {
+  event: "proposal_skipped";
+  runId: string;
+  reasonCode: string;
+  message: string;
+  attempts: number;
+}
+
+export interface StreamFailed {
+  event: "failed";
+  runId?: string;
+  errorCode: string;
+  message: string;
+  requestId?: string;
+}
+
+export interface StreamCancelled {
+  event: "cancelled";
+  runId: string;
+  message: string;
+}
+
+export type AgentStreamEvent =
+  | StreamRunStarted
+  | StreamTextDelta
+  | StreamCompleted
+  | StreamProposalStarted
+  | StreamProposalCompleted
+  | StreamProposalSkipped
+  | StreamProposalFailed
+  | StreamFailed
+  | StreamCancelled;
+
+export type EditablePlanField = "targetChapter" | "rangeMin" | "rangeMax" | "prerequisites" | "completionConditions" | "foreshadows" | "contracts" | "note" | "pace";
+export type ProposalValue = number | string | string[];
 
 export interface ChangeOperation {
   id: string;
   field: EditablePlanField;
   label: string;
-  before: number;
-  after: number;
+  before: ProposalValue;
+  after: ProposalValue;
   selected: boolean;
 }
 
 export interface ImpactItem {
   id: string;
-  kind: "contract" | "foreshadow" | "dependency";
+  kind: "contract" | "foreshadow" | "dependency" | "pace" | "chapter_window";
   label: string;
 }
 
@@ -132,6 +214,87 @@ export interface BackupManifest {
   createdAt: string;
   files: Record<string, string>;
   archivePath: string;
+}
+
+export interface BackupRecord extends BackupManifest {
+  sizeBytes: number;
+  isValid: boolean;
+}
+
+export interface ModelProvider {
+  id: string;
+  name: string;
+  providerType: "openai-compatible";
+  baseUrl: string;
+  timeoutSeconds: number;
+  maxRetries: number;
+  isEnabled: boolean;
+  hasApiKey: boolean;
+  apiKeyPreview?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelConfig {
+  id: string;
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  displayName: string;
+  temperature: number;
+  maxOutputTokens: number;
+  supportsReasoning: boolean;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ModelRole =
+  | "architect"
+  | "planner"
+  | "chinese_writer"
+  | "fact_extractor"
+  | "logic_reviewer"
+  | "style_reviewer"
+  | "reviser"
+  | "embedding";
+
+export interface ModelRoleBinding {
+  role: ModelRole;
+  modelId: string | null;
+  model: ModelConfig | null;
+  dailyCostLimit: number | null;
+  updatedAt: string;
+}
+
+export interface ModelRun {
+  id: string;
+  sessionId: string | null;
+  role: string;
+  providerId: string | null;
+  providerName: string;
+  modelConfigId: string | null;
+  modelId: string;
+  status: string;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  durationMs: number | null;
+  errorCode: string | null;
+  diagnostic?: Record<string, unknown> | null;
+  requestId: string;
+  retryCount: number;
+  startedAt: string;
+  endedAt: string | null;
+}
+
+export interface ProviderConnectionTest {
+  ok: boolean;
+  status: "success" | "missing_api_key" | "auth_failed" | "timeout" | "network_error" | "invalid_response" | "credential_unavailable";
+  providerId: string;
+  providerName: string;
+  model?: string | null;
+  message: string;
 }
 
 export interface ApiErrorShape {

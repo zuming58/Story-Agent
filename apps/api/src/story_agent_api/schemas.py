@@ -103,6 +103,7 @@ class AgentSessionOut(ApiModel):
     scope: list[str]
     status: str
     messages: list[AgentMessageOut]
+    active_run_id: str | None = None
 
 
 class AgentSessionCreate(ApiModel):
@@ -113,14 +114,15 @@ class AgentMessageCreate(ApiModel):
     project_id: str
     content: str = Field(min_length=1, max_length=5000)
     selected_node_id: str | None = None
+    action: Literal["chat", "replan", "logic_check", "complete_dependencies"] = "chat"
 
 
 class ChangeOperationOut(ApiModel):
     id: str
     field: str
     label: str
-    before: int
-    after: int
+    before: int | str | list[str]
+    after: int | str | list[str]
     selected: bool
 
 
@@ -144,6 +146,28 @@ class ChangeProposalOut(ApiModel):
 class AgentResponse(ApiModel):
     message: AgentMessageOut
     proposal: ChangeProposalOut | None = None
+    run_id: str | None = None
+
+
+class ModelRunOut(ApiModel):
+    id: str
+    session_id: str | None
+    role: str
+    provider_id: str | None
+    provider_name: str
+    model_config_id: str | None
+    model_id: str
+    status: str
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    duration_ms: int | None
+    error_code: str | None
+    diagnostic: dict[str, Any] | None = None
+    request_id: str
+    retry_count: int
+    started_at: datetime
+    ended_at: datetime | None
 
 
 class ProposalApply(ApiModel):
@@ -174,6 +198,100 @@ class BackupManifest(ApiModel):
     created_at: datetime
     files: dict[str, str]
     archive_path: str
+
+
+class BackupRecord(BackupManifest):
+    size_bytes: int
+    is_valid: bool
+
+
+class ModelProviderCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=160)
+    provider_type: Literal["openai-compatible"] = "openai-compatible"
+    base_url: str = Field(min_length=1, max_length=1000)
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+    max_retries: int = Field(default=1, ge=0, le=5)
+    is_enabled: bool = True
+    api_key: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
+class ModelProviderUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    provider_type: Literal["openai-compatible"] | None = None
+    base_url: str | None = Field(default=None, min_length=1, max_length=1000)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+    max_retries: int | None = Field(default=None, ge=0, le=5)
+    is_enabled: bool | None = None
+    api_key: str | None = Field(default=None, min_length=1, max_length=4000)
+    clear_api_key: bool = False
+
+
+class ModelConfigCreate(ApiModel):
+    model_id: str = Field(min_length=1, max_length=200)
+    display_name: str = Field(min_length=1, max_length=200)
+    temperature: float = Field(default=0.7, ge=0, le=2)
+    max_output_tokens: int = Field(default=2048, ge=1, le=200000)
+    supports_reasoning: bool = False
+    is_enabled: bool = True
+
+
+class ModelConfigUpdate(ApiModel):
+    model_id: str | None = Field(default=None, min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=200000)
+    supports_reasoning: bool | None = None
+    is_enabled: bool | None = None
+
+
+class ModelProviderOut(ApiModel):
+    id: str
+    name: str
+    provider_type: str
+    base_url: str
+    timeout_seconds: int
+    max_retries: int
+    is_enabled: bool
+    has_api_key: bool
+    api_key_preview: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelConfigOut(ApiModel):
+    id: str
+    provider_id: str
+    provider_name: str
+    model_id: str
+    display_name: str
+    temperature: float
+    max_output_tokens: int
+    supports_reasoning: bool
+    is_enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelRoleBindingOut(ApiModel):
+    role: str
+    model_id: str | None
+    model: ModelConfigOut | None = None
+    daily_cost_limit: float | None
+    updated_at: datetime
+
+
+class ModelRoleBindingUpdate(ApiModel):
+    model_id: str | None = None
+    daily_cost_limit: float | None = Field(default=None, ge=0)
+
+
+class ProviderConnectionTestOut(ApiModel):
+    ok: bool
+    status: Literal["success", "missing_api_key", "auth_failed", "timeout", "network_error", "invalid_response", "credential_unavailable"]
+    provider_id: str
+    provider_name: str
+    model: str | None = None
+    message: str
 
 
 class ApiError(ApiModel):

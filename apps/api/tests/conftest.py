@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from story_agent_api.config import Settings
 from story_agent_api.main import create_app
+from story_agent_api.secrets import MemorySecretStore
 
 
 @pytest.fixture
@@ -16,7 +17,7 @@ def data_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def client(data_dir: Path):
-    app = create_app(Settings(data_dir=data_dir, seed_demo=True))
+    app = create_app(Settings(data_dir=data_dir, seed_demo=True), secret_store=MemorySecretStore())
     with TestClient(app) as test_client:
         yield test_client
 

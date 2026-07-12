@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import hashlib
 import json
 import re
@@ -16,40 +17,85 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from .config import Settings
 from .database import DatabaseManager
 from .model_provider import ModelProviderError, OpenAICompatibleModelProvider
+from .phase4 import Phase4Service
 from .models import (
     AgentMessage,
     AgentSession,
     AuditEvent,
     CatalogProject,
+    CanonChangeRequest,
+    CanonDocument,
+    CanonEntity,
+    CanonEntityType,
+    CanonRelation,
+    CanonRule,
     ChangeOperation,
     ChangeProposal,
+    ContextTrace,
     ModelConfig,
     ModelProvider,
     ModelRoleBinding,
     ModelRun,
     Plan,
     PlanNode,
+    RetrievalIndexState,
+    SourceVersion,
     ProjectMeta,
+    StateDelta,
+    StateFact,
+    StateSnapshot,
+    StoryEvent,
     ProposalImpact,
+    StoryEntity,
     StoryMarker,
+    Foreshadow,
+    KnowledgeBoundary,
     utc_now,
 )
 from .schemas import (
     AgentMessageCreate,
+    CanonAnalyzeRequest,
+    CanonChangeRequestCreate,
+    CanonChangeRequestDecision,
+    CanonChangeRequestOut,
+    CanonDocumentOut,
+    CanonDraftUpdate,
+    CanonEntityOut,
+    CanonEntityTypeOut,
+    CanonLockRequest,
+    CanonRelationOut,
+    CanonRuleOut,
+    ContextCompileRequest,
+    ContextPackageOut,
+    ContextTraceItemOut,
+    ForeshadowOut,
+    KnowledgeBoundaryOut,
     ModelConfigCreate,
     ModelConfigUpdate,
     ModelProviderCreate,
     ModelProviderUpdate,
     ModelRoleBindingUpdate,
+    RetrievalHit,
+    RetrievalQuery,
+    RetrievalStatus,
+    SourceVersionOut,
+    SourceVersionSupersede,
     PlanNodeUpdate,
     ProjectCreate,
     ProjectUpdate,
+    StateCandidateCommit,
+    StateCandidateCreate,
+    StateDeltaOut,
+    StateFactOut,
+    StateSnapshotOut,
+    StoryEntityOut,
+    StoryEventOut,
     ProposalApply,
     ProposalReject,
 )
@@ -65,8 +111,20 @@ class StoryError(Exception):
         self.details = details or {}
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
 def dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=_json_default)
 
 
 def loads(value: str) -> Any:
@@ -84,6 +142,97 @@ def sha256(path: Path) -> str:
 def slugify(title: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", title).strip("-").lower()
     return slug[:60] or "story"
+
+
+def stable_digest(value: Any) -> str:
+    return hashlib.sha256(dumps(value).encode("utf-8")).hexdigest()
+
+
+def token_estimate(text_value: str) -> int:
+    if not text_value:
+        return 0
+    return max(1, (len(text_value) + 3) // 4)
+
+
+def safe_json_loads(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except ValueError:
+        return default
+
+
+def json_schema_subset_valid(schema: Any, value: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        if not isinstance(value, dict):
+            return False
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            return False
+        required = schema.get("required", [])
+        if isinstance(required, list):
+            for name in required:
+                if name not in value:
+                    return False
+        additional_properties = schema.get("additionalProperties", True)
+        if additional_properties is False:
+            allowed = set(properties)
+            if any(key not in allowed for key in value):
+                return False
+        for key, prop_schema in properties.items():
+            if key in value and not json_schema_subset_valid(prop_schema, value[key]):
+                return False
+        return True
+    if schema_type == "array":
+        if not isinstance(value, list):
+            return False
+        items = schema.get("items")
+        return True if items is None else all(json_schema_subset_valid(items, item) for item in value)
+    if schema_type == "string":
+        if not isinstance(value, str):
+            return False
+        enum = schema.get("enum")
+        return True if not enum else value in enum
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "null":
+        return value is None
+    if schema_type is None:
+        return True
+    return False
+
+
+def canon_schema_is_safe(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("type") not in {"object", "array", "string", "integer", "number", "boolean", "null", None}:
+        return False
+    if "pattern" in schema or "format" in schema:
+        return False
+    for key in ("properties", "definitions", "$defs"):
+        value = schema.get(key)
+        if isinstance(value, dict) and any(not canon_schema_is_safe(item) for item in value.values()):
+            return False
+    items = schema.get("items")
+    if items is not None and not canon_schema_is_safe(items):
+        return False
+    return True
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        temp_path = Path(handle.name)
+        handle.write(content)
+    temp_path.replace(path)
 
 
 MODEL_ROLES = [
@@ -151,6 +300,7 @@ class StoryService:
         self.db = DatabaseManager(settings)
         self.secret_store = secret_store or default_secret_store()
         self._cancelled_runs: set[str] = set()
+        self.phase4 = Phase4Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -160,6 +310,7 @@ class StoryService:
         if self.settings.seed_demo and not self.list_projects():
             self.create_project(ProjectCreate(title="夜巡人", mode="long-form", total_chapters=1000), seed_demo=True)
         self._recover_interrupted_model_runs()
+        self.phase4.ensure_existing_projects()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -464,6 +615,7 @@ class StoryService:
                 session.commit()
             self.db.ensure_project_database(project_id, folder)
             self._seed_project_database(catalog, seed_demo=seed_demo)
+            self.phase4.ensure_project_defaults(catalog.id, catalog.folder_path, catalog.title)
             self._write_project_files(catalog)
         except Exception:
             with self.db.catalog() as session:
@@ -974,6 +1126,33 @@ class StoryService:
                     old_meta.total_chapters = source_total
                     for agent_session in session.scalars(select(AgentSession).where(AgentSession.project_id == old_id)):
                         agent_session.project_id = restored.id
+                    # A restored project receives a new catalog/project ID. All
+                    # phase-four rows are scoped by that ID even though each
+                    # project already has its own SQLite file, so remap them in
+                    # the same transaction before exposing the restored work.
+                    for table_name in (
+                        "canon_change_requests",
+                        "source_versions",
+                        "story_entities",
+                        "state_facts",
+                        "story_events",
+                        "state_deltas",
+                        "foreshadows",
+                        "knowledge_boundaries",
+                        "state_snapshots",
+                        "context_traces",
+                    ):
+                        session.execute(text(
+                            f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
+                        ), {"new_id": restored.id, "old_id": old_id})
+                    index_state = session.get(RetrievalIndexState, old_id)
+                    if index_state:
+                        index_state.project_id = restored.id
+                    # Retrieval is derived data. Removing the copied rows and
+                    # rebuilding avoids carrying stale namespace identifiers.
+                    session.execute(text("DELETE FROM retrieval_fts"))
+                    session.execute(text("DELETE FROM retrieval_index_entries"))
+                    self.phase4._rebuild_retrieval_index(session, restored.id, utc_now())
                 with self.db.catalog() as session:
                     catalog = session.get(CatalogProject, restored.id)
                     assert catalog
@@ -1672,3 +1851,64 @@ class StoryService:
 
     def _catalog_model_snapshot(self, model: ModelConfig) -> CatalogModelSnapshot:
         return CatalogModelSnapshot(model)
+
+    # Phase 4 delegation
+    def get_canon(self, project_id: str) -> dict[str, Any]:
+        return self.phase4.get_canon(project_id)
+
+    def update_canon_draft(self, project_id: str, payload: CanonDraftUpdate) -> dict[str, Any]:
+        return self.phase4.update_canon_draft(project_id, payload)
+
+    def analyze_canon(self, project_id: str, payload: CanonAnalyzeRequest, request_id: str) -> dict[str, Any]:
+        return self.phase4.analyze_canon(project_id, payload, request_id)
+
+    def lock_canon(self, project_id: str, payload: CanonLockRequest, request_id: str) -> dict[str, Any]:
+        return self.phase4.lock_canon(project_id, payload, request_id)
+
+    def create_canon_change_request(self, project_id: str, payload: CanonChangeRequestCreate, request_id: str) -> dict[str, Any]:
+        return self.phase4.create_canon_change_request(project_id, payload, request_id)
+
+    def apply_canon_change_request(self, change_request_id: str, payload: CanonChangeRequestDecision, request_id: str) -> dict[str, Any]:
+        return self.phase4.apply_canon_change_request(change_request_id, payload, request_id)
+
+    def reject_canon_change_request(self, change_request_id: str, payload: CanonChangeRequestDecision, request_id: str) -> dict[str, Any]:
+        return self.phase4.reject_canon_change_request(change_request_id, payload, request_id)
+
+    def create_state_candidate(self, project_id: str, payload: StateCandidateCreate, request_id: str) -> dict[str, Any]:
+        return self.phase4.create_state_candidate(project_id, payload, request_id)
+
+    def commit_state_candidate(self, candidate_id: str, payload: StateCandidateCommit, request_id: str) -> dict[str, Any]:
+        return self.phase4.commit_state_candidate(candidate_id, payload, request_id)
+
+    def supersede_source_version(self, source_version_id: str, payload: SourceVersionSupersede, request_id: str) -> dict[str, Any]:
+        return self.phase4.supersede_source_version(source_version_id, payload, request_id)
+
+    def list_state_entities(self, project_id: str) -> list[dict[str, Any]]:
+        return self.phase4.list_state_entities(project_id)
+
+    def get_state_entity(self, project_id: str, entity_id: str) -> dict[str, Any]:
+        return self.phase4.get_state_entity(project_id, entity_id)
+
+    def list_foreshadows(self, project_id: str) -> list[dict[str, Any]]:
+        return self.phase4.list_foreshadows(project_id)
+
+    def list_timeline(self, project_id: str) -> list[dict[str, Any]]:
+        return self.phase4.list_timeline(project_id)
+
+    def list_snapshots(self, project_id: str) -> list[dict[str, Any]]:
+        return self.phase4.list_snapshots(project_id)
+
+    def search_retrieval(self, project_id: str, payload: RetrievalQuery) -> list[dict[str, Any]]:
+        return self.phase4.search_retrieval(project_id, payload)
+
+    def rebuild_retrieval(self, project_id: str) -> dict[str, Any]:
+        return self.phase4.rebuild_retrieval(project_id)
+
+    def retrieval_status(self, project_id: str) -> dict[str, Any]:
+        return self.phase4.retrieval_status(project_id)
+
+    def compile_context(self, project_id: str, payload: ContextCompileRequest, request_id: str) -> dict[str, Any]:
+        return self.phase4.compile_context(project_id, payload, request_id)
+
+    def get_context_trace(self, project_id: str, trace_id: str) -> dict[str, Any]:
+        return self.phase4.get_context_trace(project_id, trace_id)

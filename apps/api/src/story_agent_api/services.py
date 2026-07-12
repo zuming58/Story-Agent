@@ -1126,6 +1126,33 @@ class StoryService:
                     old_meta.total_chapters = source_total
                     for agent_session in session.scalars(select(AgentSession).where(AgentSession.project_id == old_id)):
                         agent_session.project_id = restored.id
+                    # A restored project receives a new catalog/project ID. All
+                    # phase-four rows are scoped by that ID even though each
+                    # project already has its own SQLite file, so remap them in
+                    # the same transaction before exposing the restored work.
+                    for table_name in (
+                        "canon_change_requests",
+                        "source_versions",
+                        "story_entities",
+                        "state_facts",
+                        "story_events",
+                        "state_deltas",
+                        "foreshadows",
+                        "knowledge_boundaries",
+                        "state_snapshots",
+                        "context_traces",
+                    ):
+                        session.execute(text(
+                            f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
+                        ), {"new_id": restored.id, "old_id": old_id})
+                    index_state = session.get(RetrievalIndexState, old_id)
+                    if index_state:
+                        index_state.project_id = restored.id
+                    # Retrieval is derived data. Removing the copied rows and
+                    # rebuilding avoids carrying stale namespace identifiers.
+                    session.execute(text("DELETE FROM retrieval_fts"))
+                    session.execute(text("DELETE FROM retrieval_index_entries"))
+                    self.phase4._rebuild_retrieval_index(session, restored.id, utc_now())
                 with self.db.catalog() as session:
                     catalog = session.get(CatalogProject, restored.id)
                     assert catalog

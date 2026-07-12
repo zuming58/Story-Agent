@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 from uuid import uuid4
 
 import httpx
@@ -25,6 +25,7 @@ from .models import (
     ContextTrace,
     Foreshadow,
     KnowledgeBoundary,
+    PlanNode,
     ProjectMeta,
     RetrievalIndexState,
     SourceVersion,
@@ -34,6 +35,69 @@ from .models import (
     StoryEvent,
     StoryEntity,
 )
+
+
+class VectorSearchBackend(Protocol):
+    """Small injectable boundary for vector-like retrieval.
+
+    Phase four deliberately ships with a deterministic local implementation so
+    tests and offline use do not depend on an embedding provider. A later
+    provider can implement this protocol without changing the retrieval merge.
+    """
+
+    name: str
+
+    @property
+    def available(self) -> bool: ...
+
+    def upsert(self, project_id: str, entries: list[dict[str, Any]]) -> None: ...
+
+    def delete_source_version(self, project_id: str, source_version_id: str) -> None: ...
+
+    def rebuild(self, project_id: str, entries: list[dict[str, Any]]) -> None: ...
+
+    def search(self, rows: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]: ...
+
+
+class LocalTokenVectorBackend:
+    name = "local-token-vector-v1"
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def upsert(self, project_id: str, entries: list[dict[str, Any]]) -> None:
+        return
+
+    def delete_source_version(self, project_id: str, source_version_id: str) -> None:
+        return
+
+    def rebuild(self, project_id: str, entries: list[dict[str, Any]]) -> None:
+        return
+
+    @staticmethod
+    def _features(value: str) -> set[str]:
+        normalized = re.sub(r"\s+", "", value.lower())
+        words = {part for part in re.split(r"\W+", value.lower()) if part}
+        # Character n-grams keep the deterministic fallback useful for Chinese.
+        grams = {normalized[index:index + 2] for index in range(max(0, len(normalized) - 1))}
+        return words | grams
+
+    def search(self, rows: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
+        query_features = self._features(query)
+        if not query_features:
+            return []
+        scored: list[dict[str, Any]] = []
+        for row in rows:
+            content_features = self._features(f"{row['title']} {row['content']}")
+            score = len(query_features & content_features) / max(len(query_features | content_features), 1)
+            if score >= 0.12:
+                item = dict(row)
+                item["id"] = item.pop("entry_id")
+                item["score"] = round(score, 4)
+                scored.append(item)
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return scored[:limit]
 from .schemas import (
     CanonAnalyzeRequest,
     CanonChangeRequestCreate,
@@ -190,9 +254,9 @@ class Phase4Service:
         ("time_point", "时间点", {"type": "object", "properties": {"name": {"type": "string"}}, "additionalProperties": True}),
     ]
 
-    def __init__(self, service: Any):
+    def __init__(self, service: Any, vector_backend: VectorSearchBackend | None = None):
         self.service = service
-        self._vector_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        self.vector_backend = vector_backend or LocalTokenVectorBackend()
 
     # ------------------------------------------------------------------
     # Project defaults
@@ -229,16 +293,21 @@ class Phase4Service:
                         created_at=now,
                         updated_at=now,
                     ))
-            if session.get(RetrievalIndexState, project_id) is None:
+            index_state = session.get(RetrievalIndexState, project_id)
+            if index_state is None:
                 session.add(RetrievalIndexState(
                     project_id=project_id,
                     last_rebuilt_at=None,
                     indexed_count=0,
-                    vector_backend="sqlite-local",
-                    vector_available=True,
+                    vector_backend=self.vector_backend.name,
+                    vector_available=self.vector_backend.available,
                     checksum="",
                     updated_at=now,
                 ))
+            elif index_state.last_rebuilt_at is None:
+                index_state.vector_backend = self.vector_backend.name
+                index_state.vector_available = self.vector_backend.available
+                index_state.updated_at = now
 
     # ------------------------------------------------------------------
     # Canon
@@ -273,10 +342,12 @@ class Phase4Service:
                 self._upsert_relation(session, item, now)
             for item in payload.rules:
                 self._upsert_rule(session, item, now)
-        self._mirror_canon_markdown_for_project(project.id, project.folder_path)
+        self._mirror_canon_markdown_safely(project.id, project.folder_path)
         return self.get_canon(project_id)
 
     def analyze_canon(self, project_id: str, payload: CanonAnalyzeRequest, request_id: str) -> dict[str, Any]:
+        if payload.project_id != project_id:
+            raise _story_error(422, "PROJECT_ID_MISMATCH", "路径与请求体中的作品 ID 不一致。")
         project = self.service.get_project(project_id)
         resolved = self.service._resolve_role_model("architect")
         if not resolved:
@@ -303,6 +374,7 @@ class Phase4Service:
                 "content": json.dumps({
                     "projectId": project.id,
                     "projectTitle": project.title,
+                    "currentCanon": self.get_canon(project.id),
                     "sourceText": payload.source_text,
                     "title": payload.title,
                 }, ensure_ascii=False),
@@ -312,7 +384,6 @@ class Phase4Service:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                result = awaitable_response = None
                 async def _run() -> Any:
                     return await provider_client.complete_chat({
                         "model": model.model_id,
@@ -332,30 +403,48 @@ class Phase4Service:
                 data = json.loads(response or "")
                 if not isinstance(data, dict):
                     raise ValueError("not object")
-                self.update_canon_draft(project_id, CanonDraftUpdate(
+                draft = CanonDraftUpdate(
                     documents=data.get("documents", []) if isinstance(data.get("documents"), list) else [],
                     entity_types=data.get("entityTypes", []) if isinstance(data.get("entityTypes"), list) else [],
                     entities=data.get("entities", []) if isinstance(data.get("entities"), list) else [],
                     relations=data.get("relations", []) if isinstance(data.get("relations"), list) else [],
                     rules=data.get("rules", []) if isinstance(data.get("rules"), list) else [],
-                ))
+                )
                 with self.service.db.project_write(project.id, project.folder_path) as session:
+                    if session.scalar(select(CanonDocument).where(CanonDocument.status == "locked")):
+                        raise _story_error(409, "CANON_LOCKED", "Canon 已锁定，只能通过变更申请修改。")
+                    now = datetime.now(timezone.utc)
+                    for entry in draft.documents:
+                        self._upsert_document(session, entry, now)
+                    for entry in draft.entity_types:
+                        self._upsert_entity_type(session, entry, now)
+                    for entry in draft.entities:
+                        self._upsert_entity(session, entry, now)
+                    for entry in draft.relations:
+                        self._upsert_relation(session, entry, now)
+                    for entry in draft.rules:
+                        self._upsert_rule(session, entry, now)
                     session.add(self.service._audit("canon.analysis_completed", "canon_document", "story-core", {
                         "requestId": request_id,
                         "attempt": attempt + 1,
                         "reversible": False,
                     }, request_id))
+                self._mirror_canon_markdown_safely(project.id, project.folder_path)
                 return self.get_canon(project_id)
-            except (json.JSONDecodeError, ModelProviderError, ValueError) as exc:
+            except (json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
                 continue
+            except ModelProviderError as exc:
+                # Transport/auth/rate-limit retries belong to the provider.
+                # The second architect call is reserved for malformed JSON only.
+                raise _story_error(502, "MODEL_PROVIDER_ERROR", exc.message, {"providerCode": exc.code}) from exc
             except Exception as exc:
                 from .services import StoryError
 
                 if isinstance(exc, StoryError):
                     raise
                 raise _story_error(422, "CANON_ANALYSIS_INVALID", f"Canon 分析失败: {exc}") from exc
-        raise _story_error(422, "CANON_ANALYSIS_INVALID", "Canon 分析器未能输出有效 JSON。", {"raw": response or "", "error": str(last_error) if last_error else ""})
+        raise _story_error(422, "CANON_ANALYSIS_INVALID", "Canon 分析器未能输出有效 JSON。", {"error": str(last_error) if last_error else "invalid model output"})
 
     def lock_canon(self, project_id: str, payload: CanonLockRequest, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -368,7 +457,7 @@ class Phase4Service:
             if root.revision != payload.expected_revision:
                 raise _story_error(409, "REVISION_CONFLICT", "Canon 版本已变化。", {"currentRevision": root.revision})
             now = datetime.now(timezone.utc)
-            before = self.get_canon(project_id)
+            before = {"rootRevision": root.revision, "rootStatus": root.status}
             for model in (CanonDocument, CanonEntityType, CanonEntity, CanonRelation, CanonRule):
                 for item in session.scalars(select(model)).all():
                     if hasattr(item, "status"):
@@ -381,12 +470,22 @@ class Phase4Service:
                         item.updated_at = now
             session.add(self.service._audit("canon.locked", "canon_document", root.id, {"before": before, "reversible": False}, request_id))
             self._rebuild_retrieval_index(session, project.id, now)
-        self._mirror_canon_markdown_for_project(project.id, project.folder_path)
+        self._mirror_canon_markdown_safely(project.id, project.folder_path)
         return self.get_canon(project_id)
 
     def create_canon_change_request(self, project_id: str, payload: CanonChangeRequestCreate, request_id: str) -> dict[str, Any]:
+        if payload.project_id != project_id:
+            raise _story_error(422, "PROJECT_ID_MISMATCH", "路径与请求体中的作品 ID 不一致。")
+        if not isinstance(payload.after_json, dict) or not payload.after_json:
+            raise _story_error(422, "CANON_CHANGE_INVALID", "Canon 变更申请必须包含非空 afterJson。")
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            root = session.get(CanonDocument, "story-core")
+            if not root or root.status != "locked":
+                raise _story_error(409, "CANON_NOT_LOCKED", "Canon 锁定后才能提交变更申请。")
+            target = self._resolve_canon_target(session, payload.target_kind, payload.target_id)
+            if target is None:
+                raise _story_error(404, "CANON_TARGET_NOT_FOUND", "Canon 目标不存在。")
             item = CanonChangeRequest(
                 id=str(uuid4()),
                 project_id=project_id,
@@ -394,7 +493,7 @@ class Phase4Service:
                 target_id=payload.target_id,
                 reason=payload.reason,
                 impact_summary=payload.impact_summary,
-                before_json=_dumps(payload.before_json) if payload.before_json is not None else None,
+                before_json=_dumps(self._canon_target_snapshot(target)),
                 after_json=_dumps(payload.after_json) if payload.after_json is not None else None,
                 status="pending",
                 revision=1,
@@ -419,7 +518,7 @@ class Phase4Service:
             target = self._resolve_canon_target(session, item.target_kind, item.target_id)
             if target is None:
                 raise _story_error(404, "CANON_TARGET_NOT_FOUND", "Canon 目标不存在。")
-            self._apply_canon_target_patch(target, _loads(item.after_json, {}))
+            self._apply_canon_target_patch(session, target, _loads(item.after_json, {}))
             item.status = "accepted"
             item.revision += 1
             item.updated_at = datetime.now(timezone.utc)
@@ -428,9 +527,11 @@ class Phase4Service:
                 target.revision = int(getattr(target, "revision", 1)) + 1
             if hasattr(target, "locked_at"):
                 target.locked_at = datetime.now(timezone.utc)
+            if hasattr(target, "status"):
+                target.status = "locked"
             session.add(self.service._audit("canon.change_request.applied", item.target_kind, item.target_id, {"changeRequestId": item.id}, request_id))
             self._rebuild_retrieval_index(session, project.id, datetime.now(timezone.utc))
-        self._mirror_canon_markdown_for_project(project.id, project.folder_path)
+        self._mirror_canon_markdown_safely(project.id, project.folder_path)
         return self._change_request_out(item).model_dump(mode="json", by_alias=True)
 
     def reject_canon_change_request(self, change_request_id: str, payload: CanonChangeRequestDecision, request_id: str) -> dict[str, Any]:
@@ -455,6 +556,13 @@ class Phase4Service:
     def create_state_candidate(self, project_id: str, payload: StateCandidateCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            duplicate = session.scalar(select(SourceVersion).where(
+                SourceVersion.project_id == project.id,
+                SourceVersion.source_id == payload.source_id,
+                SourceVersion.version_number == payload.version_number,
+            ))
+            if duplicate:
+                raise _story_error(409, "SOURCE_VERSION_EXISTS", "同一来源的版本号已存在。", {"sourceVersionId": duplicate.id})
             item = SourceVersion(
                 id=str(uuid4()),
                 project_id=project_id,
@@ -476,26 +584,41 @@ class Phase4Service:
 
     def commit_state_candidate(self, candidate_id: str, payload: StateCandidateCommit, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(payload.project_id)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
-            candidate = session.get(SourceVersion, candidate_id)
-            if not candidate:
-                raise _story_error(404, "SOURCE_VERSION_NOT_FOUND", "来源版本不存在。")
-            if candidate.revision != payload.expected_revision:
-                raise _story_error(409, "STATE_REVISION_CONFLICT", "来源版本已变化。", {"currentRevision": candidate.revision})
-            if candidate.status not in {"candidate", "official"}:
-                raise _story_error(409, "SOURCE_VERSION_NOT_OFFICIAL", "来源版本不处于可提交状态。")
-            if candidate.status == "official":
+        try:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                candidate = session.get(SourceVersion, candidate_id)
+                if not candidate or candidate.project_id != project.id:
+                    raise _story_error(404, "SOURCE_VERSION_NOT_FOUND", "来源版本不存在。")
+                if candidate.revision != payload.expected_revision:
+                    raise _story_error(409, "STATE_REVISION_CONFLICT", "来源版本已变化。", {"currentRevision": candidate.revision})
+                if candidate.status not in {"candidate", "official"}:
+                    raise _story_error(409, "SOURCE_VERSION_NOT_OFFICIAL", "来源版本不处于可提交状态。")
+                if candidate.status == "official":
+                    return self._source_version_out(candidate).model_dump(mode="json", by_alias=True)
+                data = _loads(candidate.payload_json, {})
+                now = datetime.now(timezone.utc)
+                self._validate_state_payload(session, project.id, data)
+                self._materialize_state_payload(session, project.id, data, candidate.id, now)
+                candidate.status = "official"
+                candidate.revision += 1
+                candidate.updated_at = now
+                snapshot = self._create_state_snapshot(session, project.id, candidate.id, data, now)
+                self._rebuild_retrieval_index(session, project.id, now)
+                session.add(self.service._audit("state.candidate.committed", "source_version", candidate.id, {"snapshotId": snapshot.id, "requestId": request_id}, request_id))
                 return self._source_version_out(candidate).model_dump(mode="json", by_alias=True)
-            data = _loads(candidate.payload_json, {})
-            now = datetime.now(timezone.utc)
-            self._materialize_state_payload(session, project.id, data, candidate.id, now)
-            candidate.status = "official"
-            candidate.revision += 1
-            candidate.updated_at = now
-            snapshot = self._create_state_snapshot(session, project.id, candidate.id, data, now)
-            self._rebuild_retrieval_index(session, project.id, now)
-            session.add(self.service._audit("state.candidate.committed", "source_version", candidate.id, {"snapshotId": snapshot.id, "requestId": request_id}, request_id))
-            return self._source_version_out(candidate).model_dump(mode="json", by_alias=True)
+        except Exception as exc:
+            from .services import StoryError
+
+            if isinstance(exc, StoryError) and exc.code == "STATE_FACT_CONFLICT":
+                with self.service.db.project_write(project.id, project.folder_path) as session:
+                    session.add(self.service._audit(
+                        "state.conflict_detected",
+                        "source_version",
+                        candidate_id,
+                        {**exc.details, "requestId": request_id},
+                        request_id,
+                    ))
+            raise
 
     def supersede_source_version(self, source_version_id: str, payload: SourceVersionSupersede, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(payload.project_id)
@@ -503,13 +626,20 @@ class Phase4Service:
             source_version = session.get(SourceVersion, source_version_id)
             if not source_version:
                 raise _story_error(404, "SOURCE_VERSION_NOT_FOUND", "来源版本不存在。")
+            if source_version.project_id != project.id:
+                raise _story_error(404, "SOURCE_VERSION_NOT_FOUND", "来源版本不存在。")
             if source_version.revision != payload.expected_revision:
                 raise _story_error(409, "STATE_REVISION_CONFLICT", "来源版本已变化。")
+            if source_version.status != "official":
+                raise _story_error(409, "SOURCE_VERSION_NOT_OFFICIAL", "只有正式来源版本可以作废。")
             now = datetime.now(timezone.utc)
             source_version.status = "superseded"
             source_version.revision += 1
             source_version.updated_at = now
-            for model in (StateFact, StateDelta, StoryEvent, Foreshadow, KnowledgeBoundary, StoryEntity):
+            affected_fact_keys: set[tuple[str, str]] = set()
+            for fact in session.scalars(select(StateFact).where(StateFact.source_version_id == source_version_id)).all():
+                affected_fact_keys.add((fact.entity_id, fact.field_path))
+            for model in (StateFact, StateDelta, Foreshadow, KnowledgeBoundary):
                 for row in session.scalars(select(model).where(getattr(model, "source_version_id") == source_version_id)).all():
                     if hasattr(row, "status"):
                         row.status = "superseded"
@@ -519,6 +649,34 @@ class Phase4Service:
                         row.valid_to = now
                     if hasattr(row, "updated_at"):
                         row.updated_at = now
+            # Replay the latest still-official fact for every invalidated field.
+            for entity_id, field_path in affected_fact_keys:
+                previous = session.scalar(
+                    select(StateFact)
+                    .join(SourceVersion, SourceVersion.id == StateFact.source_version_id)
+                    .where(
+                        StateFact.project_id == project.id,
+                        StateFact.entity_id == entity_id,
+                        StateFact.field_path == field_path,
+                        StateFact.source_version_id != source_version_id,
+                        SourceVersion.status == "official",
+                    )
+                    .order_by(StateFact.valid_from.desc(), StateFact.created_at.desc())
+                )
+                if previous:
+                    previous.is_current = True
+                    previous.valid_to = None
+                    previous.updated_at = now
+            for entity in session.scalars(select(StoryEntity).where(StoryEntity.source_version_id == source_version_id)).all():
+                has_official_fact = session.scalar(
+                    select(StateFact.id)
+                    .join(SourceVersion, SourceVersion.id == StateFact.source_version_id)
+                    .where(StateFact.entity_id == entity.id, SourceVersion.status == "official")
+                    .limit(1)
+                )
+                if not has_official_fact:
+                    entity.status = "superseded"
+                    entity.updated_at = now
             session.add(self.service._audit("source_version.superseded", "source_version", source_version_id, {"requestId": request_id}, request_id))
             self._rebuild_retrieval_index(session, project.id, now)
             return self._source_version_out(source_version).model_dump(mode="json", by_alias=True)
@@ -541,13 +699,26 @@ class Phase4Service:
     def list_foreshadows(self, project_id: str) -> list[dict[str, Any]]:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
-            return [self._foreshadow_out(item).model_dump(mode="json", by_alias=True) for item in session.scalars(select(Foreshadow).where(Foreshadow.project_id == project_id).order_by(Foreshadow.created_at.asc())).all()]
+            return [self._foreshadow_out(item).model_dump(mode="json", by_alias=True) for item in session.scalars(
+                select(Foreshadow)
+                .join(SourceVersion, SourceVersion.id == Foreshadow.source_version_id)
+                .where(Foreshadow.project_id == project_id, Foreshadow.status != "superseded", SourceVersion.status == "official")
+                .order_by(Foreshadow.created_at.asc())
+            ).all()]
 
     def list_timeline(self, project_id: str) -> list[dict[str, Any]]:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
-            events = session.scalars(select(StoryEvent).where(StoryEvent.project_id == project_id).order_by(StoryEvent.event_order.asc(), StoryEvent.occurred_at.asc())).all()
-            deltas = session.scalars(select(StateDelta).where(StateDelta.project_id == project_id).order_by(StateDelta.created_at.asc())).all()
+            events = session.scalars(
+                select(StoryEvent).join(SourceVersion, SourceVersion.id == StoryEvent.source_version_id)
+                .where(StoryEvent.project_id == project_id, SourceVersion.status == "official")
+                .order_by(StoryEvent.event_order.asc(), StoryEvent.occurred_at.asc())
+            ).all()
+            deltas = session.scalars(
+                select(StateDelta).join(SourceVersion, SourceVersion.id == StateDelta.source_version_id)
+                .where(StateDelta.project_id == project_id, StateDelta.status == "official", SourceVersion.status == "official")
+                .order_by(StateDelta.created_at.asc())
+            ).all()
             timeline = [
                 {"kind": "event", "payload": self._story_event_out(item).model_dump(mode="json", by_alias=True), "createdAt": item.created_at}
                 for item in events
@@ -562,7 +733,11 @@ class Phase4Service:
     def list_snapshots(self, project_id: str) -> list[dict[str, Any]]:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
-            return [self._state_snapshot_out(item).model_dump(mode="json", by_alias=True) for item in session.scalars(select(StateSnapshot).where(StateSnapshot.project_id == project_id).order_by(StateSnapshot.snapshot_number.asc())).all()]
+            return [self._state_snapshot_out(item).model_dump(mode="json", by_alias=True) for item in session.scalars(
+                select(StateSnapshot).join(SourceVersion, SourceVersion.id == StateSnapshot.source_version_id)
+                .where(StateSnapshot.project_id == project_id, SourceVersion.status == "official")
+                .order_by(StateSnapshot.snapshot_number.asc())
+            ).all()]
 
     # ------------------------------------------------------------------
     # Retrieval
@@ -601,7 +776,7 @@ class Phase4Service:
     # ------------------------------------------------------------------
     def compile_context(self, project_id: str, payload: ContextCompileRequest, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
-        with self.service.db.project(project.id, project.folder_path) as session:
+        with self.service.db.project_write(project.id, project.folder_path) as session:
             trace_id = str(uuid4())
             items: list[dict[str, Any]] = []
             budget = payload.token_budget
@@ -624,23 +799,51 @@ class Phase4Service:
                     "checksum": checksum or _stable_digest({"kind": kind, "title": title, "content": content}),
                 })
 
-            for doc in session.scalars(select(CanonDocument).where(CanonDocument.project_id == project_id, CanonDocument.status == "locked").order_by(CanonDocument.created_at.asc())).all():
+            for doc in session.scalars(select(CanonDocument).where(CanonDocument.status == "locked").order_by(CanonDocument.created_at.asc())).all():
                 add_item("canon_document", doc.title, doc.content_markdown, 0, "locked canon")
+            if payload.selected_node_id:
+                node = session.get(PlanNode, payload.selected_node_id)
+                if not node:
+                    raise _story_error(404, "PLAN_NODE_NOT_FOUND", "所选规划节点不存在。")
+                contract = {
+                    "title": node.title,
+                    "targetChapter": node.target_chapter,
+                    "allowedRange": [node.range_min, node.range_max],
+                    "prerequisites": _loads(node.prerequisites_json, []),
+                    "completionConditions": _loads(node.completion_conditions_json, []),
+                    "foreshadows": _loads(node.foreshadows_json, []),
+                    "contracts": _loads(node.contracts_json, []),
+                }
+                add_item("task_contract", node.title, _dumps(contract), 1, "selected planning contract")
             for entity in session.scalars(select(StoryEntity).where(StoryEntity.project_id == project_id, StoryEntity.status == "active").order_by(StoryEntity.created_at.asc())).all():
                 facts = session.scalars(select(StateFact).where(StateFact.project_id == project_id, StateFact.entity_id == entity.id, StateFact.is_current.is_(True))).all()
                 fact_text = "; ".join(f"{fact.field_path}={_loads(fact.value_json, None)}" for fact in facts)
-                add_item("state_fact", entity.canonical_name, fact_text or _dumps(_loads(entity.attributes_json, {})), 1, "current state", entity.source_version_id)
-            for foreshadow in session.scalars(select(Foreshadow).where(Foreshadow.project_id == project_id, Foreshadow.status != "resolved").order_by(Foreshadow.created_at.asc())).all():
-                add_item("foreshadow", foreshadow.label, foreshadow.description, 2, "unresolved foreshadow", foreshadow.source_version_id)
-            for event in session.scalars(select(StoryEvent).where(StoryEvent.project_id == project_id).order_by(StoryEvent.event_order.desc(), StoryEvent.occurred_at.desc()).limit(20)).all():
-                add_item("event", event.summary[:60] or event.location or event.id, event.summary, 3, "official event", event.source_version_id)
+                add_item("state_fact", entity.canonical_name, fact_text or _dumps(_loads(entity.attributes_json, {})), 2, "current state", entity.source_version_id)
+            for boundary in session.scalars(
+                select(KnowledgeBoundary).join(SourceVersion, SourceVersion.id == KnowledgeBoundary.source_version_id)
+                .where(KnowledgeBoundary.project_id == project_id, KnowledgeBoundary.status == "active", SourceVersion.status == "official")
+                .order_by(KnowledgeBoundary.created_at.asc())
+            ).all():
+                add_item("knowledge_boundary", boundary.entity_id, _dumps(_loads(boundary.knowledge_json, {})), 2, "character knowledge boundary", boundary.source_version_id)
+            for foreshadow in session.scalars(
+                select(Foreshadow).join(SourceVersion, SourceVersion.id == Foreshadow.source_version_id)
+                .where(Foreshadow.project_id == project_id, Foreshadow.status.notin_(["resolved", "superseded"]), SourceVersion.status == "official")
+                .order_by(Foreshadow.created_at.asc())
+            ).all():
+                add_item("foreshadow", foreshadow.label, foreshadow.description, 3, "unresolved foreshadow", foreshadow.source_version_id)
+            for event in session.scalars(
+                select(StoryEvent).join(SourceVersion, SourceVersion.id == StoryEvent.source_version_id)
+                .where(StoryEvent.project_id == project_id, SourceVersion.status == "official")
+                .order_by(StoryEvent.event_order.desc(), StoryEvent.occurred_at.desc()).limit(20)
+            ).all():
+                add_item("event", event.summary[:60] or event.location or event.id, event.summary, 4, "official event", event.source_version_id)
             recent_messages = session.scalars(select(ProjectMeta).where(ProjectMeta.id == project.id)).all()
             if recent_messages:
                 meta = recent_messages[0]
-                add_item("recent_context", meta.title, f"mode={meta.mode}; chapter={meta.current_chapter}/{meta.total_chapters}", 4, "recent project context")
+                add_item("recent_context", meta.title, f"mode={meta.mode}; chapter={meta.current_chapter}/{meta.total_chapters}", 5, "recent project context")
             retrieval_hits = self.search_retrieval(project_id, RetrievalQuery(query=payload.query or payload.role, limit=8))
             for hit in retrieval_hits:
-                add_item("retrieval_hit", hit["title"], hit["content"], 5, "retrieval evidence", hit.get("sourceVersionId"), hit.get("sourceStatus") == "official", hit.get("checksum", ""))
+                add_item("retrieval_hit", hit["title"], hit["content"], 6, "retrieval evidence", hit.get("sourceVersionId"), hit.get("sourceStatus") == "official", hit.get("checksum", ""))
 
             included = [item for item in items if item["included"]]
             payload_json = {
@@ -679,7 +882,7 @@ class Phase4Service:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
             trace = session.get(ContextTrace, trace_id)
-            if not trace:
+            if not trace or trace.project_id != project.id:
                 raise _story_error(404, "CONTEXT_TRACE_NOT_FOUND", "上下文追踪不存在。")
             package = _loads(trace.package_json, {})
             package["traceId"] = trace.id
@@ -711,13 +914,16 @@ class Phase4Service:
         doc = session.get(CanonDocument, doc_id)
         if doc and doc.status == "locked":
             raise _story_error(409, "CANON_LOCKED", "Canon 已锁定。")
+        is_new = doc is None
         if not doc:
             doc = CanonDocument(id=doc_id, created_at=now, updated_at=now)
             session.add(doc)
         doc.title = str(item.get("title") or doc.title or "Canon")
         doc.kind = str(item.get("kind") or "story-core")
         doc.content_markdown = str(item.get("contentMarkdown") or item.get("content_markdown") or "")
-        doc.status = str(item.get("status") or doc.status or "draft")
+        doc.status = "draft"
+        if not is_new:
+            doc.revision += 1
         doc.updated_at = now
 
     def _upsert_entity_type(self, session: Session, item: dict[str, Any], now: datetime) -> None:
@@ -729,14 +935,19 @@ class Phase4Service:
             raise _story_error(422, "CANON_SCHEMA_INVALID", "实体类型 Schema 不安全。")
         row = session.scalar(select(CanonEntityType).where(CanonEntityType.name == name))
         if row and row.status == "locked":
+            if row.is_system and _loads(row.schema_json, {}) == schema_json:
+                return
             raise _story_error(409, "CANON_LOCKED", "Canon 已锁定。")
+        is_new = row is None
         if not row:
             row = CanonEntityType(id=str(uuid4()), name=name, created_at=now, updated_at=now)
             session.add(row)
         row.display_name = str(item.get("displayName") or item.get("display_name") or name)
         row.schema_json = _dumps(schema_json)
         row.is_system = bool(item.get("isSystem", False))
-        row.status = str(item.get("status") or row.status or "draft")
+        row.status = "draft"
+        if not is_new:
+            row.revision += 1
         row.source_document_id = item.get("sourceDocumentId") or item.get("source_document_id")
         row.updated_at = now
 
@@ -745,7 +956,10 @@ class Phase4Service:
         if not canonical_name:
             raise _story_error(422, "CANON_SCHEMA_INVALID", "实体名称不能为空。")
         entity_type_id = str(item.get("entityTypeId") or item.get("entity_type_id") or "").strip()
+        entity_type_name = str(item.get("entityTypeName") or item.get("entity_type_name") or "").strip()
         entity_type = session.get(CanonEntityType, entity_type_id) if entity_type_id else None
+        if entity_type is None and entity_type_name:
+            entity_type = session.scalar(select(CanonEntityType).where(CanonEntityType.name == entity_type_name))
         if entity_type is None:
             raise _story_error(422, "CANON_SCHEMA_INVALID", "实体类型不存在。")
         attributes = item.get("attributesJson") or item.get("attributes_json") or {}
@@ -755,13 +969,15 @@ class Phase4Service:
         row = session.scalar(select(CanonEntity).where(CanonEntity.canonical_name == canonical_name))
         if row and row.status == "locked":
             raise _story_error(409, "CANON_LOCKED", "Canon 已锁定。")
+        is_new = row is None
         if not row:
             row = CanonEntity(id=str(uuid4()), entity_type_id=entity_type.id, canonical_name=canonical_name, created_at=now, updated_at=now)
             session.add(row)
         row.aliases_json = _dumps([alias for alias in (item.get("aliasesJson") or item.get("aliases_json") or []) if isinstance(alias, str)])
         row.attributes_json = _dumps(attributes)
-        row.status = str(item.get("status") or row.status or "draft")
-        row.revision = int(item.get("revision") or row.revision or 1)
+        row.status = "draft"
+        if not is_new:
+            row.revision += 1
         row.source_document_id = item.get("sourceDocumentId") or item.get("source_document_id")
         row.updated_at = now
 
@@ -770,15 +986,29 @@ class Phase4Service:
         row = session.get(CanonRelation, relation_id)
         if row and row.status == "locked":
             raise _story_error(409, "CANON_LOCKED", "Canon 已锁定。")
+        is_new = row is None
+        subject_entity_id = str(item.get("subjectEntityId") or item.get("subject_entity_id") or "").strip()
+        predicate = str(item.get("predicate") or "").strip()
+        object_entity_id = item.get("objectEntityId") or item.get("object_entity_id")
+        object_value = item["objectValueJson"] if "objectValueJson" in item else item.get("object_value_json")
+        if not subject_entity_id or session.get(CanonEntity, subject_entity_id) is None:
+            raise _story_error(422, "CANON_SCHEMA_INVALID", "关系的主语实体不存在。")
+        if not predicate:
+            raise _story_error(422, "CANON_SCHEMA_INVALID", "关系谓词不能为空。")
+        if object_entity_id and session.get(CanonEntity, str(object_entity_id)) is None:
+            raise _story_error(422, "CANON_SCHEMA_INVALID", "关系的宾语实体不存在。")
+        if not object_entity_id and object_value is None:
+            raise _story_error(422, "CANON_SCHEMA_INVALID", "关系必须包含宾语实体或宾语值。")
         if not row:
             row = CanonRelation(id=relation_id, created_at=now, updated_at=now)
             session.add(row)
-        row.subject_entity_id = str(item.get("subjectEntityId") or item.get("subject_entity_id") or "")
-        row.predicate = str(item.get("predicate") or "")
-        row.object_entity_id = item.get("objectEntityId") or item.get("object_entity_id")
-        row.object_value_json = _dumps(item.get("objectValueJson") or item.get("object_value_json")) if (item.get("objectValueJson") or item.get("object_value_json")) is not None else None
-        row.status = str(item.get("status") or row.status or "draft")
-        row.revision = int(item.get("revision") or row.revision or 1)
+        row.subject_entity_id = subject_entity_id
+        row.predicate = predicate
+        row.object_entity_id = str(object_entity_id) if object_entity_id else None
+        row.object_value_json = _dumps(object_value) if object_value is not None else None
+        row.status = "draft"
+        if not is_new:
+            row.revision += 1
         row.source_document_id = item.get("sourceDocumentId") or item.get("source_document_id")
         row.updated_at = now
 
@@ -789,6 +1019,7 @@ class Phase4Service:
         row = session.scalar(select(CanonRule).where(CanonRule.rule_code == rule_code))
         if row and row.status == "locked":
             raise _story_error(409, "CANON_LOCKED", "Canon 已锁定。")
+        is_new = row is None
         if not row:
             row = CanonRule(id=str(uuid4()), rule_code=rule_code, created_at=now, updated_at=now)
             session.add(row)
@@ -796,8 +1027,9 @@ class Phase4Service:
         row.statement = str(item.get("statement") or "")
         row.severity = str(item.get("severity") or row.severity or "medium")
         row.constraint_json = _dumps(item.get("constraintJson") or item.get("constraint_json") or {})
-        row.status = str(item.get("status") or row.status or "draft")
-        row.revision = int(item.get("revision") or row.revision or 1)
+        row.status = "draft"
+        if not is_new:
+            row.revision += 1
         row.source_document_id = item.get("sourceDocumentId") or item.get("source_document_id")
         row.updated_at = now
 
@@ -820,36 +1052,142 @@ class Phase4Service:
         model = mapping.get(target_kind)
         return session.get(model, target_id) if model else None
 
-    def _apply_canon_target_patch(self, target: Any, payload: dict[str, Any]) -> None:
+    def _canon_target_snapshot(self, target: Any) -> dict[str, Any]:
         if isinstance(target, CanonDocument):
-            target.title = str(payload.get("title") or target.title)
-            target.kind = str(payload.get("kind") or target.kind)
-            target.content_markdown = str(payload.get("contentMarkdown") or payload.get("content_markdown") or target.content_markdown)
+            return self._document_out(target).model_dump(mode="json", by_alias=True)
+        if isinstance(target, CanonEntityType):
+            return self._entity_type_out(target).model_dump(mode="json", by_alias=True)
+        if isinstance(target, CanonEntity):
+            return self._canon_entity_out(target).model_dump(mode="json", by_alias=True)
+        if isinstance(target, CanonRelation):
+            return self._relation_out(target).model_dump(mode="json", by_alias=True)
+        if isinstance(target, CanonRule):
+            return self._rule_out(target).model_dump(mode="json", by_alias=True)
+        raise _story_error(422, "CANON_TARGET_NOT_FOUND", "不支持的 Canon 目标。")
+
+    @staticmethod
+    def _patch_value(payload: dict[str, Any], camel: str, snake: str, current: Any) -> Any:
+        if camel in payload:
+            return payload[camel]
+        if snake in payload:
+            return payload[snake]
+        return current
+
+    def _apply_canon_target_patch(self, session: Session, target: Any, payload: dict[str, Any]) -> None:
+        if isinstance(target, CanonDocument):
+            target.title = str(payload.get("title", target.title))
+            target.kind = str(payload.get("kind", target.kind))
+            target.content_markdown = str(self._patch_value(payload, "contentMarkdown", "content_markdown", target.content_markdown))
         elif isinstance(target, CanonEntityType):
-            schema_json = payload.get("schemaJson") or payload.get("schema_json") or _loads(target.schema_json, {})
+            schema_json = self._patch_value(payload, "schemaJson", "schema_json", _loads(target.schema_json, {}))
             if not _canon_schema_is_safe(schema_json):
                 raise _story_error(422, "CANON_SCHEMA_INVALID", "实体类型 Schema 不安全。")
-            target.display_name = str(payload.get("displayName") or payload.get("display_name") or target.display_name)
+            target.display_name = str(self._patch_value(payload, "displayName", "display_name", target.display_name))
             target.schema_json = _dumps(schema_json)
         elif isinstance(target, CanonEntity):
-            target.aliases_json = _dumps(payload.get("aliasesJson") or payload.get("aliases_json") or _loads(target.aliases_json, []))
-            attrs = payload.get("attributesJson") or payload.get("attributes_json") or _loads(target.attributes_json, {})
+            target.aliases_json = _dumps(self._patch_value(payload, "aliasesJson", "aliases_json", _loads(target.aliases_json, [])))
+            attrs = self._patch_value(payload, "attributesJson", "attributes_json", _loads(target.attributes_json, {}))
             entity_type = session.get(CanonEntityType, target.entity_type_id) if hasattr(target, "entity_type_id") else None
             if entity_type and not _json_schema_subset_valid(_loads(entity_type.schema_json, {}), attrs):
                 raise _story_error(422, "CANON_SCHEMA_INVALID", "实体属性不符合 Schema。")
             target.attributes_json = _dumps(attrs)
         elif isinstance(target, CanonRelation):
-            target.predicate = str(payload.get("predicate") or target.predicate)
-            target.object_value_json = _dumps(payload.get("objectValueJson") or payload.get("object_value_json")) if (payload.get("objectValueJson") or payload.get("object_value_json")) is not None else target.object_value_json
+            target.predicate = str(payload.get("predicate", target.predicate))
+            object_value = self._patch_value(payload, "objectValueJson", "object_value_json", _loads(target.object_value_json, None))
+            target.object_value_json = _dumps(object_value) if object_value is not None else None
         elif isinstance(target, CanonRule):
-            target.statement = str(payload.get("statement") or target.statement)
-            target.severity = str(payload.get("severity") or target.severity)
-            target.constraint_json = _dumps(payload.get("constraintJson") or payload.get("constraint_json") or _loads(target.constraint_json, {}))
+            target.statement = str(payload.get("statement", target.statement))
+            target.severity = str(payload.get("severity", target.severity))
+            target.constraint_json = _dumps(self._patch_value(payload, "constraintJson", "constraint_json", _loads(target.constraint_json, {})))
         else:
             raise _story_error(422, "CANON_TARGET_NOT_FOUND", "不支持的 Canon 目标。")
 
+    def _validate_state_payload(self, session: Session, project_id: str, data: dict[str, Any]) -> None:
+        if not isinstance(data, dict):
+            raise _story_error(422, "STATE_PAYLOAD_INVALID", "状态候选必须是 JSON object。")
+        for collection in ("entities", "facts", "events", "foreshadows", "boundaries"):
+            if not isinstance(data.get(collection, []), list):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"{collection} 必须是数组。")
+
+        known_names = set(session.scalars(select(StoryEntity.canonical_name).where(
+            StoryEntity.project_id == project_id,
+            StoryEntity.status == "active",
+        )).all())
+        seen_names: set[str] = set()
+        for index, item in enumerate(data.get("entities", [])):
+            if not isinstance(item, dict):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"entities[{index}] 必须是 object。")
+            name = str(item.get("canonicalName") or item.get("canonical_name") or "").strip()
+            type_id = str(item.get("entityTypeId") or item.get("entity_type_id") or "").strip()
+            if not name or name in seen_names:
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"entities[{index}] 名称为空或重复。")
+            entity_type = session.get(CanonEntityType, type_id) if type_id else None
+            if entity_type is None:
+                type_name = str(item.get("entityTypeName") or item.get("entity_type_name") or "").strip()
+                if type_name:
+                    entity_type = session.scalar(select(CanonEntityType).where(CanonEntityType.name == type_name))
+            if not entity_type:
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"entities[{index}] 的实体类型不存在。")
+            attributes = item.get("attributes") or {}
+            if not isinstance(attributes, dict) or not _json_schema_subset_valid(_loads(entity_type.schema_json, {}), attributes):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"entities[{index}] 的属性不符合 Canon Schema。")
+            seen_names.add(name)
+            known_names.add(name)
+
+        for index, item in enumerate(data.get("facts", [])):
+            if not isinstance(item, dict):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"facts[{index}] 必须是 object。")
+            name = str(item.get("entity") or item.get("entityName") or "").strip()
+            field_path = str(item.get("fieldPath") or item.get("field_path") or "").strip()
+            confidence = item.get("confidence", 1.0)
+            if name not in known_names or not field_path:
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"facts[{index}] 引用了未知实体或空字段。")
+            if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0 <= float(confidence) <= 1:
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"facts[{index}] confidence 必须在 0 到 1 之间。")
+
+        for index, item in enumerate(data.get("events", [])):
+            if not isinstance(item, dict) or not str(item.get("summary") or "").strip():
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"events[{index}] 必须包含摘要。")
+            try:
+                int(item.get("eventOrder") or item.get("event_order") or 0)
+            except (TypeError, ValueError) as exc:
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"events[{index}] 的顺序无效。") from exc
+
+        allowed_foreshadow_status = {"pending", "planted", "progressing", "resolved"}
+        seen_codes: set[str] = set()
+        for index, item in enumerate(data.get("foreshadows", [])):
+            if not isinstance(item, dict):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"foreshadows[{index}] 必须是 object。")
+            code = str(item.get("code") or "").strip()
+            if code and code in seen_codes:
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"foreshadows[{index}] code 重复。")
+            if code:
+                seen_codes.add(code)
+            status = str(item.get("status") or "pending")
+            if status not in allowed_foreshadow_status:
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"foreshadows[{index}] 状态无效。")
+            window = [item.get("earliestChapter") or item.get("earliest_chapter"), item.get("targetChapter") or item.get("target_chapter"), item.get("latestChapter") or item.get("latest_chapter")]
+            present = [value for value in window if value is not None]
+            if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in present):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"foreshadows[{index}] 章节窗口无效。")
+            if present and present != sorted(present):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"foreshadows[{index}] 章节窗口顺序无效。")
+
+        for index, item in enumerate(data.get("boundaries", [])):
+            if not isinstance(item, dict):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"boundaries[{index}] 必须是 object。")
+            name = str(item.get("entity") or item.get("entityName") or "").strip()
+            if name not in known_names or not isinstance(item.get("knowledge", {}), dict):
+                raise _story_error(422, "STATE_PAYLOAD_INVALID", f"boundaries[{index}] 引用了未知实体或知识结构无效。")
+
     def _materialize_state_payload(self, session: Session, project_id: str, data: dict[str, Any], source_version_id: str, now: datetime) -> None:
-        entities_by_name: dict[str, StoryEntity] = {}
+        entities_by_name: dict[str, StoryEntity] = {
+            entity.canonical_name: entity
+            for entity in session.scalars(select(StoryEntity).where(
+                StoryEntity.project_id == project_id,
+                StoryEntity.status == "active",
+            )).all()
+        }
         for entity_item in data.get("entities", []) if isinstance(data.get("entities"), list) else []:
             if not isinstance(entity_item, dict):
                 continue
@@ -857,6 +1195,10 @@ class Phase4Service:
             if not canonical_name:
                 continue
             entity_type_id = str(entity_item.get("entityTypeId") or entity_item.get("entity_type_id") or "")
+            if not entity_type_id:
+                entity_type_name = str(entity_item.get("entityTypeName") or entity_item.get("entity_type_name") or "").strip()
+                entity_type = session.scalar(select(CanonEntityType).where(CanonEntityType.name == entity_type_name))
+                entity_type_id = entity_type.id if entity_type else ""
             row = session.scalar(select(StoryEntity).where(StoryEntity.project_id == project_id, StoryEntity.canonical_name == canonical_name))
             if not row:
                 row = StoryEntity(
@@ -870,11 +1212,15 @@ class Phase4Service:
                     updated_at=now,
                 )
                 session.add(row)
+            is_new = row.source_version_id is None
             row.entity_type_id = entity_type_id
             row.aliases_json = _dumps([alias for alias in (entity_item.get("aliases") or []) if isinstance(alias, str)])
             row.attributes_json = _dumps(entity_item.get("attributes") or {})
             row.status = "active"
-            row.source_version_id = source_version_id
+            if is_new:
+                row.source_version_id = source_version_id
+            else:
+                row.revision += 1
             row.updated_at = now
             entities_by_name[canonical_name] = row
 
@@ -883,10 +1229,21 @@ class Phase4Service:
                 continue
             entity_name = str(fact_item.get("entity") or fact_item.get("entityName") or "").strip()
             field_path = str(fact_item.get("fieldPath") or fact_item.get("field_path") or "").strip()
-            if not entity_name or not field_path or entity_name not in entities_by_name:
-                continue
             entity = entities_by_name[entity_name]
             current = session.scalars(select(StateFact).where(StateFact.project_id == project_id, StateFact.entity_id == entity.id, StateFact.field_path == field_path, StateFact.is_current.is_(True))).all()
+            new_value = fact_item.get("value")
+            if current and _loads(current[0].value_json, None) == new_value:
+                continue
+            if current:
+                expected_present = "expectedCurrentValue" in fact_item or "expected_current_value" in fact_item
+                expected_value = fact_item.get("expectedCurrentValue") if "expectedCurrentValue" in fact_item else fact_item.get("expected_current_value")
+                if not expected_present or _loads(current[0].value_json, None) != expected_value:
+                    raise _story_error(409, "STATE_FACT_CONFLICT", "状态事实与当前值冲突，未写入正式状态。", {
+                        "entityId": entity.id,
+                        "entityName": entity.canonical_name,
+                        "fieldPath": field_path,
+                        "currentValue": _loads(current[0].value_json, None),
+                    })
             for existing in current:
                 existing.is_current = False
                 existing.valid_to = now
@@ -896,7 +1253,7 @@ class Phase4Service:
                 project_id=project_id,
                 entity_id=entity.id,
                 field_path=field_path,
-                value_json=_dumps(fact_item.get("value")),
+                value_json=_dumps(new_value),
                 valid_from=now,
                 valid_to=None,
                 source_version_id=source_version_id,
@@ -907,8 +1264,6 @@ class Phase4Service:
                 updated_at=now,
             )
             session.add(fact)
-            if current:
-                session.add(self.service._audit("state.conflict_detected", "state_fact", entity.id, {"fieldPath": field_path, "sourceVersionId": source_version_id}, source_version_id))
             session.add(StateDelta(
                 id=str(uuid4()),
                 project_id=project_id,
@@ -1005,21 +1360,27 @@ class Phase4Service:
         return snapshot
 
     def _rebuild_retrieval_index(self, session: Session, project_id: str, now: datetime) -> None:
-        session.execute(text("DELETE FROM retrieval_index_entries WHERE project_id = :project_id"), {"project_id": project_id})
         session.execute(text("DELETE FROM retrieval_fts WHERE project_id = :project_id"), {"project_id": project_id})
+        session.execute(text("DELETE FROM retrieval_index_entries WHERE project_id = :project_id"), {"project_id": project_id})
         entries: list[dict[str, Any]] = []
         for doc in session.scalars(select(CanonDocument).where(CanonDocument.kind == "story-core", CanonDocument.status == "locked")).all():
             entries.append({"kind": "canon_document", "title": doc.title, "content": doc.content_markdown, "source_version_id": None, "entity_id": None, "checksum": _stable_digest(doc.content_markdown), "source_status": "official"})
         for entity in session.scalars(select(StoryEntity).where(StoryEntity.project_id == project_id, StoryEntity.status == "active")).all():
             facts = session.scalars(select(StateFact).where(StateFact.project_id == project_id, StateFact.entity_id == entity.id, StateFact.is_current.is_(True))).all()
             content = " ".join([entity.canonical_name] + [f"{fact.field_path}:{_loads(fact.value_json, None)}" for fact in facts])
-            entries.append({"kind": "entity", "title": entity.canonical_name, "content": content, "source_version_id": entity.source_version_id, "entity_id": entity.id, "checksum": _stable_digest(content), "source_status": "official"})
-        for event in session.scalars(select(StoryEvent).where(StoryEvent.project_id == project_id)).all():
+            latest_fact = max(facts, key=lambda item: item.valid_from or item.created_at, default=None)
+            entries.append({"kind": "entity", "title": entity.canonical_name, "content": content, "source_version_id": latest_fact.source_version_id if latest_fact else entity.source_version_id, "entity_id": entity.id, "checksum": _stable_digest(content), "source_status": "official"})
+        for event in session.scalars(
+            select(StoryEvent).join(SourceVersion, SourceVersion.id == StoryEvent.source_version_id)
+            .where(StoryEvent.project_id == project_id, SourceVersion.status == "official")
+        ).all():
             entries.append({"kind": "event", "title": event.summary[:120] or event.location or event.id, "content": event.summary, "source_version_id": event.source_version_id, "entity_id": None, "checksum": _stable_digest(event.summary), "source_status": "official"})
-        for foreshadow in session.scalars(select(Foreshadow).where(Foreshadow.project_id == project_id, Foreshadow.status != "superseded")).all():
+        for foreshadow in session.scalars(
+            select(Foreshadow).join(SourceVersion, SourceVersion.id == Foreshadow.source_version_id)
+            .where(Foreshadow.project_id == project_id, Foreshadow.status != "superseded", SourceVersion.status == "official")
+        ).all():
             entries.append({"kind": "foreshadow", "title": foreshadow.label, "content": foreshadow.description, "source_version_id": foreshadow.source_version_id, "entity_id": None, "checksum": _stable_digest(foreshadow.description), "source_status": "official"})
 
-        session.execute(text("DELETE FROM retrieval_index_entries WHERE project_id = :project_id"), {"project_id": project_id})
         for entry in entries:
             entry_id = entry.get("entry_id") or str(uuid4())
             result = session.execute(text("""
@@ -1036,10 +1397,23 @@ class Phase4Service:
         if not state:
             state = RetrievalIndexState(project_id=project_id, updated_at=now)
             session.add(state)
+        vector_available = self.vector_backend.available
+        if vector_available:
+            try:
+                self.vector_backend.rebuild(project_id, entries)
+            except Exception as exc:  # vector data is a rebuildable projection
+                vector_available = False
+                session.add(self.service._audit(
+                    "retrieval.vector_rebuild_failed",
+                    "retrieval_index",
+                    project_id,
+                    {"backend": self.vector_backend.name, "errorType": type(exc).__name__},
+                    str(uuid4()),
+                ))
         state.last_rebuilt_at = now
         state.indexed_count = len(entries)
-        state.vector_backend = "sqlite-local"
-        state.vector_available = True
+        state.vector_backend = self.vector_backend.name
+        state.vector_available = vector_available
         state.checksum = _stable_digest(entries)
         state.updated_at = now
 
@@ -1049,12 +1423,18 @@ class Phase4Service:
         for entity in session.scalars(select(StoryEntity).where(StoryEntity.project_id == project_id, StoryEntity.status == "active")).all():
             aliases = _loads(entity.aliases_json, [])
             if lowered in entity.canonical_name.lower() or any(lowered in str(alias).lower() for alias in aliases):
+                current_source = session.scalar(
+                    select(StateFact.source_version_id)
+                    .join(SourceVersion, SourceVersion.id == StateFact.source_version_id)
+                    .where(StateFact.entity_id == entity.id, StateFact.is_current.is_(True), SourceVersion.status == "official")
+                    .order_by(StateFact.valid_from.desc())
+                )
                 hits.append(self._retrieval_hit({
                     "id": entity.id,
                     "kind": "entity",
                     "title": entity.canonical_name,
                     "content": _dumps(_loads(entity.attributes_json, {})),
-                    "source_version_id": entity.source_version_id,
+                    "source_version_id": current_source or entity.source_version_id,
                     "entity_id": entity.id,
                     "checksum": _stable_digest(entity.canonical_name),
                     "source_status": "official",
@@ -1085,21 +1465,11 @@ class Phase4Service:
         return [self._retrieval_hit({"id": row["entry_id"], **dict(row)}) for row in rows]
 
     def _vector_retrieval_hits(self, session: Session, project_id: str, query: str, limit: int) -> list[dict[str, Any]]:
-        tokens = [token for token in re.split(r"\W+", query.lower()) if token]
-        if not tokens:
+        state = session.get(RetrievalIndexState, project_id)
+        if not self.vector_backend.available or (state is not None and not state.vector_available):
             return []
         rows = session.execute(text("SELECT entry_id, kind, title, content, source_version_id, entity_id, checksum, source_status FROM retrieval_index_entries WHERE project_id = :project_id"), {"project_id": project_id}).mappings().all()
-        scored = []
-        for row in rows:
-            content_tokens = set(re.split(r"\W+", f"{row['title']} {row['content']}".lower()))
-            score = len(content_tokens.intersection(tokens)) / max(len(set(tokens)), 1)
-            if score > 0:
-                data = dict(row)
-                data["id"] = data.pop("entry_id")
-                data["score"] = round(score, 4)
-                scored.append(self._retrieval_hit(data))
-        scored.sort(key=lambda item: item["score"], reverse=True)
-        return scored[:limit]
+        return [self._retrieval_hit(row) for row in self.vector_backend.search([dict(row) for row in rows], query, limit)]
 
     # ------------------------------------------------------------------
     # Dict converters
@@ -1169,3 +1539,22 @@ class Phase4Service:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
             self._mirror_canon_markdown(session, folder_path)
+
+    def _mirror_canon_markdown_safely(self, project_id: str, folder_path: str) -> None:
+        """Treat Markdown as a recoverable projection, never as the authority.
+
+        The database transaction has already committed when this runs. A file
+        system failure is therefore diagnosed and can be repaired by a later
+        rebuild instead of returning a misleading failed-write response.
+        """
+        try:
+            self._mirror_canon_markdown_for_project(project_id, folder_path)
+        except OSError as exc:
+            with self.service.db.project_write(project_id, folder_path) as session:
+                session.add(self.service._audit(
+                    "canon.mirror_failed",
+                    "canon_document",
+                    "story-core",
+                    {"errorType": type(exc).__name__, "rebuildRequired": True},
+                    str(uuid4()),
+                ))

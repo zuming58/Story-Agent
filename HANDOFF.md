@@ -1,10 +1,11 @@
-# Story Agent 第四阶段交接
+# Story Agent 第四阶段审计与第五阶段交接
 
-更新时间：2026-07-12
-当前状态：第四阶段已完成后端实施、验证、提交并推送，等待 GPT-5.6 审计
+更新时间：2026-07-13
+当前状态：GPT-5.6 第四阶段代码审计、修复和全量验证已完成；本文件所在提交为第四阶段最终审计恢复点
 工作分支：`agent/canon-memory-foundation`
 第四阶段基线：`90a4d3e`
 第四阶段完整计划：`docs/plans/PHASE-4-CANON-MEMORY.md`
+第五阶段完整计划：`docs/plans/PHASE-5-CHAPTER-PIPELINE.md`
 UI 所有权：仅当前 GPT-5.6 电脑允许修改 `apps/web/**`、样式、设计令牌和视觉基线
 第三阶段 UI 审计板：https://www.figma.com/design/6QL982fTRWQiTS79wXwWtN
 第三阶段审计起点：`5fd8015`
@@ -13,9 +14,60 @@ UI 所有权：仅当前 GPT-5.6 电脑允许修改 `apps/web/**`、样式、设
 最终审计终点：本文件所在提交；最终答复同步给出实际 hash。
 第三阶段计划：`docs/plans/PHASE-3-MODEL-PROVIDER.md`
 
-## 当前任务：第四阶段后端实施
+## 2026-07-13 GPT-5.6 最终审计记录（优先阅读）
 
-第四阶段已由当前电脑完整实现并通过验证，范围覆盖：
+审计范围：以 `90a4d3e` 为基线，复核另一台电脑推送到 `98c0e87` 的全部第四阶段实现。下列问题已在本文件所在提交修复并通过完整验证。
+
+### 已确认并已在工作区修复的问题
+
+1. `ContextCompiler` 查询不存在的 `CanonDocument.project_id`，上下文编译会必现运行时错误；同时 trace 使用只读 Session，生成后不会持久化。
+2. Canon 实体变更调用 `_apply_canon_target_patch` 时引用未定义的 `session`，接受实体变更会返回 500。
+3. Canon 草稿允许客户端直接提交 `status=locked`，可绕过正式锁定流程；revision 也可由客户端覆盖。
+4. Canon 变更申请信任客户端提交的 `beforeJson`，无法作为可靠审计快照；变更申请也未强制要求 Canon 已锁定、目标存在和 `afterJson` 非空。
+5. Canon 关系缺少主语、谓词和宾语引用校验；新增关系在校验前进入 Session，还会因 autoflush 先触发数据库 500。
+6. Canon 分析把模型 Provider 错误也当成 JSON 修复重试，并把原始模型响应放进错误详情；草稿写入和审计原来不是同一事务。
+7. Markdown 镜像写入失败时数据库已经提交，但 API 仍报失败，造成调用方误判；现在改为保留数据库真相并记录 `canon.mirror_failed` 诊断。
+8. 状态事实冲突原实现会自动关闭旧事实并覆盖新值，违反“冲突必须阻断”；现在不同值必须提供匹配的 `expectedCurrentValue`，否则 409、事务回滚并单独记录冲突审计。
+9. 状态候选对未知实体、未知类型、空字段、无效 confidence、无效事件和伏笔章节窗口会静默跳过，导致“提交成功但事实丢失”；现在统一在正式写入前返回 422。
+10. 同一实体字段缺少数据库级“仅一条 current fact”约束；新增迁移 `0005_phase4_audit_fixes`，先清理历史重复 current，再建立 SQLite partial unique index。
+11. `supersede` 可作用于 candidate/rejected；作废后旧事件、伏笔、快照和检索仍可能对外可见，也不会恢复上一个正式事实；现在只允许 official，按正式来源过滤查询，并回放最近仍有效事实。
+12. 检索重建重复删除索引表、把非 official 来源写成 official，所谓向量层只是写死的方法；现在增加可插拔 `VectorSearchBackend` 协议、本地确定性适配器、不可用降级和重建失败诊断。
+13. 上下文编译漏掉所选章节契约和角色知识边界，且未按来源 official 过滤事件/伏笔；现在固定实现 Canon → 任务契约 → 当前状态/知识边界 → 伏笔 → 事件 → 最近上下文 → 检索证据。
+14. 备份恢复会给作品分配新 ID，但第四阶段所有表仍保留旧 `project_id`，导致恢复后数据库有数据而 API 返回空；现在在恢复事务中重映射所有第四阶段表，并从 SQLite 真相源重建派生索引。
+15. 原第四阶段专项测试仅 2 条，未覆盖计划要求的 15 类验收；当前已扩展为 21 条，覆盖锁定边界、Schema、冲突回滚、来源失效、隔离、降级、上下文、备份恢复和重启。
+
+### 当前工作区修改
+
+- `apps/api/src/story_agent_api/phase4.py`
+- `apps/api/src/story_agent_api/models.py`
+- `apps/api/src/story_agent_api/services.py`
+- `apps/api/migrations/project/versions/0005_phase4_audit_fixes.py`（新增）
+- `apps/api/tests/test_phase4.py`
+- `apps/web/e2e/planning.spec.ts`（仅把独立 SQLite 初始化后的 URL 等待由 5 秒调整为 15 秒，不改变 UI、样式或视觉基线）
+- `docs/plans/PHASE-5-CHAPTER-PIPELINE.md`（新增）
+- `HANDOFF.md`
+
+未修改任何页面组件、CSS、设计令牌、截图或视觉基线；UI 所有权规则保持不变。
+
+### 已完成验证
+
+- `uv run --project apps/api pytest apps/api/tests/test_phase4.py -q`：`21 passed`。
+- `npm run test`：通过；API `54 passed`，Web `3 files / 8 tests passed`。
+- `npm run build`：通过；只有既有 Vite 主 chunk 约 534 KB 警告。
+- `python -m compileall` 与 `git diff --check`：通过。
+- `npm run test:e2e`：通过，1440×1024 与 1280×800 共 `6 passed`。
+- 敏感信息扫描：无真实 API Key；唯一命中为测试假值 `Bearer unit-test-secret-value`。`.data`、`.e2e-data` 和 `test-results` 均保持 Git ignored。
+
+### 审计收口结果
+
+1. 第四阶段计划要求的 15 类验收均已有自动化覆盖，专项测试共 21 条。
+2. 新增迁移已在全新作品、服务重启和备份恢复链路中验证。
+3. 第四阶段可以合并 `main`；后续功能必须从合并后的 `main` 创建第五阶段分支。
+4. 第五阶段计划已经落盘，另一台电脑只负责后端实施，不得修改 UI。
+
+## 当前任务：第五阶段接力准备
+
+第四阶段由另一台电脑实施、当前 GPT-5.6 完整审计修复并通过验证，范围覆盖：
 
 1. Canon 数据模型、草稿/锁定/变更申请和 Markdown 镜像。
 2. 通用与作品专属实体、精确状态、事件、delta、伏笔、知识边界和快照。
@@ -101,8 +153,8 @@ GPT-5.6 完整复审修复（本文件所在提交）
 - 第三阶段范围内未留下阻塞性未完成项。
 - 低优先级视觉债务：部分 9–10px 辅助说明文字对比度偏低；不影响本阶段功能验收，建议在下一轮统一可访问性校准时处理。
 - 低优先级构建债务：Vite 主 JS chunk 约 534 KB，建议功能模块继续增多前引入路由级拆包。
-- 未开发 Canon、向量检索、章节正文生成、短剧制作、媒体生成或发布能力；这些仍属于后续阶段。
-- 未合并 `main`。
+- Canon、状态台账、FTS 和可插拔本地向量检索基础已经完成；章节正文生产、短剧制作、媒体生成和发布仍属于后续阶段。
+- 第五阶段只开发单章生产、自动质检和修订闭环，不提前进入无人值守批量写作或发布。
 - 未提交 API Key、本地数据库、日志、备份 ZIP、截图、trace 或 `.e2e-data`。
 
 ## 数据库迁移
@@ -118,6 +170,7 @@ Project:
 - `0002_model_runs`：`model_runs`。
 - `0003_structured_proposals`：`change_operations.before_json`、`change_operations.after_json`、`model_runs.diagnostic_json`。
 - `0004_canon_memory`：Canon、状态、检索与上下文编译基础。
+- `0005_phase4_audit_fixes`：清理历史重复 current fact，并建立同一实体字段仅一条 current fact 的 partial unique index。
 
 ## API 清单
 
@@ -197,7 +250,7 @@ Canon、状态、检索与上下文:
 
 - `npm run build`：通过。Vite 仅提示 chunk size warning。
 - `npm run test`：通过。
-  - API：35 passed，5 个 warnings。
+  - API：54 passed；warnings 为既有 Starlette/httpx 弃用提示与 Python 3.13 SQLite datetime adapter 提示。
   - Web：3 files passed，8 tests passed。
 - `npm run test:e2e`：通过。
   - 1440×1024：规划提案接受/撤销、直接编辑持久化、安全审计页，共 3 条通过。
@@ -218,35 +271,42 @@ Canon、状态、检索与上下文:
 
 ## 第四阶段审计结论
 
-- 当前完成提交：`d1af9b0 feat: complete phase four canon memory foundation`
-- 变更文件：`apps/api/src/story_agent_api/main.py`、`apps/api/src/story_agent_api/models.py`、`apps/api/src/story_agent_api/schemas.py`、`apps/api/src/story_agent_api/services.py`、`apps/api/src/story_agent_api/phase4.py`、`apps/api/migrations/project/versions/0004_canon_memory.py`、`apps/api/tests/test_phase4.py`
-- 验证结果：`npm run build`、`npm run test`、`npm run test:e2e` 全部通过
-- 推送状态：`agent/canon-memory-foundation` 已推送到远端
-- 最终审计终点：`d1af9b0`
+- 外部实现终点：`98c0e87`；GPT-5.6 最终审计修复为本文件所在提交。
+- 已复核 Canon 权威边界、状态事务、来源失效/replay、FTS/向量降级、上下文编译、备份恢复和重启持久化。
+- 发现的 15 类问题均已修复，并由 21 条第四阶段专项测试覆盖。
+- 验证结果：`npm run build`、`npm run test`、`npm run test:e2e`、compileall、diff check 和敏感扫描全部通过。
+- 结论：第四阶段审计通过，可以合并 PR #3。
 
 ## 下一步工作
 
-- 等待 GPT-5.6 审计第四阶段实现。
-- 若审计发现问题，仅基于 `agent/canon-memory-foundation` 做后续修复并重新推送。
-- UI 仍由当前 GPT-5.6 电脑负责；本次未修改 `apps/web/**`。
+- 第五阶段实施 `docs/plans/PHASE-5-CHAPTER-PIPELINE.md`：章节契约、候选正文、事实抽取、确定性检查、多角色模型质检、最多两轮修订和正式状态提交。
+- 另一台电脑只实现后端、迁移、公共类型和自动化测试；完成后推送并停止，等待 GPT-5.6 审计。
+- UI 仍由当前 GPT-5.6 电脑负责，另一台电脑禁止修改 `apps/web/**`。
 
 ## 下一台电脑接力口令
 
 ```text
-请接手 Story Agent 第四阶段审计。
+请接手 Story Agent 第五阶段后端开发。
 
 仓库：https://github.com/zuming58/Story-Agent.git
-分支：agent/canon-memory-foundation
-基线：90a4d3e
+分支：agent/chapter-pipeline-foundation
+基线：第四阶段 PR #3 合并后的 main
 
 开始前依次完整阅读：
 1. HANDOFF.md
-2. docs/plans/PHASE-4-CANON-MEMORY.md
+2. docs/plans/PHASE-5-CHAPTER-PIPELINE.md
 3. docs/prd/PRD-001.md
-4. docs/plans/PHASE-3-MODEL-PROVIDER.md
+4. docs/plans/PHASE-4-CANON-MEMORY.md
+5. docs/plans/PHASE-3-MODEL-PROVIDER.md
 
-第四阶段已完成。请基于当前分支做完整审计，如发现问题请修复并重新推送，然后停止等待 GPT-5.6 审计。
+只执行第五阶段计划，不提前实现无人值守批量写作、发布或短剧功能。完成全部后端工作包与测试后：
 
-禁止修改 apps/web/**、CSS、设计令牌、UI 截图和 Playwright 视觉基线。UI 只由另一台 GPT-5.6 电脑维护。
+1. 运行 npm run build、npm run test、npm run test:e2e；
+2. 更新 HANDOFF.md，记录迁移、表、API、状态机、完成项、未完成项、测试结果、已知问题和最新提交；
+3. 提交并推送 agent/chapter-pipeline-foundation；
+4. 不合并 main；
+5. 停止继续开发，等待 GPT-5.6 完整审计。
+
+禁止修改 apps/web/**、CSS、设计令牌、UI 截图、Playwright 用例和视觉基线。UI 只由当前 GPT-5.6 电脑维护。
 禁止修改或提交 Story agent/ 与 openclaw skill/，禁止提交 API Key、.data、日志、备份 ZIP 和模型原始响应。
 ```

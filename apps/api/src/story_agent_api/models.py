@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -376,6 +376,16 @@ class StoryEntity(ProjectBase):
 
 class StateFact(ProjectBase):
     __tablename__ = "state_facts"
+    __table_args__ = (
+        Index(
+            "uq_state_facts_current",
+            "project_id",
+            "entity_id",
+            "field_path",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(36), index=True)
@@ -496,3 +506,4 @@ class ContextTrace(ProjectBase):
     package_json: Mapped[str] = mapped_column(Text)
     checksum: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

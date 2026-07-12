@@ -25,3 +25,6 @@ __pycache__/
 # Local agent workspace metadata.
 /.agents/
 /.codex/
+/.data/
+apps/web/.e2e-data/
+*.zip

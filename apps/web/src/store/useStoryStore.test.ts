@@ -1,26 +1,24 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { useStoryStore } from "./useStoryStore";
 
-describe("story store change lifecycle", () => {
-  beforeEach(() => {
-    useStoryStore.getState().resetDemo();
+describe("story UI store", () => {
+  beforeEach(() => useStoryStore.getState().resetUi());
+
+  it("keeps only UI selection and panel preferences", () => {
+    useStoryStore.getState().setActiveProjectId("project-1");
+    useStoryStore.getState().selectMilestone("node-1");
+    useStoryStore.getState().setAgentPanelWidth(420);
+
+    expect(useStoryStore.getState().activeProjectId).toBe("project-1");
+    expect(useStoryStore.getState().selectedMilestoneId).toBe("node-1");
+    expect(useStoryStore.getState().agentPanelWidth).toBe(420);
+    expect("plan" in useStoryStore.getState()).toBe(false);
   });
 
-  it("applies a reviewed AI proposal and can undo it", () => {
-    const initialTarget = useStoryStore.getState().plan.milestones.find((item) => item.id === "milestone-paper-man")?.targetChapter;
-    expect(initialTarget).toBe(18);
-
-    useStoryStore.getState().applyProposal();
-    expect(useStoryStore.getState().plan.milestones.find((item) => item.id === "milestone-paper-man")?.targetChapter).toBe(22);
-    expect(useStoryStore.getState().history).toHaveLength(1);
-
-    useStoryStore.getState().undo();
-    expect(useStoryStore.getState().plan.milestones.find((item) => item.id === "milestone-paper-man")?.targetChapter).toBe(18);
-  });
-
-  it("rejects a proposal without changing the plan", () => {
-    useStoryStore.getState().rejectProposal();
-    expect(useStoryStore.getState().plan.milestones.find((item) => item.id === "milestone-paper-man")?.targetChapter).toBe(18);
-    expect(useStoryStore.getState().proposal?.status).toBe("rejected");
+  it("clamps the resizable Agent panel", () => {
+    useStoryStore.getState().setAgentPanelWidth(100);
+    expect(useStoryStore.getState().agentPanelWidth).toBe(330);
+    useStoryStore.getState().setAgentPanelWidth(900);
+    expect(useStoryStore.getState().agentPanelWidth).toBe(460);
   });
 });

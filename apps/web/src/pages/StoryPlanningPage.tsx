@@ -1,20 +1,24 @@
 import { FloppyDisk, GitBranch, List, PencilSimple, SlidersHorizontal } from "@phosphor-icons/react";
 import { useEffect } from "react";
 import { useStoryStore } from "../store/useStoryStore";
+import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 import { MilestoneEditor } from "../components/MilestoneEditor";
 import { MilestoneTable } from "../components/MilestoneTable";
 import { Timeline } from "../components/Timeline";
 
 export function StoryPlanningPage() {
-  const plan = useStoryStore((state) => state.plan);
+  const { plan, isLoading, isDisconnected, errorMessage, retry } = useStoryWorkspace();
   const notice = useStoryStore((state) => state.notice);
-  const clearNotice = useStoryStore((state) => state.clearNotice);
+  const setNotice = useStoryStore((state) => state.setNotice);
 
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(clearNotice, 2800);
+    const timer = window.setTimeout(() => setNotice(null), 2800);
     return () => window.clearTimeout(timer);
-  }, [notice, clearNotice]);
+  }, [notice, setNotice]);
+
+  if (isDisconnected) return <div className="connection-state"><strong>无法连接本地数据服务</strong><p>{errorMessage ?? "请确认 FastAPI 已启动。"}</p><button onClick={retry}>重新连接</button></div>;
+  if (isLoading || !plan) return <div className="connection-state"><strong>正在加载作品数据库…</strong><p>正在读取规划、对话和审计记录。</p></div>;
 
   return (
     <div className="planning-page">

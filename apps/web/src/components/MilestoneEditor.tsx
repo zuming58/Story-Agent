@@ -1,16 +1,14 @@
 import { CaretUp, FloppyDisk, PencilSimple, Star, Trash, Warning } from "@phosphor-icons/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { validateMilestones } from "../domain/planning";
-import { useStoryStore } from "../store/useStoryStore";
 import type { PlanNode } from "../types";
+import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 
 const splitLines = (value: string) => value.split("\n").map((item) => item.trim()).filter(Boolean);
 
 export function MilestoneEditor() {
-  const plan = useStoryStore((state) => state.plan);
-  const selectedId = useStoryStore((state) => state.selectedMilestoneId);
-  const update = useStoryStore((state) => state.updateMilestone);
-  const selected = useMemo(() => plan.milestones.find((item) => item.id === selectedId) ?? plan.milestones[0], [plan.milestones, selectedId]);
+  const { plan, selected, updateMilestone } = useStoryWorkspace();
+  if (!plan || !selected) return <section className="milestone-editor empty-editor">当前作品还没有可编辑的里程碑。</section>;
   const [draft, setDraft] = useState(selected);
   const [prerequisites, setPrerequisites] = useState(selected.prerequisites.join("\n"));
   const [conditions, setConditions] = useState(selected.completionConditions.join("\n"));
@@ -27,7 +25,7 @@ export function MilestoneEditor() {
 
   const save = () => {
     if (blocking) return;
-    update(selected.id, candidate);
+    void updateMilestone(selected.id, candidate);
   };
 
   return (

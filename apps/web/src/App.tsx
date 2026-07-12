@@ -2,13 +2,15 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { StoryPlanningPage } from "./pages/StoryPlanningPage";
+import { StoryWorkspaceProvider } from "./context/StoryWorkspaceContext";
+import { ProjectOverviewPage } from "./pages/ProjectOverviewPage";
 
 export function App() {
   return (
-    <Routes>
+    <StoryWorkspaceProvider><Routes>
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/planning" replace />} />
-        <Route path="overview" element={<PlaceholderPage page="overview" />} />
+        <Route path="overview" element={<ProjectOverviewPage />} />
         <Route path="canon" element={<PlaceholderPage page="canon" />} />
         <Route path="planning" element={<StoryPlanningPage />} />
         <Route path="writing" element={<PlaceholderPage page="writing" />} />
@@ -18,6 +20,6 @@ export function App() {
         <Route path="drama" element={<PlaceholderPage page="drama" />} />
       </Route>
       <Route path="*" element={<Navigate to="/planning" replace />} />
-    </Routes>
+    </Routes></StoryWorkspaceProvider>
   );
 }

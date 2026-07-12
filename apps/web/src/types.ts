@@ -6,9 +6,13 @@ export interface ProjectSummary {
   mode: StoryMode;
   currentChapter: number;
   totalChapters: number;
-  model: string;
-  modelOnline: boolean;
-  automationSchedule: string;
+  model?: string;
+  modelOnline?: boolean;
+  automationSchedule?: string;
+  folderPath: string;
+  createdAt: string;
+  updatedAt: string;
+  lastOpenedAt: string;
 }
 
 export type MilestoneType = "事件" | "关键事件" | "转折点" | "高潮点";
@@ -28,6 +32,7 @@ export interface PlanNode {
   foreshadows: string[];
   contracts: string[];
   pace: PaceStatus;
+  revision: number;
 }
 
 export interface StoryMarker {
@@ -46,6 +51,7 @@ export interface StoryPlan {
   chapterEnd: number;
   milestones: PlanNode[];
   markers: StoryMarker[];
+  revision: number;
 }
 
 export type ValidationSeverity = "error" | "warning" | "info";
@@ -76,6 +82,11 @@ export interface AgentSession {
   status: "idle" | "thinking" | "error";
 }
 
+export interface AgentResponse {
+  message: AgentMessage;
+  proposal?: ChangeProposal;
+}
+
 export type EditablePlanField = "targetChapter" | "rangeMin" | "rangeMax";
 
 export interface ChangeOperation {
@@ -101,4 +112,37 @@ export interface ChangeProposal {
   operations: ChangeOperation[];
   impacts: ImpactItem[];
   status: "pending" | "accepted" | "rejected";
+  revision: number;
+}
+
+export interface AuditEvent {
+  id: string;
+  eventType: string;
+  entityType: string;
+  entityId: string;
+  payload: Record<string, unknown>;
+  requestId: string;
+  createdAt: string;
+}
+
+export interface BackupManifest {
+  backupId: string;
+  projectId: string;
+  projectTitle: string;
+  createdAt: string;
+  files: Record<string, string>;
+  archivePath: string;
+}
+
+export interface ApiErrorShape {
+  code: string;
+  message: string;
+  details: Record<string, unknown>;
+  requestId: string;
+}
+
+export interface ProjectCreateRequest {
+  title: string;
+  mode: StoryMode;
+  totalChapters: number;
 }

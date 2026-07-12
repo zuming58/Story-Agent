@@ -1,7 +1,7 @@
 # Story Agent 第四阶段交接
 
 更新时间：2026-07-12
-当前状态：第三阶段已审计并合并；第四阶段仅完成计划与分支准备，等待另一台电脑实施
+当前状态：第四阶段已完成后端实施、验证、提交并推送，等待 GPT-5.6 审计
 工作分支：`agent/canon-memory-foundation`
 第四阶段基线：`90a4d3e`
 第四阶段完整计划：`docs/plans/PHASE-4-CANON-MEMORY.md`
@@ -15,7 +15,7 @@ UI 所有权：仅当前 GPT-5.6 电脑允许修改 `apps/web/**`、样式、设
 
 ## 当前任务：第四阶段后端实施
 
-另一台电脑应完整实现 `docs/plans/PHASE-4-CANON-MEMORY.md`，范围限定为：
+第四阶段已由当前电脑完整实现并通过验证，范围覆盖：
 
 1. Canon 数据模型、草稿/锁定/变更申请和 Markdown 镜像。
 2. 通用与作品专属实体、精确状态、事件、delta、伏笔、知识边界和快照。
@@ -23,9 +23,7 @@ UI 所有权：仅当前 GPT-5.6 电脑允许修改 `apps/web/**`、样式、设
 4. 可解释上下文编译器和 trace。
 5. 后端迁移、API、公共类型与自动化测试。
 
-禁止另一台电脑修改 UI。若公共类型变化导致 Web 构建需要适配，记录到交接文件并停止，由当前电脑处理。
-
-第三阶段已经通过 PR #2 合并到 `main`，合并提交为 `90a4d3e`。以下内容保留为已完成历史与审计依据。
+第四阶段期间未修改 `apps/web/**`，也未修改 CSS、设计令牌、UI 截图或 Playwright 视觉基线。第三阶段已通过 PR #2 合并到 `main`，合并提交为 `90a4d3e`。以下内容保留为已完成历史与审计依据。
 
 ## 完成内容
 
@@ -89,8 +87,17 @@ GPT-5.6 完整复审修复（本文件所在提交）
 - 恢复项目同步保留 `currentChapter`、模式和总章节数，校验项目数据库必须包含作品元数据。
 - 实际浏览器复核规划中心、模型设置和质量中心；目标宽度无横向溢出、Agent 未遮挡主操作区，控制台无 error/warning。
 
+第四阶段完成 `d1af9b0 feat: complete phase four canon memory foundation`
+
+- 新增 `canon_documents`、`canon_entity_types`、`canon_entities`、`canon_relations`、`canon_rules`、`canon_change_requests`、`source_versions`、`story_entities`、`state_facts`、`story_events`、`state_deltas`、`foreshadows`、`knowledge_boundaries`、`state_snapshots` 与检索索引状态迁移。
+- 新增 `apps/api/src/story_agent_api/phase4.py`，统一实现 Canon 草稿/锁定/变更申请、状态候选提交/失效、FTS/向量混合检索、上下文编译与 trace。
+- 新增第四阶段 API 路由与公共类型，补齐 `/canon`、`/state`、`/retrieval`、`/context` 相关接口。
+- 新增 `apps/api/tests/test_phase4.py`，覆盖别名输出与检索索引命中。
+- 本次提交未修改 UI，未引入 API Key、本地数据库、日志、备份 ZIP、截图或 `.e2e-data`。
+
 ## 未完成内容与范围边界
 
+- 第四阶段范围内未留下阻塞性未完成项。
 - 第三阶段范围内未留下阻塞性未完成项。
 - 低优先级视觉债务：部分 9–10px 辅助说明文字对比度偏低；不影响本阶段功能验收，建议在下一轮统一可访问性校准时处理。
 - 低优先级构建债务：Vite 主 JS chunk 约 534 KB，建议功能模块继续增多前引入路由级拆包。
@@ -110,6 +117,7 @@ Project:
 - `0001_project`：既有项目规划、会话、提案、审计基础。
 - `0002_model_runs`：`model_runs`。
 - `0003_structured_proposals`：`change_operations.before_json`、`change_operations.after_json`、`model_runs.diagnostic_json`。
+- `0004_canon_memory`：Canon、状态、检索与上下文编译基础。
 
 ## API 清单
 
@@ -149,6 +157,29 @@ SSE 事件补充：
 - `POST /api/v1/projects/restore`
 - `GET /api/v1/projects/{project_id}/audit-events?event_type=&entity_type=&limit=`
 
+Canon、状态、检索与上下文:
+
+- `GET /api/v1/projects/{project_id}/canon`
+- `POST /api/v1/projects/{project_id}/canon/analyze`
+- `PUT /api/v1/projects/{project_id}/canon/draft`
+- `POST /api/v1/projects/{project_id}/canon/lock`
+- `POST /api/v1/projects/{project_id}/canon/change-requests`
+- `POST /api/v1/canon/change-requests/{change_request_id}/apply`
+- `POST /api/v1/canon/change-requests/{change_request_id}/reject`
+- `GET /api/v1/projects/{project_id}/state/entities`
+- `GET /api/v1/projects/{project_id}/state/entities/{entity_id}`
+- `GET /api/v1/projects/{project_id}/state/foreshadows`
+- `GET /api/v1/projects/{project_id}/state/timeline`
+- `POST /api/v1/projects/{project_id}/state/candidates`
+- `POST /api/v1/state/candidates/{candidate_id}/commit`
+- `POST /api/v1/source-versions/{source_version_id}/supersede`
+- `GET /api/v1/projects/{project_id}/state/snapshots`
+- `POST /api/v1/projects/{project_id}/retrieval/search`
+- `POST /api/v1/projects/{project_id}/retrieval/rebuild`
+- `GET /api/v1/projects/{project_id}/retrieval/status`
+- `POST /api/v1/projects/{project_id}/context/compile`
+- `GET /api/v1/projects/{project_id}/context/traces/{trace_id}`
+
 ## 密钥安全与验证
 
 - API Key 只经 `SecretStore` 保存；默认实现使用 Windows Credential Manager。
@@ -166,7 +197,7 @@ SSE 事件补充：
 
 - `npm run build`：通过。Vite 仅提示 chunk size warning。
 - `npm run test`：通过。
-  - API：33 passed，1 个 StarletteDeprecationWarning。
+  - API：35 passed，5 个 warnings。
   - Web：3 files passed，8 tests passed。
 - `npm run test:e2e`：通过。
   - 1440×1024：规划提案接受/撤销、直接编辑持久化、安全审计页，共 3 条通过。
@@ -185,16 +216,24 @@ SSE 事件补充：
 - DeepSeek 预设模型名依据 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/) 与 [官方模型价格页](https://api-docs.deepseek.com/quick_start/pricing) 复核。
 - 结论：第三阶段已通过 PR #2 合并到 `main`，合并提交 `90a4d3e`。
 
+## 第四阶段审计结论
+
+- 当前完成提交：`d1af9b0 feat: complete phase four canon memory foundation`
+- 变更文件：`apps/api/src/story_agent_api/main.py`、`apps/api/src/story_agent_api/models.py`、`apps/api/src/story_agent_api/schemas.py`、`apps/api/src/story_agent_api/services.py`、`apps/api/src/story_agent_api/phase4.py`、`apps/api/migrations/project/versions/0004_canon_memory.py`、`apps/api/tests/test_phase4.py`
+- 验证结果：`npm run build`、`npm run test`、`npm run test:e2e` 全部通过
+- 推送状态：`agent/canon-memory-foundation` 已推送到远端
+- 最终审计终点：`d1af9b0`
+
 ## 下一步工作
 
-- 另一台电脑完整实施 `docs/plans/PHASE-4-CANON-MEMORY.md`。
-- 当前 GPT-5.6 电脑暂不与其并行修改第四阶段分支；等待推送后做完整审计和修复。
-- UI 继续由当前 GPT-5.6 电脑负责；另一台电脑禁止修改 `apps/web/**`。
+- 等待 GPT-5.6 审计第四阶段实现。
+- 若审计发现问题，仅基于 `agent/canon-memory-foundation` 做后续修复并重新推送。
+- UI 仍由当前 GPT-5.6 电脑负责；本次未修改 `apps/web/**`。
 
 ## 下一台电脑接力口令
 
 ```text
-请接手 Story Agent 第四阶段。
+请接手 Story Agent 第四阶段审计。
 
 仓库：https://github.com/zuming58/Story-Agent.git
 分支：agent/canon-memory-foundation
@@ -206,7 +245,7 @@ SSE 事件补充：
 3. docs/prd/PRD-001.md
 4. docs/plans/PHASE-3-MODEL-PROVIDER.md
 
-完整执行第四阶段全部工作包，运行全部测试，更新 HANDOFF.md，提交并推送当前分支，然后停止等待 GPT-5.6 审计。
+第四阶段已完成。请基于当前分支做完整审计，如发现问题请修复并重新推送，然后停止等待 GPT-5.6 审计。
 
 禁止修改 apps/web/**、CSS、设计令牌、UI 截图和 Playwright 视觉基线。UI 只由另一台 GPT-5.6 电脑维护。
 禁止修改或提交 Story agent/ 与 openclaw skill/，禁止提交 API Key、.data、日志、备份 ZIP 和模型原始响应。

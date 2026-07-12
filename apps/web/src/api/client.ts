@@ -4,6 +4,7 @@ import type {
   AgentStreamEvent,
   ApiErrorShape,
   AuditEvent,
+  BackupRecord,
   BackupManifest,
   ChangeProposal,
   ModelConfig,
@@ -92,10 +93,37 @@ export const api = {
     request<ChangeProposal>(`/change-proposals/${proposalId}/apply`, { method: "POST", body: JSON.stringify(payload) }),
   rejectProposal: (proposalId: string, payload: { projectId: string; expectedRevision: number }) =>
     request<ChangeProposal>(`/change-proposals/${proposalId}/reject`, { method: "POST", body: JSON.stringify(payload) }),
-  audits: (projectId: string) => request<AuditEvent[]>(`/projects/${projectId}/audit-events`),
+  audits: (projectId: string, filters?: { eventType?: string; entityType?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (filters?.eventType) params.set("eventType", filters.eventType);
+    if (filters?.entityType) params.set("entityType", filters.entityType);
+    if (filters?.limit) params.set("limit", String(filters.limit));
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return request<AuditEvent[]>(`/projects/${projectId}/audit-events${suffix}`);
+  },
   undo: (projectId: string, eventId: string) => request<AuditEvent>(`/projects/${projectId}/audit-events/${eventId}/undo`, { method: "POST" }),
   backup: (projectId: string) => request<BackupManifest>(`/projects/${projectId}/backups`, { method: "POST" }),
-  modelRuns: (projectId: string) => request<ModelRun[]>(`/projects/${projectId}/model-runs`),
+  backups: (projectId: string) => request<BackupRecord[]>(`/projects/${projectId}/backups`),
+  restoreBackup: async (file: File) => {
+    const form = new FormData();
+    form.append("backup", file);
+    const response = await fetch("/api/v1/projects/restore", { method: "POST", body: form });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({
+        code: "NETWORK_ERROR", message: `请求失败（${response.status}）`, details: {}, requestId: "unknown",
+      })) as ApiErrorShape;
+      throw new ApiClientError(response.status, payload);
+    }
+    return response.json() as Promise<ProjectSummary>;
+  },
+  modelRuns: (projectId: string, filters?: { status?: string; role?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (filters?.status) params.set("status", filters.status);
+    if (filters?.role) params.set("role", filters.role);
+    if (filters?.limit) params.set("limit", String(filters.limit));
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return request<ModelRun[]>(`/projects/${projectId}/model-runs${suffix}`);
+  },
   cancelModelRun: (projectId: string, runId: string) => request<ModelRun>(`/projects/${projectId}/model-runs/${runId}/cancel`, { method: "POST" }),
   modelProviders: () => request<ModelProvider[]>("/model-providers"),
   createModelProvider: (payload: {

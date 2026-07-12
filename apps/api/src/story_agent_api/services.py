@@ -441,7 +441,10 @@ class StoryService:
                 if existing:
                     session.delete(existing)
                     session.commit()
-            shutil.rmtree(folder, ignore_errors=True)
+            try:
+                (folder / ".failed-create").write_text("Project creation failed before commit completed.\n", encoding="utf-8")
+            except OSError:
+                pass
             raise
         return catalog
 
@@ -771,10 +774,15 @@ class StoryService:
             session.flush()
             return self._proposal_dict(proposal)
 
-    def list_audit_events(self, project_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def list_audit_events(self, project_id: str, limit: int = 100, event_type: str | None = None, entity_type: str | None = None) -> list[dict[str, Any]]:
         project = self.get_project(project_id)
         with self.db.project(project.id, project.folder_path) as session:
-            events = session.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(min(limit, 500))).all()
+            query = select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(min(limit, 500))
+            if event_type:
+                query = query.where(AuditEvent.event_type == event_type)
+            if entity_type:
+                query = query.where(AuditEvent.entity_type == entity_type)
+            events = session.scalars(query).all()
             return [self._audit_dict(item) for item in events]
 
     def undo_event(self, project_id: str, event_id: str, request_id: str) -> dict[str, Any]:
@@ -832,6 +840,30 @@ class StoryService:
                 package.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         return {**manifest, "archivePath": str(archive)}
 
+    def list_backups(self, project_id: str) -> list[dict[str, Any]]:
+        project = self.get_project(project_id)
+        folder = Path(project.folder_path)
+        backups: list[dict[str, Any]] = []
+        for archive in sorted((folder / "backups").glob("*.zip"), key=lambda path: path.stat().st_mtime, reverse=True):
+            item = self._read_backup_manifest(archive, require_checksums=False)
+            item["archivePath"] = str(archive)
+            item["sizeBytes"] = archive.stat().st_size
+            item["isValid"] = self._backup_archive_is_valid(archive)
+            backups.append(item)
+        return backups
+
+    def backup_archive_path(self, project_id: str, backup_id: str) -> Path:
+        project = self.get_project(project_id)
+        folder = Path(project.folder_path)
+        for archive in (folder / "backups").glob("*.zip"):
+            try:
+                manifest = self._read_backup_manifest(archive, require_checksums=False)
+            except StoryError:
+                continue
+            if manifest.get("backupId") == backup_id:
+                return archive
+        raise StoryError(404, "BACKUP_NOT_FOUND", "备份不存在。", {"backupId": backup_id})
+
     def restore_backup(self, archive_path: Path) -> CatalogProject:
         if not zipfile.is_zipfile(archive_path):
             raise StoryError(422, "INVALID_BACKUP", "备份文件不是有效 ZIP。")
@@ -862,8 +894,11 @@ class StoryService:
                 engine.dispose()
             shutil.copy2(temp / "story.db", target_folder / "story.db")
             if (temp / "canon").exists():
-                shutil.rmtree(target_folder / "canon")
-                shutil.copytree(temp / "canon", target_folder / "canon")
+                for canon_file in (temp / "canon").rglob("*"):
+                    if canon_file.is_file():
+                        destination = target_folder / canon_file.relative_to(temp)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(canon_file, destination)
             self.db.ensure_project_database(restored.id, target_folder)
             with self.db.project_write(restored.id, target_folder) as session:
                 old_meta = session.scalar(select(ProjectMeta))
@@ -875,6 +910,37 @@ class StoryService:
                         agent_session.project_id = restored.id
             self._write_project_files(restored)
             return restored
+
+    def _read_backup_manifest(self, archive: Path, *, require_checksums: bool) -> dict[str, Any]:
+        if not zipfile.is_zipfile(archive):
+            raise StoryError(422, "INVALID_BACKUP", "备份文件不是有效 ZIP。")
+        with zipfile.ZipFile(archive) as package:
+            names = set(package.namelist())
+            if "manifest.json" not in names:
+                raise StoryError(422, "INVALID_BACKUP", "备份缺少 manifest.json。")
+            manifest = json.loads(package.read("manifest.json"))
+            if require_checksums:
+                for name in names:
+                    path = PurePosixPath(name)
+                    if path.is_absolute() or ".." in path.parts:
+                        raise StoryError(422, "INVALID_BACKUP_PATH", "备份包含不安全路径。", {"path": name})
+                for name, expected in manifest.get("files", {}).items():
+                    if name not in names:
+                        raise StoryError(422, "BACKUP_CHECKSUM_MISMATCH", "备份校验失败。", {"path": name})
+                    digest = hashlib.sha256()
+                    with package.open(name) as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    if digest.hexdigest() != expected:
+                        raise StoryError(422, "BACKUP_CHECKSUM_MISMATCH", "备份校验失败。", {"path": name})
+            return manifest
+
+    def _backup_archive_is_valid(self, archive: Path) -> bool:
+        try:
+            self._read_backup_manifest(archive, require_checksums=True)
+            return True
+        except StoryError:
+            return False
 
     def _validate_base_url(self, value: str) -> None:
         parsed = urlparse(value)

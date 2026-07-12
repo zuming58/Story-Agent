@@ -32,6 +32,14 @@ def test_backup_manifest_and_restore_as_new_project(client: TestClient, demo_pro
     assert restored_plan.status_code == 200
     assert len(restored_plan.json()["milestones"]) == 5
 
+    listed = client.get(f"/api/v1/projects/{project_id}/backups")
+    assert listed.status_code == 200
+    assert listed.json()[0]["backupId"] == manifest["backupId"]
+    assert listed.json()[0]["isValid"] is True
+    downloaded = client.get(f"/api/v1/projects/{project_id}/backups/{manifest['backupId']}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith("application/zip")
+
 
 def test_corrupt_backup_is_rejected(client: TestClient, demo_project: dict) -> None:
     backup = client.post(f"/api/v1/projects/{demo_project['id']}/backups").json()
@@ -49,3 +57,16 @@ def test_corrupt_backup_is_rejected(client: TestClient, demo_project: dict) -> N
     )
     assert response.status_code == 422
     assert response.json()["code"] == "BACKUP_CHECKSUM_MISMATCH"
+
+
+def test_backup_restore_rejects_path_traversal(client: TestClient, demo_project: dict) -> None:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("manifest.json", json.dumps({"backupId": "bad", "projectId": demo_project["id"], "projectTitle": "bad", "createdAt": "2026-07-12T00:00:00Z", "files": {}}))
+        package.writestr("../escape.txt", "nope")
+    response = client.post(
+        "/api/v1/projects/restore",
+        files={"backup": ("traversal.zip", output.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "INVALID_BACKUP_PATH"

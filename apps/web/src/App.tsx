@@ -5,6 +5,7 @@ import { StoryPlanningPage } from "./pages/StoryPlanningPage";
 import { StoryWorkspaceProvider } from "./context/StoryWorkspaceContext";
 import { ProjectOverviewPage } from "./pages/ProjectOverviewPage";
 import { ModelSettingsPage } from "./pages/ModelSettingsPage";
+import { SafetyAuditPage } from "./pages/SafetyAuditPage";
 
 export function App() {
   return (
@@ -15,7 +16,7 @@ export function App() {
         <Route path="canon" element={<PlaceholderPage page="canon" />} />
         <Route path="planning" element={<StoryPlanningPage />} />
         <Route path="writing" element={<PlaceholderPage page="writing" />} />
-        <Route path="quality" element={<PlaceholderPage page="quality" />} />
+        <Route path="quality" element={<SafetyAuditPage />} />
         <Route path="state" element={<PlaceholderPage page="state" />} />
         <Route path="automation" element={<PlaceholderPage page="automation" />} />
         <Route path="settings" element={<ModelSettingsPage />} />

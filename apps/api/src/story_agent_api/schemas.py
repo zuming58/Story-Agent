@@ -200,6 +200,11 @@ class BackupManifest(ApiModel):
     archive_path: str
 
 
+class BackupRecord(BackupManifest):
+    size_bytes: int
+    is_valid: bool
+
+
 class ModelProviderCreate(ApiModel):
     name: str = Field(min_length=1, max_length=160)
     provider_type: Literal["openai-compatible"] = "openai-compatible"

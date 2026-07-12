@@ -230,6 +230,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
       if (!project) return;
       try {
         const backup = await api.backup(project.id);
+        await client.invalidateQueries({ queryKey: ["backups", project.id] });
         setNotice(`备份已生成：${backup.archivePath}`);
       } catch (error) { handleError(error); throw error; }
     },

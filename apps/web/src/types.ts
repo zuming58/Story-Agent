@@ -207,6 +207,11 @@ export interface BackupManifest {
   archivePath: string;
 }
 
+export interface BackupRecord extends BackupManifest {
+  sizeBytes: number;
+  isValid: boolean;
+}
+
 export interface ModelProvider {
   id: string;
   name: string;

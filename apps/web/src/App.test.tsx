@@ -25,6 +25,15 @@ describe("Story Agent shell", () => {
       if (url.includes("/change-proposals")) return json([initialProposal]);
       if (url.includes("/audit-events")) return json([]);
       if (url.includes("/model-runs")) return json([]);
+      if (url.includes("/backups") && init?.method === "POST") return json({
+        backupId: "backup-1",
+        projectId: project.id,
+        projectTitle: project.title,
+        createdAt: "2026-07-12T00:00:00Z",
+        files: { "story.db": "hash" },
+        archivePath: "F:/tmp/backup.zip",
+      });
+      if (url.includes("/backups")) return json([]);
       if (url.endsWith("/model-providers") && init?.method === "POST") return json({
         id: "provider-custom",
         name: "测试 Provider",
@@ -87,5 +96,16 @@ describe("Story Agent shell", () => {
     expect(await screen.findByText("流式回答")).toBeInTheDocument();
     expect(screen.getAllByText(/测试 Provider \/ fake-planner/).length).toBeGreaterThan(0);
     expect(screen.getByRole("region", { name: "模型运行状态" })).toBeInTheDocument();
+  });
+
+  it("opens the safety audit workspace with backup and diagnostics panels", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/quality"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    expect(await screen.findByRole("heading", { name: "备份恢复与调用诊断" })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "备份管理" })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "审计时间线" })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "模型调用记录" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
   });
 });

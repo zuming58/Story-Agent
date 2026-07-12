@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.responses import StreamingResponse
 
 from .config import Settings
@@ -20,6 +20,7 @@ from .schemas import (
     AgentSessionOut,
     AuditEventOut,
     BackupManifest,
+    BackupRecord,
     ChangeProposalOut,
     ModelConfigCreate,
     ModelConfigOut,
@@ -208,8 +209,8 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
         return service.reject_proposal(proposal_id, payload, request.state.request_id)
 
     @app.get("/api/v1/projects/{project_id}/audit-events", response_model=list[AuditEventOut])
-    def audit_events(project_id: str, limit: int = Query(default=100, ge=1, le=500)) -> object:
-        return service.list_audit_events(project_id, limit)
+    def audit_events(project_id: str, limit: int = Query(default=100, ge=1, le=500), event_type: str | None = Query(default=None), entity_type: str | None = Query(default=None)) -> object:
+        return service.list_audit_events(project_id, limit, event_type=event_type, entity_type=entity_type)
 
     @app.post("/api/v1/projects/{project_id}/audit-events/{event_id}/undo", response_model=AuditEventOut)
     def undo_event(project_id: str, event_id: str, request: Request) -> object:
@@ -218,6 +219,15 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/projects/{project_id}/backups", response_model=BackupManifest, status_code=201)
     def create_backup(project_id: str) -> object:
         return service.create_backup(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/backups", response_model=list[BackupRecord])
+    def list_backups(project_id: str) -> object:
+        return service.list_backups(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/backups/{backup_id}/download")
+    def download_backup(project_id: str, backup_id: str) -> FileResponse:
+        path = service.backup_archive_path(project_id, backup_id)
+        return FileResponse(path, media_type="application/zip", filename=path.name)
 
     @app.post("/api/v1/projects/restore", response_model=ProjectOut, status_code=201)
     async def restore_project(backup: UploadFile = File(...)) -> object:

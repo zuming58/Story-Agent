@@ -1,88 +1,54 @@
 # Story Agent 开发交接
 
-更新时间：2026-07-12  
-当前阶段：第二阶段——本地数据基础  
-当前分支：`agent/local-data-foundation`  
-最新代码提交：`751eee0`（并发迁移锁、端到端测试与布局加固）
-草稿 PR：`https://github.com/zuming58/Story-Agent/pull/1`
+更新时间：2026-07-12
+当前阶段：第三阶段——真实模型基础
+当前关卡：关卡一——模型配置基础
+工作分支：`agent/model-provider-foundation`
+基线：当前 PR #1 合并后的 `main`
+完整计划：`docs/plans/PHASE-3-MODEL-PROVIDER.md`
 
-## 阶段目标与完成状态
+## 当前任务
 
-本阶段目标是把第一阶段的高保真模拟原型升级为可重启、可审计、可备份的本地数据闭环。核心实现已经完成：
+只实施关卡一，不得提前修改 Agent 消息接口、接入流式输出、生成真实模型回复或结构化提案。
 
-- FastAPI、SQLAlchemy、Alembic 与 SQLite；
-- `catalog.db` 作品目录库及每部作品独立 `story.db`；
-- 作品创建、列表、打开和规划保存；
-- 后端模拟 Agent、会话、消息、字段级提案、接受和拒绝；
-- revision 乐观并发控制与 HTTP 409；
-- 规划更新、提案状态和审计事件同事务提交；
-- 基于审计事件的撤销；
-- 带 SHA-256 清单的 ZIP 备份、损坏拒绝和恢复为新项目；
-- React Query 接管业务数据，Zustand 只保存 UI 状态；
-- 1440×1024 与 1280×800 端到端验证。
+本关交付：
 
-## 架构与数据权威关系
+- Provider、模型配置和角色绑定表及 catalog Alembic 迁移；
+- OpenAI 兼容 Provider 配置、编辑、删除和连接测试 API；
+- DeepSeek 官方预设与自定义中转地址；
+- Windows Credential Manager SecretStore 和测试用内存 SecretStore；
+- 高保真“模型与费用设置”页面；
+- Provider、密钥安全、角色绑定和两档桌面布局测试。
+
+详细字段、接口、验收和错误规则必须按完整计划执行。
+
+## 当前架构基线
 
 ```text
 React UI
-├── React Query：作品、规划、会话、提案、审计的服务端缓存
-└── Zustand：当前选区、Agent 折叠和宽度等非业务状态
+├── React Query：作品、规划、会话、提案、审计
+└── Zustand：选区、Agent 折叠和宽度等 UI 状态
         │
         ▼
 FastAPI /api/v1
         │
         ├── .data/catalog.db
-        │   └── 作品目录、路径、最近打开状态
-        └── .data/projects/{project-id}-{slug}/
-            ├── project.json
-            ├── story.db
-            ├── canon/story-core.md
-            ├── backups/
-            └── exports/
+        └── .data/projects/{project-id}-{slug}/story.db
 ```
 
-SQLite 是正式业务数据权威；浏览器 localStorage 不保存作品、规划、消息或提案。`project.json` 是项目可读元数据，Canon Markdown 为后续故事内核和 RAG 预留。
+现有正式能力包括作品隔离、规划 revision、模拟 Agent、提案接受/拒绝、审计、撤销和带 SHA-256 的备份恢复。关卡一只能在此基础上增加模型配置，不得破坏这些闭环。
 
-## 数据库表
+## 开始前必须阅读
 
-目录库：
+1. `HANDOFF.md`
+2. `docs/plans/PHASE-3-MODEL-PROVIDER.md`
+3. `docs/prd/PRD-001.md`
+4. `docs/ui/UI-DESIGN-BASELINE.md`
+5. `design-qa.md`
 
-- `projects`
-- `app_settings`
+## 环境与启动
 
-作品库：
-
-- `project_meta`
-- `plans`
-- `plan_nodes`
-- `story_markers`
-- `agent_sessions`
-- `agent_messages`
-- `change_proposals`
-- `change_operations`
-- `proposal_impacts`
-- `audit_events`
-
-## API 清单
-
-- `GET /api/v1/health`
-- `GET|POST /api/v1/projects`
-- `GET|PATCH /api/v1/projects/{projectId}`
-- `GET /api/v1/projects/{projectId}/plan`
-- `PATCH /api/v1/projects/{projectId}/plan/nodes/{nodeId}`
-- `GET|POST /api/v1/projects/{projectId}/agent/sessions`
-- `POST /api/v1/agent/sessions/{sessionId}/messages`
-- `GET /api/v1/projects/{projectId}/change-proposals`
-- `POST /api/v1/change-proposals/{proposalId}/apply`
-- `POST /api/v1/change-proposals/{proposalId}/reject`
-- `GET /api/v1/projects/{projectId}/audit-events`
-- `POST /api/v1/projects/{projectId}/audit-events/{eventId}/undo`
-- `POST /api/v1/projects/{projectId}/backups`
-- `POST /api/v1/projects/restore`
-
-## 启动、构建和测试
-
-要求 Node.js 24、Python 3.13 与 `uv`。API 使用 `127.0.0.1:8765`，因为当前电脑的 `8000` 被 Incredibuild 占用。
+目标运行时为 Node.js 24 LTS、Python 3.13 和 `uv`。API 使用 `127.0.0.1:8765`。
 
 ```powershell
 npm install
@@ -91,39 +57,43 @@ uv sync --project apps/api --dev
 npm run dev
 ```
 
+## 完成前验证
+
+必须运行：
+
 ```powershell
 npm run build
 npm run test
 npm run test:e2e
 ```
 
-## 测试结果
+测试不得调用真实付费模型，必须使用内存 SecretStore 和本地假 OpenAI 服务。
 
-- API：7 passed；另有 1 条 Starlette TestClient/httpx 弃用警告。
-- Web 单元测试：3 files、5 tests passed。
-- Playwright：4 passed，覆盖 1440×1024 与 1280×800。
-- Web 生产构建：通过。
+## 完成后的交接要求
 
-## 未完成与已知问题
+另一台 Agent 完成关卡一后必须把本文件更新为：
 
-- 尚未接入 DeepSeek 或其他 OpenAI 兼容模型，目前为确定性后端模拟 Agent。
-- Canon、全文检索、向量索引、章节契约自动写作和双层质量复核尚未实现。
-- 备份与恢复已有 API，但尚未完成独立的前端管理页面。
-- Node.js 运行时目标是 24 LTS；当前电脑已有 Node 25，Node 24 MSI 安装返回 1603，因此接力机器应直接使用 Node 24。
-- Starlette TestClient 产生上游弃用警告，不影响当前测试结果。
+- 实际完成内容；
+- 未完成内容和已知问题；
+- 数据库迁移与新增 API；
+- 测试命令及真实结果；
+- 最新提交号；
+- 审计起点和审计终点；
+- 明确状态“停止开发，等待 GPT-5.6 审计”。
 
-## 下一位 Agent 的任务
+提交并推送 `agent/model-provider-foundation` 后立即停止，不合并 `main`，不开放关卡二。
 
-1. 首先复核运行本文件中的三条验证命令，不要直接开始大改。
-2. 完成备份列表、恢复上传和审计时间线 UI，使已有 API 可在界面中操作。
-3. 增加并发读取回归测试，确保 Alembic 迁移锁和“每项目仅首次迁移”机制不退化。
-4. 设计 OpenAI 兼容模型配置层，但不要把密钥写入仓库或数据库备份。
-5. 每次结束前更新本文件并推送同一功能分支。
+## 禁止事项
 
-## 禁止事项与恢复点
+- 不修改或提交 `Story agent/` 和 `openclaw skill/`。
+- 不提交 API Key、`.data/`、`apps/web/.e2e-data/`、日志、备份 ZIP 或临时文件。
+- 不在 SQLite、日志、API 响应和备份中保存完整密钥。
+- 不绕过 revision、事务和提案确认机制。
+- 不提前实施关卡二、三、四。
+- 如果交接文件与实际代码冲突，以代码为准，记录差异并停止扩大范围。
 
-- 不修改或提交 `Story agent/` 和 `openclaw skill/` 两个本地参考目录。
-- 不提交 `.data/`、`apps/web/.e2e-data/`、密钥、日志、ZIP 备份和临时文件。
-- 不绕过 revision 检查，不把提案未经确认直接写入正式规划。
-- 不拆开“规划更新 + 提案状态 + 审计事件”的事务边界。
-- 当前可恢复点为本分支最终发布提交及对应草稿 PR。
+## 返回 GPT-5.6 的口令
+
+```text
+另一台电脑已经完成关卡一并推送，请读取 HANDOFF.md 和最新提交，进行完整代码审计和修复。
+```

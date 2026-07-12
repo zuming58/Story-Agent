@@ -211,3 +211,44 @@ def test_configured_reviewers_do_not_create_missing_role_findings(client: TestCl
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_approve_and_commit_materializes_chapter_state_and_mirror(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        run = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={})
+        assert run.status_code == 200, run.text
+        quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        for finding in quality["findings"]:
+            if finding["status"] == "open" and finding["severity"] in {"error", "blocker"}:
+                accepted = client.post(f"/api/v1/projects/{project_id}/quality-findings/{finding['id']}/accept-risk", json={"reason": "manual approval for unit test"})
+                assert accepted.status_code == 200, accepted.text
+        job_state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        approved = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/approve", json={
+            "mode": "manual",
+            "expectedJobRevision": job_state["revision"],
+        })
+        assert approved.status_code == 200, approved.text
+        committed = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/commit", json={
+            "expectedJobRevision": approved.json()["revision"],
+        })
+        assert committed.status_code == 200, committed.text
+        commit = committed.json()
+        assert commit["status"] == "official"
+        assert commit["sourceVersionId"]
+        assert commit["stateSnapshotId"]
+        entities = client.get(f"/api/v1/projects/{project_id}/state/entities").json()
+        assert entities and entities[0]["canonicalName"] == "Lin Mo"
+        project = client.get(f"/api/v1/projects/{project_id}").json()
+        mirror_path = project["folderPath"] + "\\manuscripts\\chapter-0001.md"
+        from pathlib import Path
+
+        assert Path(mirror_path).exists()
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -22,6 +22,8 @@ from .models import (
     ChapterDraft,
     ChapterExtraction,
     ChapterJob,
+    Foreshadow,
+    KnowledgeBoundary,
     ModelRun,
     Plan,
     PlanNode,
@@ -29,7 +31,10 @@ from .models import (
     QualityFinding,
     QualityRun,
     SourceVersion,
+    StateDelta,
+    StateFact,
     StateSnapshot,
+    StoryEntity,
     utc_now,
 )
 from .schemas import (
@@ -491,10 +496,157 @@ class Phase5Service:
             return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
 
     def approve_chapter_job(self, project_id: str, job_id: str, payload: ChapterApproveRequest, request_id: str) -> dict[str, Any]:
-        raise StoryError(501, "PHASE5_APPROVAL_NOT_IMPLEMENTED", "Approval is implemented in the commit work package.")
+        project = self.service.get_project(project_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            if job.revision != payload.expected_job_revision:
+                raise StoryError(409, "CHAPTER_JOB_REVISION_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
+            draft = self._current_draft(session, job.id)
+            if not draft:
+                raise StoryError(409, "CHAPTER_DRAFT_EMPTY", "No draft is available for approval.")
+            findings = session.scalars(select(QualityFinding).where(QualityFinding.chapter_draft_id == draft.id)).all()
+            open_blocking = self._open_blocking_count(findings)
+            if payload.mode == "guarded_auto" and open_blocking:
+                raise StoryError(409, "CHAPTER_QUALITY_BLOCKED", "Open blocker/error findings prevent guarded auto approval.", {"openBlockingCount": open_blocking})
+            if payload.mode == "manual" and any(item.status == "open" and item.severity == "blocker" for item in findings):
+                raise StoryError(409, "CHAPTER_QUALITY_BLOCKED", "Open blocker findings prevent manual approval.", {"openBlockingCount": open_blocking})
+            for other in session.scalars(select(ChapterDraft).where(ChapterDraft.chapter_job_id == job.id, ChapterDraft.id != draft.id, ChapterDraft.status == "approved")).all():
+                other.status = "superseded"
+                other.updated_at = _now()
+            draft.status = "approved"
+            draft.kind = "approved"
+            draft.revision += 1
+            draft.updated_at = _now()
+            job.status = "approved"
+            job.revision += 1
+            job.updated_at = _now()
+            session.add(self.service._audit("chapter_job.approved", "chapter_job", job.id, {"draftId": draft.id, "mode": payload.mode, "requestId": request_id}, request_id))
+            return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
 
     def commit_chapter_job(self, project_id: str, job_id: str, payload: ChapterCommitRequest, request_id: str) -> dict[str, Any]:
-        raise StoryError(501, "PHASE5_COMMIT_NOT_IMPLEMENTED", "Commit is implemented in the commit work package.")
+        project = self.service.get_project(project_id)
+        committed: dict[str, Any]
+        mirror: tuple[int, str] | None = None
+        try:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                job = self._get_job(session, project.id, job_id)
+                if job.revision != payload.expected_job_revision:
+                    job.status = "human_review"
+                    job.error_code = "CHAPTER_COMMIT_CONFLICT"
+                    job.updated_at = _now()
+                    raise StoryError(409, "CHAPTER_COMMIT_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
+                if job.status != "approved":
+                    raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only approved chapter jobs can be committed.")
+                contract = self._get_contract(session, project.id, job.chapter_contract_id)
+                if contract.status != "locked":
+                    raise StoryError(409, "CHAPTER_CONTRACT_NOT_LOCKED", "Chapter contract is no longer locked.")
+                if contract.plan_node_id:
+                    node = session.get(PlanNode, contract.plan_node_id)
+                    if not node or node.revision != contract.plan_node_revision:
+                        job.status = "human_review"
+                        job.error_code = "CHAPTER_CONTEXT_STALE"
+                        job.updated_at = _now()
+                        raise StoryError(409, "CHAPTER_CONTEXT_STALE", "Plan node changed after contract derivation.")
+                draft = self._current_draft(session, job.id)
+                if not draft or draft.status != "approved":
+                    raise StoryError(409, "CHAPTER_DRAFT_NOT_APPROVED", "Approved draft is required before commit.")
+                findings = session.scalars(select(QualityFinding).where(QualityFinding.chapter_draft_id == draft.id)).all()
+                open_blocking = self._open_blocking_count(findings)
+                if open_blocking:
+                    raise StoryError(409, "CHAPTER_QUALITY_BLOCKED", "Open blocker/error findings prevent commit.", {"openBlockingCount": open_blocking})
+                extraction = session.scalar(select(ChapterExtraction).where(ChapterExtraction.chapter_draft_id == draft.id).order_by(ChapterExtraction.created_at.desc()))
+                if not extraction or extraction.status != "validated":
+                    raise StoryError(409, "CHAPTER_EXTRACTION_INVALID", "Validated extraction is required before commit.")
+                extraction_payload = _safe_loads(extraction.payload_json, {})
+                now = _now()
+                source_id = f"chapter-{contract.chapter_number:04d}"
+                previous_commit = session.scalar(select(ChapterCommit).where(
+                    ChapterCommit.project_id == project.id,
+                    ChapterCommit.chapter_number == contract.chapter_number,
+                    ChapterCommit.is_current.is_(True),
+                ))
+                previous_version_number = 0
+                if previous_commit:
+                    previous_source = session.get(SourceVersion, previous_commit.source_version_id)
+                    if previous_source and previous_source.status == "official":
+                        previous_version_number = previous_source.version_number
+                        self.service.phase4._supersede_source_version_in_session(session, project.id, previous_source, now) if hasattr(self.service.phase4, "_supersede_source_version_in_session") else self._supersede_previous_source_inline(session, project.id, previous_source, now)
+                    previous_commit.is_current = False
+                    previous_commit.status = "superseded"
+                version_number = previous_version_number + 1
+                source = SourceVersion(
+                    id=str(uuid4()),
+                    project_id=project.id,
+                    source_id=source_id,
+                    version_number=version_number,
+                    source_kind="chapter",
+                    status="candidate",
+                    checksum=stable_digest({"draft": draft.checksum, "extraction": extraction.checksum}),
+                    summary=extraction_payload.get("summary") or contract.title,
+                    payload_json=dumps(extraction_payload),
+                    revision=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(source)
+                session.flush()
+                self.service.phase4._validate_state_payload(session, project.id, extraction_payload)
+                self.service.phase4._materialize_state_payload(session, project.id, extraction_payload, source.id, now)
+                source.status = "official"
+                source.revision += 1
+                source.updated_at = now
+                snapshot = self.service.phase4._create_state_snapshot(session, project.id, source.id, extraction_payload, now)
+                quality_summary = self._quality_summary(findings)
+                commit = ChapterCommit(
+                    id=str(uuid4()),
+                    project_id=project.id,
+                    chapter_number=contract.chapter_number,
+                    chapter_contract_id=contract.id,
+                    approved_draft_id=draft.id,
+                    source_version_id=source.id,
+                    state_snapshot_id=snapshot.id,
+                    quality_summary_json=dumps(quality_summary),
+                    checksum=stable_digest({"draft": draft.checksum, "sourceVersionId": source.id, "quality": quality_summary}),
+                    status="official",
+                    is_current=True,
+                    revision=1,
+                    committed_at=now,
+                    created_at=now,
+                )
+                session.add(commit)
+                meta = session.get(ProjectMeta, project.id)
+                if meta:
+                    meta.current_chapter = max(meta.current_chapter, contract.chapter_number)
+                    meta.updated_at = now
+                job.status = "completed"
+                job.revision += 1
+                job.finished_at = now
+                job.updated_at = now
+                self.service.phase4._rebuild_retrieval_index(session, project.id, now)
+                session.add(self.service._audit("chapter_job.committed", "chapter_job", job.id, {"chapterCommitId": commit.id, "sourceVersionId": source.id, "snapshotId": snapshot.id, "requestId": request_id}, request_id))
+                session.flush()
+                committed = self._commit_dict(commit)
+                mirror = (contract.chapter_number, draft.content_markdown)
+            with self.service.db.catalog() as session:
+                catalog = session.get(type(project), project.id)
+                if catalog:
+                    catalog.current_chapter = max(catalog.current_chapter, mirror[0] if mirror else catalog.current_chapter)
+                    catalog.updated_at = utc_now()
+                    session.commit()
+            if mirror:
+                self._mirror_chapter_markdown_safely(project.id, project.folder_path, mirror[0], mirror[1])
+            return committed
+        except StoryError as exc:
+            if exc.code == "STATE_FACT_CONFLICT":
+                with self.service.db.project_write(project.id, project.folder_path) as session:
+                    job = session.get(ChapterJob, job_id)
+                    if job:
+                        job.status = "human_review"
+                        job.error_code = "CHAPTER_STATE_CONFLICT"
+                        job.updated_at = _now()
+                    session.add(self.service._audit("chapter.state_conflict_detected", "chapter_job", job_id, {**exc.details, "requestId": request_id}, request_id))
+                raise StoryError(409, "CHAPTER_STATE_CONFLICT", "Chapter state conflicts with current facts.", exc.details) from exc
+            raise
 
     # ------------------------------------------------------------------
     # Model and persistence helpers
@@ -1089,3 +1241,90 @@ class Phase5Service:
             "completedAt": item.completed_at,
             "findings": [self._finding_dict(finding) for finding in findings],
         }
+
+    def _quality_summary(self, findings: list[QualityFinding]) -> dict[str, Any]:
+        counts: dict[str, int] = {}
+        for item in findings:
+            key = f"{item.status}:{item.severity}"
+            counts[key] = counts.get(key, 0) + 1
+        return {"counts": counts, "acceptedRiskCount": sum(1 for item in findings if item.status == "accepted_risk")}
+
+    def _commit_dict(self, item: ChapterCommit) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "projectId": item.project_id,
+            "chapterNumber": item.chapter_number,
+            "chapterContractId": item.chapter_contract_id,
+            "approvedDraftId": item.approved_draft_id,
+            "sourceVersionId": item.source_version_id,
+            "stateSnapshotId": item.state_snapshot_id,
+            "qualitySummary": _safe_loads(item.quality_summary_json, {}),
+            "checksum": item.checksum,
+            "status": item.status,
+            "isCurrent": item.is_current,
+            "revision": item.revision,
+            "committedAt": item.committed_at,
+            "createdAt": item.created_at,
+        }
+
+    def _mirror_chapter_markdown_safely(self, project_id: str, folder_path: str, chapter_number: int, content: str) -> None:
+        path = Path(folder_path) / "manuscripts" / f"chapter-{chapter_number:04d}.md"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(path.suffix + ".tmp")
+            temp.write_text(content, encoding="utf-8")
+            temp.replace(path)
+        except OSError as exc:
+            with self.service.db.project_write(project_id, folder_path) as session:
+                session.add(self.service._audit(
+                    "chapter.mirror_failed",
+                    "chapter",
+                    f"chapter-{chapter_number:04d}",
+                    {"errorType": type(exc).__name__, "rebuildRequired": True},
+                    str(uuid4()),
+                ))
+
+    def _supersede_previous_source_inline(self, session: Session, project_id: str, source_version: SourceVersion, now: datetime) -> None:
+        source_version.status = "superseded"
+        source_version.revision += 1
+        source_version.updated_at = now
+        affected_fact_keys: set[tuple[str, str]] = set()
+        for fact in session.scalars(select(StateFact).where(StateFact.source_version_id == source_version.id)).all():
+            affected_fact_keys.add((fact.entity_id, fact.field_path))
+        for model in (StateFact, StateDelta, Foreshadow, KnowledgeBoundary):
+            for row in session.scalars(select(model).where(getattr(model, "source_version_id") == source_version.id)).all():
+                if hasattr(row, "status"):
+                    row.status = "superseded"
+                if hasattr(row, "is_current"):
+                    row.is_current = False
+                if hasattr(row, "valid_to") and getattr(row, "valid_to") is None:
+                    row.valid_to = now
+                if hasattr(row, "updated_at"):
+                    row.updated_at = now
+        for entity_id, field_path in affected_fact_keys:
+            previous = session.scalar(
+                select(StateFact)
+                .join(SourceVersion, SourceVersion.id == StateFact.source_version_id)
+                .where(
+                    StateFact.project_id == project_id,
+                    StateFact.entity_id == entity_id,
+                    StateFact.field_path == field_path,
+                    StateFact.source_version_id != source_version.id,
+                    SourceVersion.status == "official",
+                )
+                .order_by(StateFact.valid_from.desc(), StateFact.created_at.desc())
+            )
+            if previous:
+                previous.is_current = True
+                previous.valid_to = None
+                previous.updated_at = now
+        for entity in session.scalars(select(StoryEntity).where(StoryEntity.source_version_id == source_version.id)).all():
+            has_official_fact = session.scalar(
+                select(StateFact.id)
+                .join(SourceVersion, SourceVersion.id == StateFact.source_version_id)
+                .where(StateFact.entity_id == entity.id, SourceVersion.status == "official")
+                .limit(1)
+            )
+            if not has_official_fact:
+                entity.status = "superseded"
+                entity.updated_at = now

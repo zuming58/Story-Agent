@@ -1,11 +1,13 @@
 import type {
   AgentResponse,
   AgentSession,
+  AgentStreamEvent,
   ApiErrorShape,
   AuditEvent,
   BackupManifest,
   ChangeProposal,
   ModelConfig,
+  ModelRun,
   ModelProvider,
   ModelRoleBinding,
   PlanNode,
@@ -47,6 +49,44 @@ export const api = {
   createSession: (projectId: string, scope: string[]) => request<AgentSession>(`/projects/${projectId}/agent/sessions`, { method: "POST", body: JSON.stringify({ scope }) }),
   sendMessage: (sessionId: string, payload: { projectId: string; content: string; selectedNodeId?: string }) =>
     request<AgentResponse>(`/agent/sessions/${sessionId}/messages`, { method: "POST", body: JSON.stringify(payload) }),
+  streamMessage: async (
+    sessionId: string,
+    payload: { projectId: string; content: string; selectedNodeId?: string; action?: string },
+    onEvent: (event: AgentStreamEvent) => void,
+    signal?: AbortSignal,
+  ) => {
+    const response = await fetch(`/api/v1/agent/sessions/${sessionId}/messages/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      const errorPayload = await response.json().catch(() => ({
+        code: "NETWORK_ERROR", message: `请求失败（${response.status}）`, details: {}, requestId: "unknown",
+      })) as ApiErrorShape;
+      throw new ApiClientError(response.status, errorPayload);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        const dataLine = part.split("\n").find((line) => line.startsWith("data:"));
+        if (!dataLine) continue;
+        onEvent(JSON.parse(dataLine.slice(5).trim()) as AgentStreamEvent);
+      }
+    }
+    if (buffer.trim()) {
+      const dataLine = buffer.split("\n").find((line) => line.startsWith("data:"));
+      if (dataLine) onEvent(JSON.parse(dataLine.slice(5).trim()) as AgentStreamEvent);
+    }
+  },
   proposals: (projectId: string) => request<ChangeProposal[]>(`/projects/${projectId}/change-proposals`),
   applyProposal: (proposalId: string, payload: { projectId: string; expectedRevision: number; selectedOperationIds: string[] }) =>
     request<ChangeProposal>(`/change-proposals/${proposalId}/apply`, { method: "POST", body: JSON.stringify(payload) }),
@@ -55,6 +95,8 @@ export const api = {
   audits: (projectId: string) => request<AuditEvent[]>(`/projects/${projectId}/audit-events`),
   undo: (projectId: string, eventId: string) => request<AuditEvent>(`/projects/${projectId}/audit-events/${eventId}/undo`, { method: "POST" }),
   backup: (projectId: string) => request<BackupManifest>(`/projects/${projectId}/backups`, { method: "POST" }),
+  modelRuns: (projectId: string) => request<ModelRun[]>(`/projects/${projectId}/model-runs`),
+  cancelModelRun: (projectId: string, runId: string) => request<ModelRun>(`/projects/${projectId}/model-runs/${runId}/cancel`, { method: "POST" }),
   modelProviders: () => request<ModelProvider[]>("/model-providers"),
   createModelProvider: (payload: {
     name: string;

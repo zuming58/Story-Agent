@@ -154,6 +154,7 @@ class AgentSession(ProjectBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     messages: Mapped[list[AgentMessage]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    model_runs: Mapped[list[ModelRun]] = relationship(back_populates="session")
 
 
 class AgentMessage(ProjectBase):
@@ -165,6 +166,29 @@ class AgentMessage(ProjectBase):
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     session: Mapped[AgentSession] = relationship(back_populates="messages")
+
+
+class ModelRun(ProjectBase):
+    __tablename__ = "model_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(80), index=True)
+    provider_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    provider_name: Mapped[str] = mapped_column(String(160), default="")
+    model_config_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    model_id: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    request_id: Mapped[str] = mapped_column(String(36), index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    session: Mapped[AgentSession | None] = relationship(back_populates="model_runs")
 
 
 class ChangeProposal(ProjectBase):

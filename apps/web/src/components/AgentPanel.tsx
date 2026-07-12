@@ -27,7 +27,7 @@ function displayTime(value: string): string {
 export function AgentPanel() {
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
-  const { plan, selected, session, proposal, audits, sendMessage, applyProposal, rejectProposal, undo } = useStoryWorkspace();
+  const { plan, selected, session, proposal, audits, streamPreview, runStatus, sendMessage, cancelRun, retryLastMessage, applyProposal, rejectProposal, undo } = useStoryWorkspace();
   const collapsed = useStoryStore((state) => state.agentPanelCollapsed);
   const width = useStoryStore((state) => state.agentPanelWidth);
   const setCollapsed = useStoryStore((state) => state.setAgentPanelCollapsed);
@@ -53,13 +53,13 @@ export function AgentPanel() {
     window.addEventListener("pointerup", stop);
   };
 
-  const submit = async (event?: FormEvent, quickPrompt?: string) => {
+  const submit = async (event?: FormEvent, quickPrompt?: string, action = "chat") => {
     event?.preventDefault();
     const content = (quickPrompt ?? input).trim();
     if (!content || thinking || !selected) return;
     setInput("");
     setThinking(true);
-    try { await sendMessage(content); } finally { setThinking(false); }
+    try { await sendMessage(content, action); } finally { setThinking(false); }
   };
 
   const toggleOperation = (id: string) => setSelectedOperations((current) => {
@@ -95,13 +95,23 @@ export function AgentPanel() {
               <div><header><strong>{message.role === "user" ? "你" : "故事 Agent"}</strong><time>{displayTime(message.timestamp)}</time></header><p>{message.content}</p></div>
             </article>
           ))}
-          {thinking && <article className="message message-assistant"><div className="message-avatar"><Sparkle size={18} /></div><div><header><strong>故事 Agent</strong></header><p className="thinking-copy">正在检查规划数据库与下游影响…</p></div></article>}
+          {(thinking || streamPreview) && <article className="message message-assistant"><div className="message-avatar"><Sparkle size={18} /></div><div><header><strong>故事 Agent</strong>{runStatus.model && <time>{runStatus.provider} / {runStatus.model}</time>}</header><p className="thinking-copy">{streamPreview || "正在连接真实模型并编译规划上下文…"}</p></div></article>}
         </section>
 
         <section className="quick-actions" aria-label="AI 快捷操作">
-          <button onClick={() => void submit(undefined, "请重排当前里程碑的节奏，并给出可审查的修改提案。") }><ArrowsInLineHorizontal size={16} />重排节奏</button>
-          <button onClick={() => void submit(undefined, "请检查当前里程碑的逻辑与边界，不要直接修改。") }><ShieldCheck size={16} />检查逻辑</button>
-          <button onClick={() => void submit(undefined, "请补全当前里程碑缺失的依赖，并列出影响。") }><GitBranch size={16} />补全依赖</button>
+          <button onClick={() => void submit(undefined, "请重排当前里程碑的节奏，并给出可审查的修改提案。", "replan") } disabled={thinking}><ArrowsInLineHorizontal size={16} />重排节奏</button>
+          <button onClick={() => void submit(undefined, "请检查当前里程碑的逻辑与边界，不要直接修改。", "logic_check") } disabled={thinking}><ShieldCheck size={16} />检查逻辑</button>
+          <button onClick={() => void submit(undefined, "请补全当前里程碑缺失的依赖，并列出影响。", "complete_dependencies") } disabled={thinking}><GitBranch size={16} />补全依赖</button>
+        </section>
+
+        <section className={`run-status-card run-${runStatus.status}`} aria-label="模型运行状态">
+          <header><span>模型运行</span><strong>{runStatus.status === "running" ? "运行中" : runStatus.status === "failed" ? "失败" : runStatus.status === "cancelled" ? "已停止" : "就绪"}</strong></header>
+          <p>{runStatus.provider && runStatus.model ? `${runStatus.provider} / ${runStatus.model}` : "未开始真实模型调用"}</p>
+          {runStatus.error && <p className="run-error">{runStatus.error}</p>}
+          <div>
+            <button onClick={() => void cancelRun()} disabled={runStatus.status !== "running"}><X size={15} />停止</button>
+            <button onClick={() => void retryLastMessage()} disabled={runStatus.status !== "failed"}><ArrowCounterClockwise size={15} />重试</button>
+          </div>
         </section>
 
         {proposal && (
@@ -130,7 +140,7 @@ export function AgentPanel() {
         <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="描述你想调整的规划…" aria-label="给故事 Agent 发送消息" />
         <div className="composer-actions"><div><button type="button" className="icon-button" aria-label="添加附件"><Paperclip size={18} /></button><button type="button" className="icon-button" aria-label="引用契约"><BookBookmark size={18} /></button></div><button className="send-button" disabled={!input.trim() || thinking} type="submit"><PaperPlaneTilt size={18} weight="fill" />发送</button></div>
       </form>
-      <div className="agent-footnote"><span>正式修改写入 SQLite 审计日志</span><button onClick={() => void undo()} disabled={!reversible}><ArrowCounterClockwise size={16} />撤销</button></div>
+      <div className="agent-footnote"><span>{runStatus.status === "running" ? "真实模型流式输出中" : "正式修改写入 SQLite 审计日志"}</span><button onClick={() => void undo()} disabled={!reversible}><ArrowCounterClockwise size={16} />撤销</button></div>
     </aside>
   );
 }

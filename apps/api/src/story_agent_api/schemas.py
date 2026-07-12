@@ -103,6 +103,7 @@ class AgentSessionOut(ApiModel):
     scope: list[str]
     status: str
     messages: list[AgentMessageOut]
+    active_run_id: str | None = None
 
 
 class AgentSessionCreate(ApiModel):
@@ -113,6 +114,7 @@ class AgentMessageCreate(ApiModel):
     project_id: str
     content: str = Field(min_length=1, max_length=5000)
     selected_node_id: str | None = None
+    action: Literal["chat", "replan", "logic_check", "complete_dependencies"] = "chat"
 
 
 class ChangeOperationOut(ApiModel):
@@ -144,6 +146,27 @@ class ChangeProposalOut(ApiModel):
 class AgentResponse(ApiModel):
     message: AgentMessageOut
     proposal: ChangeProposalOut | None = None
+    run_id: str | None = None
+
+
+class ModelRunOut(ApiModel):
+    id: str
+    session_id: str | None
+    role: str
+    provider_id: str | None
+    provider_name: str
+    model_config_id: str | None
+    model_id: str
+    status: str
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    duration_ms: int | None
+    error_code: str | None
+    request_id: str
+    retry_count: int
+    started_at: datetime
+    ended_at: datetime | None
 
 
 class ProposalApply(ApiModel):

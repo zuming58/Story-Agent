@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -9,6 +10,7 @@ from uuid import uuid4
 from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.responses import StreamingResponse
 
 from .config import Settings
 from .schemas import (
@@ -25,6 +27,7 @@ from .schemas import (
     ModelProviderCreate,
     ModelProviderOut,
     ModelProviderUpdate,
+    ModelRunOut,
     ModelRoleBindingOut,
     ModelRoleBindingUpdate,
     PlanNodeOut,
@@ -163,6 +166,34 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/agent/sessions/{session_id}/messages", response_model=AgentResponse)
     def send_message(session_id: str, payload: AgentMessageCreate) -> object:
         return service.send_message(session_id, payload)
+
+    @app.post("/api/v1/agent/sessions/{session_id}/messages/stream")
+    async def stream_message(session_id: str, payload: AgentMessageCreate, request: Request) -> StreamingResponse:
+        async def events():
+            active_run_id: str | None = None
+            try:
+                async for event in service.stream_agent_message(session_id, payload, request.state.request_id):
+                    active_run_id = event.get("runId") or active_run_id
+                    yield f"event: {event['event']}\n"
+                    yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+                    if await request.is_disconnected():
+                        if active_run_id:
+                            service.cancel_model_run(payload.project_id, active_run_id)
+                        break
+            except StoryError as exc:
+                error = {"event": "failed", "errorCode": exc.code, "message": exc.message, "details": exc.details, "requestId": request.state.request_id}
+                yield "event: failed\n"
+                yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.post("/api/v1/projects/{project_id}/model-runs/{run_id}/cancel", response_model=ModelRunOut)
+    def cancel_model_run(project_id: str, run_id: str) -> object:
+        return service.cancel_model_run(project_id, run_id)
+
+    @app.get("/api/v1/projects/{project_id}/model-runs", response_model=list[ModelRunOut])
+    def list_model_runs(project_id: str, limit: int = Query(default=100, ge=1, le=500), status: str | None = Query(default=None), role: str | None = Query(default=None)) -> object:
+        return service.list_model_runs(project_id, limit, status=status, role=role)
 
     @app.get("/api/v1/projects/{project_id}/change-proposals", response_model=list[ChangeProposalOut])
     def list_proposals(project_id: str, status: str | None = Query(default=None)) -> object:

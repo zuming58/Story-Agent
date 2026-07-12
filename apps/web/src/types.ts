@@ -80,12 +80,53 @@ export interface AgentSession {
   scope: string[];
   messages: AgentMessage[];
   status: "idle" | "thinking" | "error";
+  activeRunId?: string | null;
 }
 
 export interface AgentResponse {
   message: AgentMessage;
   proposal?: ChangeProposal;
+  runId?: string | null;
 }
+
+export type AgentAction = "chat" | "replan" | "logic_check" | "complete_dependencies";
+
+export interface StreamRunStarted {
+  event: "run_started";
+  runId: string;
+  provider: string;
+  model: string;
+  requestId: string;
+}
+
+export interface StreamTextDelta {
+  event: "text_delta";
+  runId: string;
+  delta: string;
+}
+
+export interface StreamCompleted {
+  event: "completed";
+  runId: string;
+  message: AgentMessage;
+  usage?: { promptTokens?: number | null; completionTokens?: number | null; totalTokens?: number | null };
+}
+
+export interface StreamFailed {
+  event: "failed";
+  runId?: string;
+  errorCode: string;
+  message: string;
+  requestId?: string;
+}
+
+export interface StreamCancelled {
+  event: "cancelled";
+  runId: string;
+  message: string;
+}
+
+export type AgentStreamEvent = StreamRunStarted | StreamTextDelta | StreamCompleted | StreamFailed | StreamCancelled;
 
 export type EditablePlanField = "targetChapter" | "rangeMin" | "rangeMax";
 
@@ -178,6 +219,26 @@ export interface ModelRoleBinding {
   model: ModelConfig | null;
   dailyCostLimit: number | null;
   updatedAt: string;
+}
+
+export interface ModelRun {
+  id: string;
+  sessionId: string | null;
+  role: string;
+  providerId: string | null;
+  providerName: string;
+  modelConfigId: string | null;
+  modelId: string;
+  status: string;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  durationMs: number | null;
+  errorCode: string | null;
+  requestId: string;
+  retryCount: number;
+  startedAt: string;
+  endedAt: string | null;
 }
 
 export interface ProviderConnectionTest {

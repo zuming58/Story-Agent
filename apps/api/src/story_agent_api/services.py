@@ -6,10 +6,11 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .config import Settings
 from .database import DatabaseManager
+from .model_provider import ModelProviderError, OpenAICompatibleModelProvider
 from .models import (
     AgentMessage,
     AgentSession,
@@ -29,6 +31,7 @@ from .models import (
     ModelConfig,
     ModelProvider,
     ModelRoleBinding,
+    ModelRun,
     Plan,
     PlanNode,
     ProjectMeta,
@@ -94,11 +97,34 @@ MODEL_ROLES = [
 ]
 
 
+class CatalogProviderSnapshot:
+    def __init__(self, provider: ModelProvider):
+        self.id = provider.id
+        self.name = provider.name
+        self.base_url = provider.base_url
+        self.timeout_seconds = provider.timeout_seconds
+        self.max_retries = provider.max_retries
+        self.is_enabled = provider.is_enabled
+        self.api_key_ref = provider.api_key_ref
+
+
+class CatalogModelSnapshot:
+    def __init__(self, model: ModelConfig):
+        self.id = model.id
+        self.model_id = model.model_id
+        self.display_name = model.display_name
+        self.temperature = model.temperature
+        self.max_output_tokens = model.max_output_tokens
+        self.supports_reasoning = model.supports_reasoning
+        self.is_enabled = model.is_enabled
+
+
 class StoryService:
     def __init__(self, settings: Settings, secret_store: SecretStore | None = None):
         self.settings = settings
         self.db = DatabaseManager(settings)
         self.secret_store = secret_store or default_secret_store()
+        self._cancelled_runs: set[str] = set()
 
     def close(self) -> None:
         self.db.dispose()
@@ -107,6 +133,7 @@ class StoryService:
         self._ensure_model_role_bindings()
         if self.settings.seed_demo and not self.list_projects():
             self.create_project(ProjectCreate(title="夜巡人", mode="long-form", total_chapters=1000), seed_demo=True)
+        self._recover_interrupted_model_runs()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -116,6 +143,20 @@ class StoryService:
                 if role not in existing:
                     session.add(ModelRoleBinding(role=role, model_id=None, created_at=now, updated_at=now))
             session.commit()
+
+    def _recover_interrupted_model_runs(self) -> None:
+        now = utc_now()
+        for project in self.list_projects():
+            with self.db.project_write(project.id, project.folder_path) as session:
+                runs = session.scalars(select(ModelRun).where(ModelRun.status == "running")).all()
+                for run in runs:
+                    run.status = "interrupted"
+                    run.error_code = "startup_recovery"
+                    run.ended_at = now
+                sessions = session.scalars(select(AgentSession).where(AgentSession.status == "thinking")).all()
+                for agent_session in sessions:
+                    agent_session.status = "error"
+                    agent_session.updated_at = now
 
     def list_projects(self) -> list[CatalogProject]:
         with self.db.catalog() as session:
@@ -524,7 +565,7 @@ class StoryService:
     def list_sessions(self, project_id: str) -> list[dict[str, Any]]:
         project = self.get_project(project_id)
         with self.db.project(project_id, project.folder_path) as session:
-            sessions = session.scalars(select(AgentSession).options(selectinload(AgentSession.messages)).order_by(AgentSession.updated_at.desc())).all()
+            sessions = session.scalars(select(AgentSession).options(selectinload(AgentSession.messages), selectinload(AgentSession.model_runs)).order_by(AgentSession.updated_at.desc())).all()
             return [self._session_dict(item) for item in sessions]
 
     def create_session(self, project_id: str, scope: list[str]) -> dict[str, Any]:
@@ -533,6 +574,7 @@ class StoryService:
             item = AgentSession(id=str(uuid4()), project_id=project_id, scope_json=dumps(scope), status="idle")
             session.add(item)
             session.flush()
+            item.model_runs = []
             return self._session_dict(item)
 
     def send_message(self, session_id: str, payload: AgentMessageCreate) -> dict[str, Any]:
@@ -558,6 +600,85 @@ class StoryService:
             agent_session.updated_at = utc_now()
             session.flush()
             return {"message": self._message_dict(assistant), "proposal": self._proposal_dict(proposal) if proposal else None}
+
+    async def stream_agent_message(self, session_id: str, payload: AgentMessageCreate, request_id: str) -> AsyncIterator[dict[str, Any]]:
+        project = self.get_project(payload.project_id)
+        run_id = str(uuid4())
+        started = time.perf_counter()
+        role = "planner"
+        compiled = self._prepare_model_call(project.id, project.folder_path, session_id, payload, role, run_id, request_id)
+        yield {"event": "run_started", "runId": run_id, "provider": compiled["providerName"], "model": compiled["modelId"], "requestId": request_id}
+        provider = OpenAICompatibleModelProvider(
+            base_url=compiled["baseUrl"],
+            api_key=compiled["apiKey"],
+            timeout_seconds=compiled["timeoutSeconds"],
+            max_retries=compiled["maxRetries"],
+        )
+        status = "succeeded"
+        error_code: str | None = None
+        assistant_text = ""
+        try:
+            async for delta in provider.stream_chat(compiled["payload"]):
+                if run_id in self._cancelled_runs:
+                    status = "cancelled"
+                    error_code = "cancelled"
+                    yield {"event": "cancelled", "runId": run_id, "message": "模型调用已停止。"}
+                    break
+                assistant_text += delta
+                yield {"event": "text_delta", "runId": run_id, "delta": delta}
+            if status == "succeeded":
+                if not assistant_text.strip():
+                    status = "failed"
+                    error_code = "empty_response"
+                    yield {"event": "failed", "runId": run_id, "errorCode": error_code, "message": "模型没有返回内容。"}
+                else:
+                    message = self._complete_model_run_success(project.id, project.folder_path, session_id, run_id, assistant_text, provider.last_result, started)
+                    yield {"event": "completed", "runId": run_id, "message": message, "usage": {
+                        "promptTokens": provider.last_result.prompt_tokens,
+                        "completionTokens": provider.last_result.completion_tokens,
+                        "totalTokens": provider.last_result.total_tokens,
+                    }}
+                    return
+        except ModelProviderError as exc:
+            status = "failed"
+            error_code = exc.code
+            yield {"event": "failed", "runId": run_id, "errorCode": exc.code, "message": exc.message}
+        except Exception:
+            status = "failed"
+            error_code = "internal_error"
+            yield {"event": "failed", "runId": run_id, "errorCode": error_code, "message": "模型调用发生内部错误。"}
+        finally:
+            if status != "succeeded":
+                self._complete_model_run_failure(project.id, project.folder_path, session_id, run_id, status, error_code or status, started)
+            self._cancelled_runs.discard(run_id)
+
+    def cancel_model_run(self, project_id: str, run_id: str) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        self._cancelled_runs.add(run_id)
+        with self.db.project_write(project.id, project.folder_path) as session:
+            run = session.get(ModelRun, run_id)
+            if not run:
+                raise StoryError(404, "MODEL_RUN_NOT_FOUND", "模型调用记录不存在。", {"runId": run_id})
+            if run.status == "running":
+                run.status = "cancel_requested"
+                run.error_code = "cancel_requested"
+                run.ended_at = utc_now()
+            agent_session = session.get(AgentSession, run.session_id) if run.session_id else None
+            if agent_session and agent_session.status == "thinking":
+                agent_session.status = "idle"
+                agent_session.updated_at = utc_now()
+            session.flush()
+            return self._model_run_dict(run)
+
+    def list_model_runs(self, project_id: str, limit: int = 100, status: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
+        project = self.get_project(project_id)
+        with self.db.project(project.id, project.folder_path) as session:
+            query = select(ModelRun).order_by(ModelRun.started_at.desc()).limit(min(limit, 500))
+            if status:
+                query = query.where(ModelRun.status == status)
+            if role:
+                query = query.where(ModelRun.role == role)
+            return [self._model_run_dict(item) for item in session.scalars(query).all()]
 
     def list_proposals(self, project_id: str, status: str | None = None) -> list[dict[str, Any]]:
         project = self.get_project(project_id)
@@ -756,6 +877,138 @@ class StoryService:
             "message": message,
         }
 
+    def _prepare_model_call(self, project_id: str, folder_path: str, session_id: str, payload: AgentMessageCreate, role: str, run_id: str, request_id: str) -> dict[str, Any]:
+        model_info = self._resolve_role_model(role)
+        if not model_info:
+            raise StoryError(409, "MODEL_ROLE_NOT_CONFIGURED", "规划 Agent 尚未绑定模型，请先前往模型与费用设置。", {"role": role})
+        if not model_info["provider"].is_enabled or not model_info["model"].is_enabled:
+            raise StoryError(409, "MODEL_DISABLED", "已绑定模型或 Provider 未启用。", {"role": role})
+        provider = model_info["provider"]
+        model = model_info["model"]
+        if not provider.api_key_ref:
+            raise StoryError(409, "MODEL_API_KEY_MISSING", "Provider 尚未保存 API Key。", {"providerId": provider.id})
+        try:
+            api_key = self.secret_store.get_secret(provider.api_key_ref)
+        except SecretStoreUnavailable:
+            raise StoryError(503, "CREDENTIAL_STORE_UNAVAILABLE", "Credential Manager 不可用，无法读取 API Key。")
+        if not api_key:
+            raise StoryError(409, "MODEL_API_KEY_MISSING", "Credential Manager 中未找到 Provider API Key。", {"providerId": provider.id})
+
+        context = self._compile_agent_context(project_id, folder_path, session_id, payload)
+        now = utc_now()
+        with self.db.project_write(project_id, folder_path) as session:
+            agent_session = session.get(AgentSession, session_id)
+            if not agent_session:
+                raise StoryError(404, "AGENT_SESSION_NOT_FOUND", "Agent 会话不存在。")
+            session.add(AgentMessage(id=str(uuid4()), session_id=session_id, role="user", content=payload.content, created_at=now))
+            session.add(ModelRun(
+                id=run_id,
+                session_id=session_id,
+                role=role,
+                provider_id=provider.id,
+                provider_name=provider.name,
+                model_config_id=model.id,
+                model_id=model.model_id,
+                status="running",
+                request_id=request_id,
+                retry_count=min(provider.max_retries, 1),
+                started_at=now,
+            ))
+            agent_session.status = "thinking"
+            agent_session.updated_at = now
+        messages = [
+            {"role": "system", "content": "你是 Story Agent 的规划助手。你只能提出建议；涉及规划变更时必须说明需要用户确认，不得声称已经直接写入正式规划。"},
+            {"role": "user", "content": context},
+        ]
+        return {
+            "providerName": provider.name,
+            "modelId": model.model_id,
+            "baseUrl": provider.base_url,
+            "apiKey": api_key,
+            "timeoutSeconds": provider.timeout_seconds,
+            "maxRetries": provider.max_retries,
+            "payload": {
+                "model": model.model_id,
+                "messages": messages,
+                "temperature": model.temperature,
+                "max_tokens": model.max_output_tokens,
+            },
+        }
+
+    def _resolve_role_model(self, role: str) -> dict[str, Any] | None:
+        self._ensure_model_role_bindings()
+        with self.db.catalog() as session:
+            binding = session.scalar(select(ModelRoleBinding).where(ModelRoleBinding.role == role).options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider)))
+            if not binding or not binding.model or not binding.model.provider:
+                return None
+            model = binding.model
+            provider = model.provider
+            return {"model": self._catalog_model_snapshot(model), "provider": self._catalog_provider_snapshot(provider)}
+
+    def _compile_agent_context(self, project_id: str, folder_path: str, session_id: str, payload: AgentMessageCreate) -> str:
+        with self.db.project(project_id, folder_path) as session:
+            meta = session.get(ProjectMeta, project_id)
+            plan = session.scalar(select(Plan).options(selectinload(Plan.nodes), selectinload(Plan.markers)))
+            agent_session = session.scalar(select(AgentSession).where(AgentSession.id == session_id).options(selectinload(AgentSession.messages)))
+            node = session.get(PlanNode, payload.selected_node_id) if payload.selected_node_id else None
+            recent = []
+            if agent_session:
+                recent = sorted(agent_session.messages, key=lambda row: row.created_at)[-12:]
+            plan_summary = self._plan_dict(plan) if plan else {}
+            node_summary = self._node_dict(node) if node else None
+            recent_text = "\n".join(f"{message.role}: {message.content[:800]}" for message in recent)
+        return (
+            f"作品：{meta.title if meta else project_id}\n"
+            f"模式：{meta.mode if meta else 'unknown'}\n"
+            f"当前章节：{meta.current_chapter if meta else 0}/{meta.total_chapters if meta else 0}\n"
+            f"用户动作：{payload.action}\n"
+            f"当前规划：{json.dumps(plan_summary, ensure_ascii=False)[:6000]}\n"
+            f"选中里程碑：{json.dumps(node_summary, ensure_ascii=False) if node_summary else '未选择'}\n"
+            f"最近消息：\n{recent_text}\n"
+            f"用户输入：{payload.content}\n"
+            "请用中文回答。普通建议只输出自然语言；不要输出未确认的正式修改结果。"
+        )
+
+    def _complete_model_run_success(self, project_id: str, folder_path: str, session_id: str, run_id: str, content: str, result: Any, started: float) -> dict[str, Any]:
+        now = utc_now()
+        duration = int((time.perf_counter() - started) * 1000)
+        with self.db.project_write(project_id, folder_path) as session:
+            run = session.get(ModelRun, run_id)
+            if not run:
+                raise StoryError(404, "MODEL_RUN_NOT_FOUND", "模型调用记录不存在。", {"runId": run_id})
+            assistant = AgentMessage(id=str(uuid4()), session_id=session_id, role="assistant", content=content, created_at=now)
+            session.add(assistant)
+            run.status = "succeeded"
+            run.prompt_tokens = result.prompt_tokens
+            run.completion_tokens = result.completion_tokens
+            run.total_tokens = result.total_tokens
+            run.duration_ms = duration
+            if result.actual_model:
+                run.model_id = result.actual_model
+            run.ended_at = now
+            agent_session = session.get(AgentSession, session_id)
+            if agent_session:
+                agent_session.status = "idle"
+                agent_session.updated_at = now
+            session.flush()
+            return self._message_dict(assistant)
+
+    def _complete_model_run_failure(self, project_id: str, folder_path: str, session_id: str, run_id: str, status: str, error_code: str, started: float) -> None:
+        now = utc_now()
+        duration = int((time.perf_counter() - started) * 1000)
+        with self.db.project_write(project_id, folder_path) as session:
+            run = session.get(ModelRun, run_id)
+            if run:
+                if run.status != "cancel_requested":
+                    run.status = status
+                run.error_code = error_code
+                run.duration_ms = duration
+                run.ended_at = now
+            agent_session = session.get(AgentSession, session_id)
+            if agent_session:
+                agent_session.status = "idle" if status == "cancelled" else "error"
+                agent_session.updated_at = now
+
     def _validate_node(self, node: PlanNode) -> None:
         if node.range_min > node.range_max:
             raise StoryError(422, "INVALID_CHAPTER_RANGE", "允许范围起点不能晚于终点。")
@@ -788,7 +1041,8 @@ class StoryService:
         return {"id": item.id, "role": item.role, "content": item.content, "timestamp": item.created_at}
 
     def _session_dict(self, item: AgentSession) -> dict[str, Any]:
-        return {"id": item.id, "projectId": item.project_id, "scope": loads(item.scope_json), "status": item.status, "messages": [self._message_dict(message) for message in sorted(item.messages, key=lambda row: row.created_at)]}
+        active_run = next((run for run in sorted(item.model_runs, key=lambda row: row.started_at, reverse=True) if run.status in {"running", "cancel_requested"}), None)
+        return {"id": item.id, "projectId": item.project_id, "scope": loads(item.scope_json), "status": item.status, "messages": [self._message_dict(message) for message in sorted(item.messages, key=lambda row: row.created_at)], "activeRunId": active_run.id if active_run else None}
 
     def _proposal_dict(self, item: ChangeProposal | None) -> dict[str, Any]:
         assert item
@@ -836,3 +1090,30 @@ class StoryService:
             "dailyCostLimit": item.daily_cost_limit,
             "updatedAt": item.updated_at,
         }
+
+    def _model_run_dict(self, item: ModelRun) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "sessionId": item.session_id,
+            "role": item.role,
+            "providerId": item.provider_id,
+            "providerName": item.provider_name,
+            "modelConfigId": item.model_config_id,
+            "modelId": item.model_id,
+            "status": item.status,
+            "promptTokens": item.prompt_tokens,
+            "completionTokens": item.completion_tokens,
+            "totalTokens": item.total_tokens,
+            "durationMs": item.duration_ms,
+            "errorCode": item.error_code,
+            "requestId": item.request_id,
+            "retryCount": item.retry_count,
+            "startedAt": item.started_at,
+            "endedAt": item.ended_at,
+        }
+
+    def _catalog_provider_snapshot(self, provider: ModelProvider) -> CatalogProviderSnapshot:
+        return CatalogProviderSnapshot(provider)
+
+    def _catalog_model_snapshot(self, model: ModelConfig) -> CatalogModelSnapshot:
+        return CatalogModelSnapshot(model)

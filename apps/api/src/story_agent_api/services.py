@@ -241,6 +241,8 @@ MODEL_ROLES = [
     "chinese_writer",
     "fact_extractor",
     "logic_reviewer",
+    "continuity_reviewer",
+    "story_editor",
     "style_reviewer",
     "reviser",
     "embedding",

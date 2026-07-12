@@ -5,6 +5,7 @@ Branch: `agent/chapter-pipeline-foundation`
 Phase 5 baseline: `565d7b3`
 Draft PR: https://github.com/zuming58/Story-Agent/pull/4
 Latest implementation endpoint before final validation: `7f64f4f`
+Final handoff/test update: pending commit after validation
 
 ## Scope Completed
 
@@ -125,11 +126,11 @@ Before updating this document:
 
 - `uv run --project apps/api pytest apps/api/tests -q`: `59 passed`
 
-Final validation to run after this handoff update:
+Final validation:
 
-- `npm run build`
-- `npm run test`
-- `npm run test:e2e`
+- `npm run build`: passed. Existing Vite chunk-size warning remains.
+- `npm run test`: passed. API `59 passed`; Web `3 files / 8 tests passed`.
+- `npm run test:e2e`: passed. Playwright `6 passed`.
 
 ## Next Step For GPT-5.6 Audit
 

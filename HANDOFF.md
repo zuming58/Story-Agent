@@ -1,13 +1,31 @@
-# Story Agent 第三阶段交接
+# Story Agent 第四阶段交接
 
 更新时间：2026-07-12
-当前状态：第三阶段已完成，GPT-5.6 完整复审与修复已通过，等待合并决策
-工作分支：`agent/model-provider-foundation`
-审计起点：`5fd8015`
+当前状态：第三阶段已审计并合并；第四阶段仅完成计划与分支准备，等待另一台电脑实施
+工作分支：`agent/canon-memory-foundation`
+第四阶段基线：`90a4d3e`
+第四阶段完整计划：`docs/plans/PHASE-4-CANON-MEMORY.md`
+UI 所有权：仅当前 GPT-5.6 电脑允许修改 `apps/web/**`、样式、设计令牌和视觉基线
+第三阶段 UI 审计板：https://www.figma.com/design/6QL982fTRWQiTS79wXwWtN
+第三阶段审计起点：`5fd8015`
 代码完成终点：`bf3569d`
 本机审计修复：推送后的最终 HEAD，提交信息为 `fix: address phase three audit findings`
 最终审计终点：本文件所在提交；最终答复同步给出实际 hash。
-完整计划：`docs/plans/PHASE-3-MODEL-PROVIDER.md`
+第三阶段计划：`docs/plans/PHASE-3-MODEL-PROVIDER.md`
+
+## 当前任务：第四阶段后端实施
+
+另一台电脑应完整实现 `docs/plans/PHASE-4-CANON-MEMORY.md`，范围限定为：
+
+1. Canon 数据模型、草稿/锁定/变更申请和 Markdown 镜像。
+2. 通用与作品专属实体、精确状态、事件、delta、伏笔、知识边界和快照。
+3. FTS5、可插拔向量适配层、来源版本失效和索引重建。
+4. 可解释上下文编译器和 trace。
+5. 后端迁移、API、公共类型与自动化测试。
+
+禁止另一台电脑修改 UI。若公共类型变化导致 Web 构建需要适配，记录到交接文件并停止，由当前电脑处理。
+
+第三阶段已经通过 PR #2 合并到 `main`，合并提交为 `90a4d3e`。以下内容保留为已完成历史与审计依据。
 
 ## 完成内容
 
@@ -165,16 +183,31 @@ SSE 事件补充：
 - 密钥边界、SSE 状态机、结构化提案白名单/revision/确认事务、备份恢复与前端主路径均通过复审。
 - 修复后敏感扫描无真实密钥命中；新增边界测试全部通过。
 - DeepSeek 预设模型名依据 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/) 与 [官方模型价格页](https://api-docs.deepseek.com/quick_start/pricing) 复核。
-- 结论：第三阶段具备合并到 `main` 的条件；合并动作仍由项目负责人决定。
+- 结论：第三阶段已通过 PR #2 合并到 `main`，合并提交 `90a4d3e`。
 
-## 下一步工作建议
+## 下一步工作
 
-- 项目负责人确认后，将当前草稿 PR 转为 Ready 并合并 `main`。
-- 下一阶段先设计 Canon、事实抽取、状态台账和检索边界，不在本分支继续扩大范围。
-- UI 继续由当前 GPT-5.6 电脑负责；其他电脑优先承担后端与模型链路实现。
+- 另一台电脑完整实施 `docs/plans/PHASE-4-CANON-MEMORY.md`。
+- 当前 GPT-5.6 电脑暂不与其并行修改第四阶段分支；等待推送后做完整审计和修复。
+- UI 继续由当前 GPT-5.6 电脑负责；另一台电脑禁止修改 `apps/web/**`。
 
 ## 下一台电脑接力口令
 
 ```text
-第三阶段已经通过 GPT-5.6 完整复审。请先读取 HANDOFF.md 和 docs/plans/PHASE-3-MODEL-PROVIDER.md；除非收到新的阶段计划，不要继续修改当前分支，也不要在另一台电脑实施 UI。
+请接手 Story Agent 第四阶段。
+
+仓库：https://github.com/zuming58/Story-Agent.git
+分支：agent/canon-memory-foundation
+基线：90a4d3e
+
+开始前依次完整阅读：
+1. HANDOFF.md
+2. docs/plans/PHASE-4-CANON-MEMORY.md
+3. docs/prd/PRD-001.md
+4. docs/plans/PHASE-3-MODEL-PROVIDER.md
+
+完整执行第四阶段全部工作包，运行全部测试，更新 HANDOFF.md，提交并推送当前分支，然后停止等待 GPT-5.6 审计。
+
+禁止修改 apps/web/**、CSS、设计令牌、UI 截图和 Playwright 视觉基线。UI 只由另一台 GPT-5.6 电脑维护。
+禁止修改或提交 Story agent/ 与 openclaw skill/，禁止提交 API Key、.data、日志、备份 ZIP 和模型原始响应。
 ```

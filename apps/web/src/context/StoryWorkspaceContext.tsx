@@ -26,6 +26,7 @@ interface StoryWorkspaceValue {
   modelRuns: ModelRun[];
   streamPreview: string;
   runStatus: { runId: string | null; provider: string | null; model: string | null; status: "idle" | "running" | "failed" | "cancelled"; error?: string | null };
+  proposalStatus: { status: "idle" | "running" | "completed" | "failed"; runId: string | null; error?: string | null; attempts?: number };
   isLoading: boolean;
   isDisconnected: boolean;
   errorMessage: string | null;
@@ -53,6 +54,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
   const setNotice = useStoryStore((state) => state.setNotice);
   const [streamPreview, setStreamPreview] = useState("");
   const [runStatus, setRunStatus] = useState<StoryWorkspaceValue["runStatus"]>({ runId: null, provider: null, model: null, status: "idle", error: null });
+  const [proposalStatus, setProposalStatus] = useState<StoryWorkspaceValue["proposalStatus"]>({ status: "idle", runId: null, error: null, attempts: 0 });
   const lastPrompt = useRef<{ content: string; action?: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -120,6 +122,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
       lastPrompt.current = { content, action };
       setStreamPreview("");
       setRunStatus({ runId: null, provider: null, model: null, status: "running", error: null });
+      setProposalStatus({ status: "idle", runId: null, error: null, attempts: 0 });
       let activeSession = session;
       if (!activeSession) activeSession = await api.createSession(project.id, [plan?.volumeTitle ?? "当前作品"]);
       const controller = new AbortController();
@@ -128,6 +131,17 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
         if (event.event === "run_started") setRunStatus({ runId: event.runId, provider: event.provider, model: event.model, status: "running", error: null });
         if (event.event === "text_delta") setStreamPreview((current) => current + event.delta);
         if (event.event === "completed") setRunStatus((current) => ({ ...current, runId: event.runId, status: "idle", error: null }));
+        if (event.event === "proposal_started") setProposalStatus({ status: "running", runId: event.runId, error: null, attempts: 0 });
+        if (event.event === "proposal_completed") {
+          setProposalStatus({ status: "completed", runId: event.runId, error: null, attempts: event.attempts });
+          void client.invalidateQueries({ queryKey: ["proposals", project.id] });
+          void client.invalidateQueries({ queryKey: ["model-runs", project.id] });
+          setNotice("结构化提案已生成，等待你确认。");
+        }
+        if (event.event === "proposal_failed") {
+          setProposalStatus({ status: "failed", runId: event.runId ?? null, error: `${event.errorCode}: ${event.message}`, attempts: event.attempts });
+          setRunStatus((current) => ({ ...current, status: "failed", error: `提案生成失败：${event.errorCode}` }));
+        }
         if (event.event === "failed") setRunStatus((current) => ({ ...current, runId: event.runId ?? current.runId, status: "failed", error: `${event.errorCode}: ${event.message}` }));
         if (event.event === "cancelled") setRunStatus((current) => ({ ...current, runId: event.runId, status: "cancelled", error: event.message }));
       }, controller.signal);
@@ -147,6 +161,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
     modelRuns,
     streamPreview,
     runStatus,
+    proposalStatus,
     isLoading: projectsQuery.isLoading || (enabled && (planQuery.isLoading || sessionsQuery.isLoading)),
     isDisconnected: projectsQuery.isError,
     errorMessage: projectsQuery.error instanceof Error ? projectsQuery.error.message : null,
@@ -220,7 +235,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
     },
     retry: () => void projectsQuery.refetch(),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [projects, project, plan, selected, session, proposal, audits, modelRuns, streamPreview, runStatus, projectsQuery.isLoading, projectsQuery.isError, projectsQuery.error, planQuery.isLoading, sessionsQuery.isLoading, enabled]);
+  }), [projects, project, plan, selected, session, proposal, audits, modelRuns, streamPreview, runStatus, proposalStatus, projectsQuery.isLoading, projectsQuery.isError, projectsQuery.error, planQuery.isLoading, sessionsQuery.isLoading, enabled]);
 
   return <StoryWorkspaceContext.Provider value={value}>{children}</StoryWorkspaceContext.Provider>;
 }

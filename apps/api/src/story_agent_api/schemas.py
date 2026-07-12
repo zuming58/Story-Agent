@@ -121,8 +121,8 @@ class ChangeOperationOut(ApiModel):
     id: str
     field: str
     label: str
-    before: int
-    after: int
+    before: int | str | list[str]
+    after: int | str | list[str]
     selected: bool
 
 
@@ -163,6 +163,7 @@ class ModelRunOut(ApiModel):
     total_tokens: int | None
     duration_ms: int | None
     error_code: str | None
+    diagnostic: dict[str, Any] | None = None
     request_id: str
     retry_count: int
     started_at: datetime

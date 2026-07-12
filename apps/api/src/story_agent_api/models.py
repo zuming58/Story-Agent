@@ -184,6 +184,7 @@ class ModelRun(ProjectBase):
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_id: Mapped[str] = mapped_column(String(36), index=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -215,6 +216,8 @@ class ChangeOperation(ProjectBase):
     label: Mapped[str] = mapped_column(String(120))
     before_value: Mapped[int] = mapped_column(Integer)
     after_value: Mapped[int] = mapped_column(Integer)
+    before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     selected: Mapped[bool] = mapped_column(Boolean, default=True)
     proposal: Mapped[ChangeProposal] = relationship(back_populates="operations")
 

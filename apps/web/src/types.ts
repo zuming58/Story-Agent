@@ -112,6 +112,29 @@ export interface StreamCompleted {
   usage?: { promptTokens?: number | null; completionTokens?: number | null; totalTokens?: number | null };
 }
 
+export interface StreamProposalStarted {
+  event: "proposal_started";
+  runId: string;
+  provider: string;
+  model: string;
+  requestId: string;
+}
+
+export interface StreamProposalCompleted {
+  event: "proposal_completed";
+  runId: string;
+  proposal: ChangeProposal;
+  attempts: number;
+}
+
+export interface StreamProposalFailed {
+  event: "proposal_failed";
+  runId?: string | null;
+  errorCode: string;
+  message: string;
+  attempts: number;
+}
+
 export interface StreamFailed {
   event: "failed";
   runId?: string;
@@ -126,22 +149,31 @@ export interface StreamCancelled {
   message: string;
 }
 
-export type AgentStreamEvent = StreamRunStarted | StreamTextDelta | StreamCompleted | StreamFailed | StreamCancelled;
+export type AgentStreamEvent =
+  | StreamRunStarted
+  | StreamTextDelta
+  | StreamCompleted
+  | StreamProposalStarted
+  | StreamProposalCompleted
+  | StreamProposalFailed
+  | StreamFailed
+  | StreamCancelled;
 
-export type EditablePlanField = "targetChapter" | "rangeMin" | "rangeMax";
+export type EditablePlanField = "targetChapter" | "rangeMin" | "rangeMax" | "prerequisites" | "completionConditions" | "foreshadows" | "contracts" | "note" | "pace";
+export type ProposalValue = number | string | string[];
 
 export interface ChangeOperation {
   id: string;
   field: EditablePlanField;
   label: string;
-  before: number;
-  after: number;
+  before: ProposalValue;
+  after: ProposalValue;
   selected: boolean;
 }
 
 export interface ImpactItem {
   id: string;
-  kind: "contract" | "foreshadow" | "dependency";
+  kind: "contract" | "foreshadow" | "dependency" | "pace" | "chapter_window";
   label: string;
 }
 
@@ -235,6 +267,7 @@ export interface ModelRun {
   totalTokens: number | null;
   durationMs: number | null;
   errorCode: string | null;
+  diagnostic?: Record<string, unknown> | null;
   requestId: string;
   retryCount: number;
   startedAt: string;

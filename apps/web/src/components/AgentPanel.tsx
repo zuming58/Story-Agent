@@ -18,16 +18,23 @@ import {
 } from "@phosphor-icons/react";
 import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 import { useStoryStore } from "../store/useStoryStore";
+import type { ProposalValue } from "../types";
 
 function displayTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
+function displayProposalValue(value: ProposalValue): string {
+  if (Array.isArray(value)) return value.join(" / ");
+  if (typeof value === "number") return `${value}章`;
+  return value || "空";
+}
+
 export function AgentPanel() {
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
-  const { plan, selected, session, proposal, audits, streamPreview, runStatus, sendMessage, cancelRun, retryLastMessage, applyProposal, rejectProposal, undo } = useStoryWorkspace();
+  const { plan, selected, session, proposal, audits, streamPreview, runStatus, proposalStatus, sendMessage, cancelRun, retryLastMessage, applyProposal, rejectProposal, undo } = useStoryWorkspace();
   const collapsed = useStoryStore((state) => state.agentPanelCollapsed);
   const width = useStoryStore((state) => state.agentPanelWidth);
   const setCollapsed = useStoryStore((state) => state.setAgentPanelCollapsed);
@@ -107,6 +114,12 @@ export function AgentPanel() {
         <section className={`run-status-card run-${runStatus.status}`} aria-label="模型运行状态">
           <header><span>模型运行</span><strong>{runStatus.status === "running" ? "运行中" : runStatus.status === "failed" ? "失败" : runStatus.status === "cancelled" ? "已停止" : "就绪"}</strong></header>
           <p>{runStatus.provider && runStatus.model ? `${runStatus.provider} / ${runStatus.model}` : "未开始真实模型调用"}</p>
+          <p className={`proposal-run-copy proposal-${proposalStatus.status}`}>
+            {proposalStatus.status === "running" && "结构化提案生成中"}
+            {proposalStatus.status === "completed" && `结构化提案已生成${proposalStatus.attempts ? `（${proposalStatus.attempts} 次尝试）` : ""}`}
+            {proposalStatus.status === "failed" && `结构化提案失败：${proposalStatus.error}`}
+            {proposalStatus.status === "idle" && "普通对话不会自动生成正式提案"}
+          </p>
           {runStatus.error && <p className="run-error">{runStatus.error}</p>}
           <div>
             <button onClick={() => void cancelRun()} disabled={runStatus.status !== "running"}><X size={15} />停止</button>
@@ -116,13 +129,13 @@ export function AgentPanel() {
 
         {proposal && (
           <section className={`proposal-card proposal-${proposal.status}`} aria-label="AI 修改提案">
-            <header><div><Sparkle size={17} /><span>AI 建议修改</span></div><span className="proposal-tag">SQLite 已记录</span></header>
+            <header><div><Sparkle size={17} /><span>{proposalStatus.status === "completed" ? "结构化修改提案" : "AI 建议修改"}</span></div><span className="proposal-tag">{proposal.status === "pending" ? "待确认" : "SQLite 已记录"}</span></header>
             <h3>{proposal.targetTitle}</h3><p className="proposal-reason">{proposal.reason}</p>
             <div className="operation-list">
               {proposal.operations.map((operation) => {
                 const checked = selectedOperations.has(operation.id);
                 return <button className={`operation-row${checked ? " is-selected" : ""}`} key={operation.id} onClick={() => proposal.status === "pending" && toggleOperation(operation.id)} disabled={proposal.status !== "pending"}>
-                  <span className="operation-check">{checked && <Check size={13} weight="bold" />}</span><span>{operation.label}</span><del>{operation.before}章</del><span>→</span><ins>{operation.after}章</ins>
+                  <span className="operation-check">{checked && <Check size={13} weight="bold" />}</span><span>{operation.label}</span><del>{displayProposalValue(operation.before)}</del><span>→</span><ins>{displayProposalValue(operation.after)}</ins>
                 </button>;
               })}
             </div>

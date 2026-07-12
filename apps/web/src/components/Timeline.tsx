@@ -22,7 +22,7 @@ export function Timeline() {
   const proposedChapter = useMemo(() => {
     if (!proposal || proposal.status !== "pending") return null;
     const operation = proposal.operations.find((item) => item.field === "targetChapter");
-    return operation?.after ?? null;
+    return typeof operation?.after === "number" ? operation.after : null;
   }, [proposal]);
 
   return (

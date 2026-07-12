@@ -60,6 +60,21 @@ class OpenAICompatibleModelProvider:
         if last_error:
             raise last_error
 
+    async def complete_chat(self, payload: dict[str, Any]) -> ModelStreamResult:
+        attempts = max(1, min(self.max_retries + 1, 2))
+        last_error: ModelProviderError | None = None
+        for attempt in range(attempts):
+            self._last_result = ModelStreamResult()
+            try:
+                return await self._complete_once(payload)
+            except ModelProviderError as exc:
+                last_error = exc
+                if not exc.retryable or attempt >= attempts - 1:
+                    raise
+        if last_error:
+            raise last_error
+        raise ModelProviderError("internal_error", "模型调用没有返回结果。", retryable=False)
+
     async def _stream_once(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         request_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -90,6 +105,53 @@ class OpenAICompatibleModelProvider:
                         if chunk.text:
                             self._last_result.text += chunk.text
                             yield chunk.text
+        except httpx.TimeoutException as exc:
+            raise ModelProviderError("timeout", "模型调用超时。", retryable=True) from exc
+        except httpx.RequestError as exc:
+            raise ModelProviderError("network_error", "无法连接模型服务。", retryable=True) from exc
+
+    async def _complete_once(self, payload: dict[str, Any]) -> ModelStreamResult:
+        request_payload = {**payload, "stream": False}
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        timeout = httpx.Timeout(self.timeout_seconds, connect=min(self.timeout_seconds, 10))
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(f"{self.base_url.rstrip('/')}/chat/completions", headers=headers, json=request_payload)
+            if response.status_code in {401, 403}:
+                raise ModelProviderError("auth_failed", "模型服务拒绝鉴权。", retryable=False)
+            if response.status_code == 429:
+                raise ModelProviderError("rate_limited", "模型服务达到限流。", retryable=True)
+            if response.status_code >= 500:
+                raise ModelProviderError("server_error", f"模型服务返回 HTTP {response.status_code}。", retryable=True)
+            if response.status_code >= 400:
+                raise ModelProviderError("request_failed", f"模型服务返回 HTTP {response.status_code}。", retryable=False)
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise ModelProviderError("invalid_response", "模型服务返回了非法 JSON。", retryable=False) from exc
+            if not isinstance(data, dict):
+                raise ModelProviderError("invalid_response", "模型服务返回结构无效。", retryable=False)
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ModelProviderError("invalid_response", "模型服务没有返回 choices。", retryable=False)
+            first = choices[0]
+            if not isinstance(first, dict):
+                raise ModelProviderError("invalid_response", "模型服务 choices 结构无效。", retryable=False)
+            if first.get("finish_reason") == "length":
+                raise ModelProviderError("content_truncated", "模型输出被截断。", retryable=False)
+            message = first.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str):
+                raise ModelProviderError("invalid_response", "模型服务没有返回文本内容。", retryable=False)
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            self._last_result = ModelStreamResult(
+                text=content,
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                actual_model=data.get("model") if isinstance(data.get("model"), str) else None,
+            )
+            return self._last_result
         except httpx.TimeoutException as exc:
             raise ModelProviderError("timeout", "模型调用超时。", retryable=True) from exc
         except httpx.RequestError as exc:

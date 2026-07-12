@@ -96,6 +96,31 @@ MODEL_ROLES = [
     "embedding",
 ]
 
+STRUCTURED_ACTIONS = {"replan", "logic_check", "complete_dependencies"}
+PROPOSAL_FIELD_MAP = {
+    "targetChapter": ("target_chapter", "目标章节", "integer"),
+    "rangeMin": ("range_min", "允许范围起点", "integer"),
+    "rangeMax": ("range_max", "允许范围终点", "integer"),
+    "prerequisites": ("prerequisites_json", "前置条件", "list"),
+    "completionConditions": ("completion_conditions_json", "完成条件", "list"),
+    "foreshadows": ("foreshadows_json", "伏笔", "list"),
+    "contracts": ("contracts_json", "章节契约", "list"),
+    "note": ("note", "备注", "string"),
+    "pace": ("pace", "节奏状态", "string"),
+}
+JSON_PROPOSAL_SCHEMA_HINT = {
+    "targetId": "必须是当前规划里已存在的里程碑 id",
+    "expectedRevision": "目标里程碑当前 revision",
+    "reason": "为什么建议这些修改",
+    "operations": [
+        {
+            "field": "targetChapter|rangeMin|rangeMax|prerequisites|completionConditions|foreshadows|contracts|note|pace",
+            "after": "字段的新值；章节字段为整数，列表字段为字符串数组",
+        }
+    ],
+    "impacts": [{"kind": "contract|foreshadow|dependency|pace|chapter_window", "label": "影响说明"}],
+}
+
 
 class CatalogProviderSnapshot:
     def __init__(self, provider: ModelProvider):
@@ -638,6 +663,14 @@ class StoryService:
                         "completionTokens": provider.last_result.completion_tokens,
                         "totalTokens": provider.last_result.total_tokens,
                     }}
+                    if payload.action in STRUCTURED_ACTIONS:
+                        try:
+                            async for proposal_event in self._stream_structured_proposal(project.id, project.folder_path, session_id, payload, request_id):
+                                yield proposal_event
+                        except StoryError as exc:
+                            yield {"event": "proposal_failed", "runId": None, "errorCode": exc.code, "message": exc.message, "attempts": 0}
+                        except ModelProviderError as exc:
+                            yield {"event": "proposal_failed", "runId": None, "errorCode": exc.code, "message": exc.message, "attempts": 0}
                     return
         except ModelProviderError as exc:
             status = "failed"
@@ -703,16 +736,16 @@ class StoryService:
                 raise StoryError(404, "PLAN_NODE_NOT_FOUND", "提案目标节点不存在。")
             before = self._node_dict(node)
             selected = set(payload.selected_operation_ids)
-            field_map = {"targetChapter": "target_chapter", "rangeMin": "range_min", "rangeMax": "range_max"}
             applied = []
             for operation in proposal.operations:
                 operation.selected = operation.id in selected
                 if operation.selected:
-                    setattr(node, field_map[operation.field], operation.after_value)
+                    self._apply_proposal_operation(node, operation)
                     applied.append(operation.id)
             if not applied:
                 raise StoryError(422, "NO_OPERATIONS_SELECTED", "至少选择一项修改。")
             self._validate_node(node)
+            self._validate_proposal_dependencies(session, node, self._node_dict(node))
             node.revision += 1
             proposal.status = "accepted"
             proposal.revision += 1
@@ -877,7 +910,268 @@ class StoryService:
             "message": message,
         }
 
-    def _prepare_model_call(self, project_id: str, folder_path: str, session_id: str, payload: AgentMessageCreate, role: str, run_id: str, request_id: str) -> dict[str, Any]:
+    async def _stream_structured_proposal(self, project_id: str, folder_path: str, session_id: str, payload: AgentMessageCreate, request_id: str) -> AsyncIterator[dict[str, Any]]:
+        run_id = str(uuid4())
+        started = time.perf_counter()
+        compiled = self._prepare_model_call(project_id, folder_path, session_id, payload, "planner", run_id, request_id, run_role="planner_proposal", create_user_message=False)
+        provider = OpenAICompatibleModelProvider(
+            base_url=compiled["baseUrl"],
+            api_key=compiled["apiKey"],
+            timeout_seconds=compiled["timeoutSeconds"],
+            max_retries=compiled["maxRetries"],
+        )
+        yield {"event": "proposal_started", "runId": run_id, "provider": compiled["providerName"], "model": compiled["modelId"], "requestId": request_id}
+        attempts = 0
+        last_failure: tuple[str, str] | None = None
+        try:
+            while attempts < 2:
+                attempts += 1
+                proposal_payload = self._structured_proposal_payload(compiled["payload"], payload, last_failure)
+                try:
+                    result = await provider.complete_chat(proposal_payload)
+                    proposal = self._parse_structured_proposal_text(result.text)
+                    created = self._create_structured_proposal(project_id, folder_path, proposal, run_id, request_id)
+                    self._complete_model_run_success(project_id, folder_path, session_id, run_id, "", result, started, create_message=False, diagnostic={
+                        "kind": "structured_proposal",
+                        "action": payload.action,
+                        "attempts": attempts,
+                        "proposalId": created["id"],
+                    })
+                    yield {"event": "proposal_completed", "runId": run_id, "proposal": created, "attempts": attempts}
+                    return
+                except ModelProviderError as exc:
+                    if exc.code == "content_truncated" and attempts == 1:
+                        last_failure = (exc.code, exc.message)
+                        continue
+                    raise
+                except StoryError as exc:
+                    if exc.code in {"EMPTY_PROPOSAL_JSON", "INVALID_PROPOSAL_JSON", "INVALID_PROPOSAL_STRUCTURE"} and attempts == 1:
+                        last_failure = (exc.code, exc.message)
+                        continue
+                    self._complete_model_run_failure(project_id, folder_path, session_id, run_id, "failed", exc.code, started, diagnostic={
+                        "kind": "structured_proposal",
+                        "action": payload.action,
+                        "attempts": attempts,
+                        "reason": exc.code,
+                        "message": exc.message,
+                    })
+                    self._record_proposal_failure(project_id, folder_path, payload.selected_node_id, exc.code, exc.message, request_id, run_id)
+                    yield {"event": "proposal_failed", "runId": run_id, "errorCode": exc.code, "message": exc.message, "attempts": attempts}
+                    return
+            code, message = last_failure or ("INVALID_PROPOSAL_JSON", "模型没有返回可用提案。")
+            self._complete_model_run_failure(project_id, folder_path, session_id, run_id, "failed", code, started, diagnostic={
+                "kind": "structured_proposal",
+                "action": payload.action,
+                "attempts": attempts,
+                "reason": code,
+            })
+            self._record_proposal_failure(project_id, folder_path, payload.selected_node_id, code, message, request_id, run_id)
+            yield {"event": "proposal_failed", "runId": run_id, "errorCode": code, "message": message, "attempts": attempts}
+        except ModelProviderError as exc:
+            self._complete_model_run_failure(project_id, folder_path, session_id, run_id, "failed", exc.code, started, diagnostic={
+                "kind": "structured_proposal",
+                "action": payload.action,
+                "attempts": attempts,
+                "reason": exc.code,
+            })
+            self._record_proposal_failure(project_id, folder_path, payload.selected_node_id, exc.code, exc.message, request_id, run_id)
+            yield {"event": "proposal_failed", "runId": run_id, "errorCode": exc.code, "message": exc.message, "attempts": attempts}
+
+    def _structured_proposal_payload(self, base_payload: dict[str, Any], payload: AgentMessageCreate, last_failure: tuple[str, str] | None) -> dict[str, Any]:
+        messages = list(base_payload["messages"])
+        repair = ""
+        if last_failure:
+            repair = f"\n上一次结构化输出失败：{last_failure[0]} - {last_failure[1]}。请只返回可解析 JSON，不要 Markdown，不要解释。"
+        messages.append({
+            "role": "system",
+            "content": (
+                "现在执行结构化规划提案。只返回 JSON object。"
+                "不得直接修改正式规划；只能描述待用户确认的提案。"
+                "只能使用白名单字段；不要包含正文、API Key、完整上下文或额外字段。"
+            ),
+        })
+        messages.append({
+            "role": "user",
+            "content": (
+                f"用户动作：{payload.action}\n"
+                f"输出 JSON Schema 说明：{json.dumps(JSON_PROPOSAL_SCHEMA_HINT, ensure_ascii=False)}\n"
+                "如果只是逻辑检查且不建议改动，也必须给出 operations 为空的明确 reason。"
+                f"{repair}"
+            ),
+        })
+        return {
+            **base_payload,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "temperature": min(float(base_payload.get("temperature", 0.2)), 0.2),
+        }
+
+    def _parse_structured_proposal_text(self, text: str) -> dict[str, Any]:
+        if not text or not text.strip():
+            raise StoryError(422, "EMPTY_PROPOSAL_JSON", "模型没有返回结构化提案 JSON。")
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise StoryError(422, "INVALID_PROPOSAL_JSON", "模型返回的结构化提案不是合法 JSON。") from exc
+        if not isinstance(data, dict):
+            raise StoryError(422, "INVALID_PROPOSAL_STRUCTURE", "结构化提案必须是 JSON object。")
+        return data
+
+    def _create_structured_proposal(self, project_id: str, folder_path: str, raw: dict[str, Any], run_id: str, request_id: str) -> dict[str, Any]:
+        allowed_top = {"targetId", "expectedRevision", "reason", "operations", "impacts"}
+        extra = sorted(set(raw) - allowed_top)
+        if extra:
+            raise StoryError(422, "PROPOSAL_TOP_LEVEL_NOT_ALLOWED", "结构化提案包含不允许的顶层字段。", {"fields": extra})
+        target_id = raw.get("targetId")
+        if not isinstance(target_id, str) or not target_id.strip():
+            raise StoryError(422, "PROPOSAL_TARGET_REQUIRED", "结构化提案缺少目标里程碑。")
+        operations = raw.get("operations")
+        if not isinstance(operations, list) or not operations:
+            raise StoryError(422, "PROPOSAL_NO_OPERATIONS", "结构化提案没有可确认的修改项。")
+        reason = raw.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise StoryError(422, "PROPOSAL_REASON_REQUIRED", "结构化提案缺少修改原因。")
+        with self.db.project_write(project_id, folder_path) as session:
+            node = session.get(PlanNode, target_id)
+            if not node:
+                raise StoryError(422, "PROPOSAL_TARGET_NOT_FOUND", "结构化提案目标不存在。", {"targetId": target_id})
+            expected_revision = raw.get("expectedRevision")
+            if not isinstance(expected_revision, int) or expected_revision != node.revision:
+                raise StoryError(409, "PROPOSAL_REVISION_CONFLICT", "模型提案基于过期规划版本。", {"targetId": target_id, "currentRevision": node.revision})
+            proposal = self._proposal_from_structured(session, node, raw)
+            session.add(proposal)
+            session.add(self._audit("proposal.generated", "change_proposal", proposal.id, {
+                "runId": run_id,
+                "targetId": node.id,
+                "operationCount": len(proposal.operations),
+                "reversible": False,
+            }, request_id))
+            session.flush()
+            return self._proposal_dict(proposal)
+
+    def _proposal_from_structured(self, session: Session, node: PlanNode, raw: dict[str, Any]) -> ChangeProposal:
+        proposal_id = str(uuid4())
+        proposal = ChangeProposal(
+            id=proposal_id,
+            target_id=node.id,
+            target_title=node.title,
+            reason=raw["reason"].strip(),
+        )
+        before = self._node_dict(node)
+        simulated = self._node_dict(node)
+        proposal.operations = []
+        for item in raw["operations"]:
+            if not isinstance(item, dict):
+                raise StoryError(422, "INVALID_PROPOSAL_OPERATION", "提案操作必须是 JSON object。")
+            extra = sorted(set(item) - {"field", "after", "label"})
+            if extra:
+                raise StoryError(422, "PROPOSAL_OPERATION_FIELD_NOT_ALLOWED", "提案操作包含不允许字段。", {"fields": extra})
+            field = item.get("field")
+            if field not in PROPOSAL_FIELD_MAP:
+                raise StoryError(422, "PROPOSAL_FIELD_NOT_ALLOWED", "提案试图修改非白名单字段。", {"field": field})
+            _attr, default_label, value_type = PROPOSAL_FIELD_MAP[field]
+            after = self._coerce_proposal_value(field, item.get("after"), value_type)
+            before_value = before[field]
+            if after == before_value:
+                continue
+            simulated[field] = after
+            before_int = before_value if isinstance(before_value, int) else 0
+            after_int = after if isinstance(after, int) else 0
+            proposal.operations.append(ChangeOperation(
+                id=str(uuid4()),
+                proposal_id=proposal_id,
+                field=field,
+                label=item.get("label") if isinstance(item.get("label"), str) and item.get("label") else default_label,
+                before_value=before_int,
+                after_value=after_int,
+                before_json=dumps(before_value),
+                after_json=dumps(after),
+                selected=True,
+            ))
+        if not proposal.operations:
+            raise StoryError(422, "PROPOSAL_NO_EFFECT", "结构化提案没有产生实际变化。")
+        self._validate_node_snapshot(simulated)
+        self._validate_proposal_dependencies(session, node, simulated)
+        impacts = raw.get("impacts") if isinstance(raw.get("impacts"), list) else []
+        proposal.impacts = self._proposal_impacts_from_structured(proposal_id, impacts, proposal.operations)
+        return proposal
+
+    def _coerce_proposal_value(self, field: str, value: Any, value_type: str) -> Any:
+        if value_type == "integer":
+            if not isinstance(value, int):
+                raise StoryError(422, "INVALID_PROPOSAL_VALUE", "章节字段必须是整数。", {"field": field})
+            if value < 1 or value > 5000:
+                raise StoryError(422, "INVALID_PROPOSAL_VALUE", "章节字段超出允许范围。", {"field": field})
+            return value
+        if value_type == "list":
+            if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+                raise StoryError(422, "INVALID_PROPOSAL_VALUE", "依赖和契约字段必须是非空字符串数组。", {"field": field})
+            return [item.strip()[:240] for item in value[:20]]
+        if value_type == "string":
+            if not isinstance(value, str):
+                raise StoryError(422, "INVALID_PROPOSAL_VALUE", "文本字段必须是字符串。", {"field": field})
+            text = value.strip()
+            if field == "pace" and text not in {"smooth", "fast", "slow"}:
+                raise StoryError(422, "INVALID_PROPOSAL_VALUE", "节奏状态必须是 smooth、fast 或 slow。", {"field": field})
+            return text[:2000]
+        raise StoryError(422, "INVALID_PROPOSAL_VALUE", "提案字段类型无效。", {"field": field})
+
+    def _validate_node_snapshot(self, data: dict[str, Any]) -> None:
+        if data["rangeMin"] > data["rangeMax"]:
+            raise StoryError(422, "INVALID_CHAPTER_RANGE", "允许范围起点不能晚于终点。")
+        if data["targetChapter"] < data["rangeMin"] or data["targetChapter"] > data["rangeMax"]:
+            raise StoryError(422, "TARGET_OUTSIDE_RANGE", "目标章节必须位于允许范围内。", {"targetChapter": data["targetChapter"], "rangeMin": data["rangeMin"], "rangeMax": data["rangeMax"]})
+        if not data["prerequisites"] or not data["completionConditions"]:
+            raise StoryError(422, "INCOMPLETE_MILESTONE_CONTRACT", "里程碑必须包含前置条件和完成条件。")
+
+    def _validate_proposal_dependencies(self, session: Session, node: PlanNode, snapshot: dict[str, Any]) -> None:
+        existing_ids = set(session.scalars(select(PlanNode.id)).all())
+        for field in ("prerequisites", "completionConditions", "foreshadows", "contracts"):
+            values = snapshot.get(field, [])
+            if not isinstance(values, list):
+                raise StoryError(422, "INVALID_PROPOSAL_VALUE", "依赖字段结构无效。", {"field": field})
+            for value in values:
+                if not isinstance(value, str) or len(value) > 240:
+                    raise StoryError(422, "INVALID_PROPOSAL_VALUE", "依赖条目必须是短字符串。", {"field": field})
+                if value.startswith("node:"):
+                    target_id = value[5:]
+                    if target_id not in existing_ids:
+                        raise StoryError(422, "PROPOSAL_DEPENDENCY_NOT_FOUND", "提案引用了不存在的依赖节点。", {"field": field, "dependency": value})
+                    if target_id == node.id:
+                        raise StoryError(422, "PROPOSAL_DEPENDENCY_SELF_REFERENCE", "提案不能引用自身作为依赖。", {"field": field})
+
+    def _proposal_impacts_from_structured(self, proposal_id: str, impacts: list[Any], operations: list[ChangeOperation]) -> list[ProposalImpact]:
+        allowed_kinds = {"contract", "foreshadow", "dependency", "pace", "chapter_window"}
+        result: list[ProposalImpact] = []
+        for item in impacts[:12]:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            label = item.get("label")
+            if kind not in allowed_kinds or not isinstance(label, str) or not label.strip():
+                continue
+            result.append(ProposalImpact(id=str(uuid4()), proposal_id=proposal_id, kind=kind, label=label.strip()[:200]))
+        if result:
+            return result
+        touched = {operation.field for operation in operations}
+        if touched & {"targetChapter", "rangeMin", "rangeMax"}:
+            result.append(ProposalImpact(id=str(uuid4()), proposal_id=proposal_id, kind="chapter_window", label="章节窗口将随提案调整"))
+        if touched & {"prerequisites", "completionConditions", "contracts"}:
+            result.append(ProposalImpact(id=str(uuid4()), proposal_id=proposal_id, kind="dependency", label="依赖与章节契约将随提案调整"))
+        if touched & {"foreshadows"}:
+            result.append(ProposalImpact(id=str(uuid4()), proposal_id=proposal_id, kind="foreshadow", label="伏笔清单将随提案调整"))
+        return result
+
+    def _record_proposal_failure(self, project_id: str, folder_path: str, target_id: str | None, code: str, message: str, request_id: str, run_id: str) -> None:
+        with self.db.project_write(project_id, folder_path) as session:
+            session.add(self._audit("proposal.generation_failed", "plan_node", target_id or "unknown", {
+                "runId": run_id,
+                "code": code,
+                "message": message,
+                "reversible": False,
+            }, request_id))
+
+    def _prepare_model_call(self, project_id: str, folder_path: str, session_id: str, payload: AgentMessageCreate, role: str, run_id: str, request_id: str, *, run_role: str | None = None, create_user_message: bool = True) -> dict[str, Any]:
         model_info = self._resolve_role_model(role)
         if not model_info:
             raise StoryError(409, "MODEL_ROLE_NOT_CONFIGURED", "规划 Agent 尚未绑定模型，请先前往模型与费用设置。", {"role": role})
@@ -900,11 +1194,12 @@ class StoryService:
             agent_session = session.get(AgentSession, session_id)
             if not agent_session:
                 raise StoryError(404, "AGENT_SESSION_NOT_FOUND", "Agent 会话不存在。")
-            session.add(AgentMessage(id=str(uuid4()), session_id=session_id, role="user", content=payload.content, created_at=now))
+            if create_user_message:
+                session.add(AgentMessage(id=str(uuid4()), session_id=session_id, role="user", content=payload.content, created_at=now))
             session.add(ModelRun(
                 id=run_id,
                 session_id=session_id,
-                role=role,
+                role=run_role or role,
                 provider_id=provider.id,
                 provider_name=provider.name,
                 model_config_id=model.id,
@@ -969,15 +1264,17 @@ class StoryService:
             "请用中文回答。普通建议只输出自然语言；不要输出未确认的正式修改结果。"
         )
 
-    def _complete_model_run_success(self, project_id: str, folder_path: str, session_id: str, run_id: str, content: str, result: Any, started: float) -> dict[str, Any]:
+    def _complete_model_run_success(self, project_id: str, folder_path: str, session_id: str, run_id: str, content: str, result: Any, started: float, *, create_message: bool = True, diagnostic: dict[str, Any] | None = None) -> dict[str, Any]:
         now = utc_now()
         duration = int((time.perf_counter() - started) * 1000)
         with self.db.project_write(project_id, folder_path) as session:
             run = session.get(ModelRun, run_id)
             if not run:
                 raise StoryError(404, "MODEL_RUN_NOT_FOUND", "模型调用记录不存在。", {"runId": run_id})
-            assistant = AgentMessage(id=str(uuid4()), session_id=session_id, role="assistant", content=content, created_at=now)
-            session.add(assistant)
+            assistant = None
+            if create_message:
+                assistant = AgentMessage(id=str(uuid4()), session_id=session_id, role="assistant", content=content, created_at=now)
+                session.add(assistant)
             run.status = "succeeded"
             run.prompt_tokens = result.prompt_tokens
             run.completion_tokens = result.completion_tokens
@@ -985,15 +1282,17 @@ class StoryService:
             run.duration_ms = duration
             if result.actual_model:
                 run.model_id = result.actual_model
+            if diagnostic is not None:
+                run.diagnostic_json = dumps(diagnostic)
             run.ended_at = now
             agent_session = session.get(AgentSession, session_id)
             if agent_session:
                 agent_session.status = "idle"
                 agent_session.updated_at = now
             session.flush()
-            return self._message_dict(assistant)
+            return self._message_dict(assistant) if assistant else {}
 
-    def _complete_model_run_failure(self, project_id: str, folder_path: str, session_id: str, run_id: str, status: str, error_code: str, started: float) -> None:
+    def _complete_model_run_failure(self, project_id: str, folder_path: str, session_id: str, run_id: str, status: str, error_code: str, started: float, *, diagnostic: dict[str, Any] | None = None) -> None:
         now = utc_now()
         duration = int((time.perf_counter() - started) * 1000)
         with self.db.project_write(project_id, folder_path) as session:
@@ -1003,6 +1302,8 @@ class StoryService:
                     run.status = status
                 run.error_code = error_code
                 run.duration_ms = duration
+                if diagnostic is not None:
+                    run.diagnostic_json = dumps(diagnostic)
                 run.ended_at = now
             agent_session = session.get(AgentSession, session_id)
             if agent_session:
@@ -1016,6 +1317,17 @@ class StoryService:
             raise StoryError(422, "TARGET_OUTSIDE_RANGE", "目标章节必须位于允许范围内。", {"targetChapter": node.target_chapter, "rangeMin": node.range_min, "rangeMax": node.range_max})
         if not loads(node.prerequisites_json) or not loads(node.completion_conditions_json):
             raise StoryError(422, "INCOMPLETE_MILESTONE_CONTRACT", "里程碑必须包含前置条件和完成条件。")
+
+    def _apply_proposal_operation(self, node: PlanNode, operation: ChangeOperation) -> None:
+        if operation.field not in PROPOSAL_FIELD_MAP:
+            raise StoryError(422, "PROPOSAL_FIELD_NOT_ALLOWED", "提案包含非白名单字段。", {"field": operation.field})
+        attr, _label, value_type = PROPOSAL_FIELD_MAP[operation.field]
+        raw_value = loads(operation.after_json) if operation.after_json is not None else operation.after_value
+        value = self._coerce_proposal_value(operation.field, raw_value, value_type)
+        if value_type == "list":
+            setattr(node, attr, dumps(value))
+        else:
+            setattr(node, attr, value)
 
     def _apply_node_snapshot(self, node: PlanNode, data: dict[str, Any]) -> None:
         fields = ["title", "type", "targetChapter", "rangeMin", "rangeMax", "importance", "note", "pace"]
@@ -1046,7 +1358,23 @@ class StoryService:
 
     def _proposal_dict(self, item: ChangeProposal | None) -> dict[str, Any]:
         assert item
-        return {"id": item.id, "targetId": item.target_id, "targetTitle": item.target_title, "reason": item.reason, "status": item.status, "revision": item.revision, "operations": [{"id": op.id, "field": op.field, "label": op.label, "before": op.before_value, "after": op.after_value, "selected": op.selected} for op in item.operations], "impacts": [{"id": impact.id, "kind": impact.kind, "label": impact.label} for impact in item.impacts]}
+        return {
+            "id": item.id,
+            "targetId": item.target_id,
+            "targetTitle": item.target_title,
+            "reason": item.reason,
+            "status": item.status,
+            "revision": item.revision,
+            "operations": [{
+                "id": op.id,
+                "field": op.field,
+                "label": op.label,
+                "before": loads(op.before_json) if op.before_json is not None else op.before_value,
+                "after": loads(op.after_json) if op.after_json is not None else op.after_value,
+                "selected": op.selected,
+            } for op in item.operations],
+            "impacts": [{"id": impact.id, "kind": impact.kind, "label": impact.label} for impact in item.impacts],
+        }
 
     def _audit_dict(self, item: AuditEvent) -> dict[str, Any]:
         return {"id": item.id, "eventType": item.event_type, "entityType": item.entity_type, "entityId": item.entity_id, "payload": loads(item.payload_json), "requestId": item.request_id, "createdAt": item.created_at}
@@ -1106,6 +1434,7 @@ class StoryService:
             "totalTokens": item.total_tokens,
             "durationMs": item.duration_ms,
             "errorCode": item.error_code,
+            "diagnostic": loads(item.diagnostic_json) if item.diagnostic_json else None,
             "requestId": item.request_id,
             "retryCount": item.retry_count,
             "startedAt": item.started_at,

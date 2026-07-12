@@ -69,7 +69,21 @@ export function applyOperations(milestones: PlanNode[], targetId: string, operat
   return milestones.map((milestone) => {
     if (milestone.id !== targetId) return milestone;
     return selected.reduce<PlanNode>(
-      (updated, operation) => ({ ...updated, [operation.field]: operation.after }),
+      (updated, operation) => {
+        if (["targetChapter", "rangeMin", "rangeMax", "importance"].includes(operation.field)) {
+          return typeof operation.after === "number" ? { ...updated, [operation.field]: operation.after } : updated;
+        }
+        if (["prerequisites", "completionConditions", "foreshadows", "contracts"].includes(operation.field)) {
+          return Array.isArray(operation.after) ? { ...updated, [operation.field]: operation.after } : updated;
+        }
+        if (operation.field === "pace") {
+          return operation.after === "smooth" || operation.after === "fast" || operation.after === "slow" ? { ...updated, pace: operation.after } : updated;
+        }
+        if (operation.field === "note") {
+          return typeof operation.after === "string" ? { ...updated, note: operation.after } : updated;
+        }
+        return updated;
+      },
       milestone,
     );
   });

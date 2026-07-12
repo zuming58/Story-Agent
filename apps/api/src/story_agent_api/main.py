@@ -18,9 +18,25 @@ from .schemas import (
     AgentSessionCreate,
     AgentSessionOut,
     AuditEventOut,
+    CanonAnalyzeRequest,
+    CanonChangeRequestCreate,
+    CanonChangeRequestDecision,
+    CanonChangeRequestOut,
+    CanonDocumentOut,
+    CanonDraftUpdate,
+    CanonEntityOut,
+    CanonEntityTypeOut,
+    CanonLockRequest,
+    CanonRelationOut,
+    CanonRuleOut,
     BackupManifest,
     BackupRecord,
     ChangeProposalOut,
+    ContextCompileRequest,
+    ContextPackageOut,
+    ContextTraceItemOut,
+    ForeshadowOut,
+    KnowledgeBoundaryOut,
     ModelConfigCreate,
     ModelConfigOut,
     ModelConfigUpdate,
@@ -38,6 +54,18 @@ from .schemas import (
     ProposalApply,
     ProposalReject,
     ProviderConnectionTestOut,
+    RetrievalHit,
+    RetrievalQuery,
+    RetrievalStatus,
+    SourceVersionOut,
+    SourceVersionSupersede,
+    StateCandidateCommit,
+    StateCandidateCreate,
+    StateDeltaOut,
+    StateFactOut,
+    StateSnapshotOut,
+    StoryEntityOut,
+    StoryEventOut,
     StoryPlanOut,
 )
 from .secrets import SecretStore
@@ -153,6 +181,86 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/plan", response_model=StoryPlanOut)
     def get_plan(project_id: str) -> object:
         return service.get_plan(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/canon")
+    def get_canon(project_id: str) -> object:
+        return service.phase4.get_canon(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/canon/analyze")
+    def analyze_canon(project_id: str, payload: CanonAnalyzeRequest, request: Request) -> object:
+        return service.phase4.analyze_canon(project_id, payload, request.state.request_id)
+
+    @app.put("/api/v1/projects/{project_id}/canon/draft")
+    def update_canon_draft(project_id: str, payload: CanonDraftUpdate) -> object:
+        return service.phase4.update_canon_draft(project_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/canon/lock")
+    def lock_canon(project_id: str, payload: CanonLockRequest, request: Request) -> object:
+        return service.phase4.lock_canon(project_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/canon/change-requests")
+    def create_canon_change_request(project_id: str, payload: CanonChangeRequestCreate, request: Request) -> object:
+        return service.phase4.create_canon_change_request(project_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/canon/change-requests/{change_request_id}/apply")
+    def apply_canon_change_request(change_request_id: str, payload: CanonChangeRequestDecision, request: Request) -> object:
+        return service.phase4.apply_canon_change_request(change_request_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/canon/change-requests/{change_request_id}/reject")
+    def reject_canon_change_request(change_request_id: str, payload: CanonChangeRequestDecision, request: Request) -> object:
+        return service.phase4.reject_canon_change_request(change_request_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/state/entities")
+    def list_state_entities(project_id: str) -> object:
+        return service.phase4.list_state_entities(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/state/entities/{entity_id}")
+    def get_state_entity(project_id: str, entity_id: str) -> object:
+        return service.phase4.get_state_entity(project_id, entity_id)
+
+    @app.get("/api/v1/projects/{project_id}/state/foreshadows")
+    def list_foreshadows(project_id: str) -> object:
+        return service.phase4.list_foreshadows(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/state/timeline")
+    def list_state_timeline(project_id: str) -> object:
+        return service.phase4.list_timeline(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/state/candidates")
+    def create_state_candidate(project_id: str, payload: StateCandidateCreate, request: Request) -> object:
+        return service.phase4.create_state_candidate(project_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/state/candidates/{candidate_id}/commit")
+    def commit_state_candidate(candidate_id: str, payload: StateCandidateCommit, request: Request) -> object:
+        return service.phase4.commit_state_candidate(candidate_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/source-versions/{source_version_id}/supersede")
+    def supersede_source_version(source_version_id: str, payload: SourceVersionSupersede, request: Request) -> object:
+        return service.phase4.supersede_source_version(source_version_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/state/snapshots")
+    def list_state_snapshots(project_id: str) -> object:
+        return service.phase4.list_snapshots(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/retrieval/search")
+    def retrieval_search(project_id: str, payload: RetrievalQuery) -> object:
+        return service.phase4.search_retrieval(project_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/retrieval/rebuild")
+    def retrieval_rebuild(project_id: str) -> object:
+        return service.phase4.rebuild_retrieval(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/retrieval/status")
+    def retrieval_status(project_id: str) -> object:
+        return service.phase4.retrieval_status(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/context/compile")
+    def compile_context(project_id: str, payload: ContextCompileRequest, request: Request) -> object:
+        return service.phase4.compile_context(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/context/traces/{trace_id}")
+    def get_context_trace(project_id: str, trace_id: str) -> object:
+        return service.phase4.get_context_trace(project_id, trace_id)
 
     @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
     def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:

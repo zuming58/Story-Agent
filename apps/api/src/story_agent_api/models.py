@@ -242,3 +242,257 @@ class AuditEvent(ProjectBase):
     payload_json: Mapped[str] = mapped_column(Text)
     request_id: Mapped[str] = mapped_column(String(36), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class CanonDocument(ProjectBase):
+    __tablename__ = "canon_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(240))
+    kind: Mapped[str] = mapped_column(String(60), index=True)
+    content_markdown: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CanonEntityType(ProjectBase):
+    __tablename__ = "canon_entity_types"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(200))
+    schema_json: Mapped[str] = mapped_column(Text, default="{}")
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    source_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CanonEntity(ProjectBase):
+    __tablename__ = "canon_entities"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    entity_type_id: Mapped[str] = mapped_column(String(36), index=True)
+    canonical_name: Mapped[str] = mapped_column(String(240), unique=True, index=True)
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    attributes_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    source_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CanonRelation(ProjectBase):
+    __tablename__ = "canon_relations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subject_entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    predicate: Mapped[str] = mapped_column(String(120), index=True)
+    object_entity_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    object_value_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    source_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CanonRule(ProjectBase):
+    __tablename__ = "canon_rules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    rule_code: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(80), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(20), default="medium", index=True)
+    constraint_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    source_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CanonChangeRequest(ProjectBase):
+    __tablename__ = "canon_change_requests"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    target_kind: Mapped[str] = mapped_column(String(40), index=True)
+    target_id: Mapped[str] = mapped_column(String(36), index=True)
+    reason: Mapped[str] = mapped_column(Text)
+    impact_summary: Mapped[str] = mapped_column(Text, default="")
+    before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SourceVersion(ProjectBase):
+    __tablename__ = "source_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_id: Mapped[str] = mapped_column(String(120), index=True)
+    version_number: Mapped[int] = mapped_column(Integer, default=1)
+    source_kind: Mapped[str] = mapped_column(String(40), default="manual", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="candidate", index=True)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StoryEntity(ProjectBase):
+    __tablename__ = "story_entities"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    entity_type_id: Mapped[str] = mapped_column(String(36), index=True)
+    canonical_name: Mapped[str] = mapped_column(String(240), unique=True, index=True)
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    attributes_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    source_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StateFact(ProjectBase):
+    __tablename__ = "state_facts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    field_path: Mapped[str] = mapped_column(String(240), index=True)
+    value_json: Mapped[str] = mapped_column(Text, default="null")
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StoryEvent(ProjectBase):
+    __tablename__ = "story_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    event_order: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    location: Mapped[str] = mapped_column(String(200), default="")
+    participants_json: Mapped[str] = mapped_column(Text, default="[]")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StateDelta(ProjectBase):
+    __tablename__ = "state_deltas"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    event_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    field_path: Mapped[str] = mapped_column(String(240), index=True)
+    before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="official", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class Foreshadow(ProjectBase):
+    __tablename__ = "foreshadows"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    code: Mapped[str] = mapped_column(String(120), index=True)
+    label: Mapped[str] = mapped_column(String(240))
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    earliest_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latest_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KnowledgeBoundary(ProjectBase):
+    __tablename__ = "knowledge_boundaries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    knowledge_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StateSnapshot(ProjectBase):
+    __tablename__ = "state_snapshots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    snapshot_number: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class RetrievalIndexState(ProjectBase):
+    __tablename__ = "retrieval_index_state"
+
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    last_rebuilt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    indexed_count: Mapped[int] = mapped_column(Integer, default=0)
+    vector_backend: Mapped[str] = mapped_column(String(60), default="sqlite-local")
+    vector_available: Mapped[bool] = mapped_column(Boolean, default=True)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ContextTrace(ProjectBase):
+    __tablename__ = "context_traces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    role: Mapped[str] = mapped_column(String(80), index=True)
+    query: Mapped[str] = mapped_column(Text, default="")
+    selected_node_id: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    token_budget: Mapped[int] = mapped_column(Integer, default=4000)
+    package_json: Mapped[str] = mapped_column(Text)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

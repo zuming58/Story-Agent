@@ -299,3 +299,282 @@ class ApiError(ApiModel):
     message: str
     details: dict[str, Any] = Field(default_factory=dict)
     request_id: str
+
+
+class CanonDocumentOut(ApiModel):
+    id: str
+    title: str
+    kind: str
+    content_markdown: str
+    status: str
+    revision: int
+    locked_at: datetime | None = None
+
+
+class CanonEntityTypeOut(ApiModel):
+    id: str
+    name: str
+    display_name: str
+    schema_data: dict[str, Any] = Field(alias="schemaJson")
+    is_system: bool
+    status: str
+    revision: int
+    source_document_id: str | None = None
+    locked_at: datetime | None = None
+
+
+class CanonEntityOut(ApiModel):
+    id: str
+    entity_type_id: str
+    canonical_name: str
+    aliases: list[str]
+    attributes: dict[str, Any]
+    status: str
+    revision: int
+    source_document_id: str | None = None
+    locked_at: datetime | None = None
+
+
+class CanonRelationOut(ApiModel):
+    id: str
+    subject_entity_id: str
+    predicate: str
+    object_entity_id: str | None = None
+    object_value: Any | None = None
+    status: str
+    revision: int
+    source_document_id: str | None = None
+    locked_at: datetime | None = None
+
+
+class CanonRuleOut(ApiModel):
+    id: str
+    rule_code: str
+    category: str
+    statement: str
+    severity: str
+    constraint_json: dict[str, Any]
+    status: str
+    revision: int
+    source_document_id: str | None = None
+    locked_at: datetime | None = None
+
+
+class CanonChangeRequestOut(ApiModel):
+    id: str
+    project_id: str
+    target_kind: str
+    target_id: str
+    reason: str
+    impact_summary: str
+    before_json: dict[str, Any] | None = None
+    after_json: dict[str, Any] | None = None
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class CanonDraftUpdate(ApiModel):
+    documents: list[dict[str, Any]] = Field(default_factory=list)
+    entity_types: list[dict[str, Any]] = Field(default_factory=list)
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    relations: list[dict[str, Any]] = Field(default_factory=list)
+    rules: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CanonAnalyzeRequest(ApiModel):
+    project_id: str
+    source_text: str = Field(min_length=1)
+    title: str | None = None
+
+
+class CanonLockRequest(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class CanonChangeRequestCreate(ApiModel):
+    project_id: str
+    target_kind: str
+    target_id: str
+    reason: str = Field(min_length=1)
+    impact_summary: str = ""
+    before_json: dict[str, Any] | None = None
+    after_json: dict[str, Any] | None = None
+
+
+class CanonChangeRequestDecision(ApiModel):
+    project_id: str
+    expected_revision: int = Field(ge=1)
+
+
+class SourceVersionOut(ApiModel):
+    id: str
+    project_id: str
+    source_id: str
+    version_number: int
+    source_kind: str
+    status: str
+    checksum: str
+    summary: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class StateFactOut(ApiModel):
+    id: str
+    entity_id: str
+    field_path: str
+    value_json: Any
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    source_version_id: str | None = None
+    confidence: float
+    is_current: bool
+    revision: int
+
+
+class StoryEntityOut(ApiModel):
+    id: str
+    project_id: str
+    entity_type_id: str
+    canonical_name: str
+    aliases: list[str]
+    attributes: dict[str, Any]
+    status: str
+    revision: int
+    source_document_id: str | None = None
+    source_version_id: str | None = None
+
+
+class StoryEventOut(ApiModel):
+    id: str
+    event_order: int
+    occurred_at: datetime
+    location: str
+    participants: list[str]
+    summary: str
+    source_version_id: str | None = None
+    revision: int
+
+
+class StateDeltaOut(ApiModel):
+    id: str
+    event_id: str | None
+    field_path: str
+    before_json: Any | None = None
+    after_json: Any | None = None
+    source_version_id: str | None = None
+    status: str
+    revision: int
+
+
+class ForeshadowOut(ApiModel):
+    id: str
+    code: str
+    label: str
+    description: str
+    status: str
+    earliest_chapter: int | None = None
+    target_chapter: int | None = None
+    latest_chapter: int | None = None
+    source_version_id: str | None = None
+    evidence: list[str]
+    revision: int
+    resolved_at: datetime | None = None
+
+
+class KnowledgeBoundaryOut(ApiModel):
+    id: str
+    entity_id: str
+    source_version_id: str | None = None
+    knowledge_json: dict[str, Any]
+    status: str
+    revision: int
+
+
+class StateSnapshotOut(ApiModel):
+    id: str
+    snapshot_number: int
+    source_version_id: str | None = None
+    summary_json: dict[str, Any]
+    checksum: str
+    revision: int
+    created_at: datetime
+
+
+class StateCandidateCreate(ApiModel):
+    source_id: str
+    version_number: int = Field(ge=1)
+    source_kind: Literal["canon", "manual", "import", "chapter"] = "manual"
+    summary: str = ""
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    facts: list[dict[str, Any]] = Field(default_factory=list)
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    foreshadows: list[dict[str, Any]] = Field(default_factory=list)
+    boundaries: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StateCandidateCommit(ApiModel):
+    project_id: str
+    expected_revision: int = Field(ge=1)
+
+
+class SourceVersionSupersede(ApiModel):
+    project_id: str
+    expected_revision: int = Field(ge=1)
+
+
+class RetrievalQuery(ApiModel):
+    query: str = Field(min_length=1)
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class RetrievalHit(ApiModel):
+    id: str
+    kind: str
+    title: str
+    content: str
+    source_version_id: str | None = None
+    entity_id: str | None = None
+    checksum: str
+    score: float
+    source_status: str
+
+
+class RetrievalStatus(ApiModel):
+    project_id: str
+    indexed_count: int
+    last_rebuilt_at: datetime | None = None
+    vector_backend: str
+    vector_available: bool
+    checksum: str
+
+
+class ContextCompileRequest(ApiModel):
+    query: str = ""
+    role: str = "planner"
+    selected_node_id: str | None = None
+    token_budget: int = Field(default=4000, ge=256, le=20000)
+
+
+class ContextTraceItemOut(ApiModel):
+    kind: str
+    title: str
+    source_version_id: str | None = None
+    priority: int
+    token_estimate: int
+    reason: str
+    included: bool
+
+
+class ContextPackageOut(ApiModel):
+    trace_id: str
+    project_id: str
+    role: str
+    selected_node_id: str | None = None
+    token_budget: int
+    items: list[ContextTraceItemOut]
+    payload: dict[str, Any]
+    checksum: str

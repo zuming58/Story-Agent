@@ -303,6 +303,9 @@ class StoryService:
         self.secret_store = secret_store or default_secret_store()
         self._cancelled_runs: set[str] = set()
         self.phase4 = Phase4Service(self)
+        from .phase5 import Phase5Service
+
+        self.phase5 = Phase5Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -313,6 +316,7 @@ class StoryService:
             self.create_project(ProjectCreate(title="夜巡人", mode="long-form", total_chapters=1000), seed_demo=True)
         self._recover_interrupted_model_runs()
         self.phase4.ensure_existing_projects()
+        self.phase5.recover_interrupted_jobs()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()

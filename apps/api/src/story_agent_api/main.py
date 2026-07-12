@@ -32,6 +32,19 @@ from .schemas import (
     BackupManifest,
     BackupRecord,
     ChangeProposalOut,
+    ChapterApproveRequest,
+    ChapterCommitOut,
+    ChapterCommitRequest,
+    ChapterContractDerive,
+    ChapterContractLock,
+    ChapterContractOut,
+    ChapterContractUpdate,
+    ChapterDraftOut,
+    ChapterJobCreate,
+    ChapterJobOut,
+    ChapterJobRetry,
+    ChapterJobRun,
+    ChapterRevisionRequest,
     ContextCompileRequest,
     ContextPackageOut,
     ContextTraceItemOut,
@@ -54,6 +67,9 @@ from .schemas import (
     ProposalApply,
     ProposalReject,
     ProviderConnectionTestOut,
+    QualityFindingAcceptRisk,
+    QualityFindingOut,
+    QualityReportOut,
     RetrievalHit,
     RetrievalQuery,
     RetrievalStatus,
@@ -261,6 +277,78 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/context/traces/{trace_id}")
     def get_context_trace(project_id: str, trace_id: str) -> object:
         return service.phase4.get_context_trace(project_id, trace_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-contracts/derive", response_model=ChapterContractOut)
+    def derive_chapter_contract(project_id: str, payload: ChapterContractDerive, request: Request) -> object:
+        return service.phase5.derive_chapter_contract(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/chapter-contracts", response_model=list[ChapterContractOut])
+    def list_chapter_contracts(project_id: str) -> object:
+        return service.phase5.list_chapter_contracts(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/chapter-contracts/{contract_id}", response_model=ChapterContractOut)
+    def get_chapter_contract(project_id: str, contract_id: str) -> object:
+        return service.phase5.get_chapter_contract(project_id, contract_id)
+
+    @app.put("/api/v1/projects/{project_id}/chapter-contracts/{contract_id}", response_model=ChapterContractOut)
+    def update_chapter_contract(project_id: str, contract_id: str, payload: ChapterContractUpdate, request: Request) -> object:
+        return service.phase5.update_chapter_contract(project_id, contract_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-contracts/{contract_id}/lock", response_model=ChapterContractOut)
+    def lock_chapter_contract(project_id: str, contract_id: str, payload: ChapterContractLock, request: Request) -> object:
+        return service.phase5.lock_chapter_contract(project_id, contract_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs", response_model=ChapterJobOut, status_code=201)
+    def create_chapter_job(project_id: str, payload: ChapterJobCreate, request: Request) -> object:
+        return service.phase5.create_chapter_job(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/chapter-jobs", response_model=list[ChapterJobOut])
+    def list_chapter_jobs(project_id: str) -> object:
+        return service.phase5.list_chapter_jobs(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/chapter-jobs/{job_id}", response_model=ChapterJobOut)
+    def get_chapter_job(project_id: str, job_id: str) -> object:
+        return service.phase5.get_chapter_job(project_id, job_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/run", response_model=ChapterJobOut)
+    def run_chapter_job(project_id: str, job_id: str, payload: ChapterJobRun, request: Request) -> object:
+        return service.phase5.run_chapter_job(project_id, job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/cancel", response_model=ChapterJobOut)
+    def cancel_chapter_job(project_id: str, job_id: str, request: Request) -> object:
+        return service.phase5.cancel_chapter_job(project_id, job_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/retry", response_model=ChapterJobOut)
+    def retry_chapter_job(project_id: str, job_id: str, payload: ChapterJobRetry, request: Request) -> object:
+        return service.phase5.retry_chapter_job(project_id, job_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/chapters/{chapter_number}/drafts", response_model=list[ChapterDraftOut])
+    def list_chapter_drafts(project_id: str, chapter_number: int) -> object:
+        return service.phase5.list_chapter_drafts(project_id, chapter_number)
+
+    @app.get("/api/v1/projects/{project_id}/chapter-drafts/{draft_id}")
+    def get_chapter_draft(project_id: str, draft_id: str) -> object:
+        return service.phase5.get_chapter_draft(project_id, draft_id)
+
+    @app.get("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality", response_model=QualityReportOut)
+    def get_chapter_quality(project_id: str, job_id: str) -> object:
+        return service.phase5.get_quality_report(project_id, job_id)
+
+    @app.post("/api/v1/projects/{project_id}/quality-findings/{finding_id}/accept-risk", response_model=QualityFindingOut)
+    def accept_quality_risk(project_id: str, finding_id: str, payload: QualityFindingAcceptRisk, request: Request) -> object:
+        return service.phase5.accept_quality_risk(project_id, finding_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/revise", response_model=ChapterJobOut)
+    def revise_chapter_job(project_id: str, job_id: str, payload: ChapterRevisionRequest, request: Request) -> object:
+        return service.phase5.revise_chapter_job(project_id, job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/approve", response_model=ChapterJobOut)
+    def approve_chapter_job(project_id: str, job_id: str, payload: ChapterApproveRequest, request: Request) -> object:
+        return service.phase5.approve_chapter_job(project_id, job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/commit", response_model=ChapterCommitOut)
+    def commit_chapter_job(project_id: str, job_id: str, payload: ChapterCommitRequest, request: Request) -> object:
+        return service.phase5.commit_chapter_job(project_id, job_id, payload, request.state.request_id)
 
     @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
     def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:

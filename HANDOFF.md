@@ -3,7 +3,7 @@
 更新时间：2026-07-12  
 当前阶段：第二阶段——本地数据基础  
 当前分支：`agent/local-data-foundation`  
-最新代码提交：`751eee0`（并发迁移锁、端到端测试与布局加固）  
+最新代码提交：`751eee0`（并发迁移锁、端到端测试与布局加固）
 草稿 PR：`https://github.com/zuming58/Story-Agent/pull/1`
 
 ## 阶段目标与完成状态

@@ -22,6 +22,7 @@ class ModelStreamResult:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     actual_model: str | None = None
+    retry_count: int = 0
 
 
 @dataclass
@@ -49,6 +50,7 @@ class OpenAICompatibleModelProvider:
         last_error: ModelProviderError | None = None
         for attempt in range(attempts):
             self._last_result = ModelStreamResult()
+            self._last_result.retry_count = attempt
             try:
                 async for text in self._stream_once(payload):
                     yield text
@@ -65,6 +67,7 @@ class OpenAICompatibleModelProvider:
         last_error: ModelProviderError | None = None
         for attempt in range(attempts):
             self._last_result = ModelStreamResult()
+            self._last_result.retry_count = attempt
             try:
                 return await self._complete_once(payload)
             except ModelProviderError as exc:
@@ -150,6 +153,7 @@ class OpenAICompatibleModelProvider:
                 completion_tokens=usage.get("completion_tokens"),
                 total_tokens=usage.get("total_tokens"),
                 actual_model=data.get("model") if isinstance(data.get("model"), str) else None,
+                retry_count=self._last_result.retry_count,
             )
             return self._last_result
         except httpx.TimeoutException as exc:

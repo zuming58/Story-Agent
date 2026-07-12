@@ -138,6 +138,12 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
           void client.invalidateQueries({ queryKey: ["model-runs", project.id] });
           setNotice("结构化提案已生成，等待你确认。");
         }
+        if (event.event === "proposal_skipped") {
+          setProposalStatus({ status: "completed", runId: event.runId, error: null, attempts: event.attempts });
+          void client.invalidateQueries({ queryKey: ["audits", project.id] });
+          void client.invalidateQueries({ queryKey: ["model-runs", project.id] });
+          setNotice(event.message);
+        }
         if (event.event === "proposal_failed") {
           setProposalStatus({ status: "failed", runId: event.runId ?? null, error: `${event.errorCode}: ${event.message}`, attempts: event.attempts });
           setRunStatus((current) => ({ ...current, status: "failed", error: `提案生成失败：${event.errorCode}` }));

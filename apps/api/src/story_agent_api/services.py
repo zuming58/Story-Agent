@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -173,10 +174,14 @@ class StoryService:
         now = utc_now()
         for project in self.list_projects():
             with self.db.project_write(project.id, project.folder_path) as session:
-                runs = session.scalars(select(ModelRun).where(ModelRun.status == "running")).all()
+                runs = session.scalars(select(ModelRun).where(ModelRun.status.in_(["running", "cancel_requested"]))).all()
                 for run in runs:
-                    run.status = "interrupted"
-                    run.error_code = "startup_recovery"
+                    if run.status == "cancel_requested":
+                        run.status = "cancelled"
+                        run.error_code = "startup_recovery_cancelled"
+                    else:
+                        run.status = "interrupted"
+                        run.error_code = "startup_recovery"
                     run.ended_at = now
                 sessions = session.scalars(select(AgentSession).where(AgentSession.status == "thinking")).all()
                 for agent_session in sessions:
@@ -255,10 +260,10 @@ class StoryService:
             if model_count:
                 raise StoryError(409, "MODEL_PROVIDER_IN_USE", "模型供应商仍被模型配置引用，不能删除。", {"modelCount": model_count})
             key_ref = provider.api_key_ref
+            if key_ref:
+                self._delete_provider_secret(key_ref)
             session.delete(provider)
             session.commit()
-        if key_ref:
-            self._delete_provider_secret(key_ref)
 
     def create_deepseek_preset(self) -> dict[str, Any]:
         payload = ModelProviderCreate(name="DeepSeek 官方", base_url="https://api.deepseek.com", timeout_seconds=60, max_retries=1)
@@ -635,7 +640,6 @@ class StoryService:
         started = time.perf_counter()
         role = "planner"
         compiled = self._prepare_model_call(project.id, project.folder_path, session_id, payload, role, run_id, request_id)
-        yield {"event": "run_started", "runId": run_id, "provider": compiled["providerName"], "model": compiled["modelId"], "requestId": request_id}
         provider = OpenAICompatibleModelProvider(
             base_url=compiled["baseUrl"],
             api_key=compiled["apiKey"],
@@ -646,6 +650,7 @@ class StoryService:
         error_code: str | None = None
         assistant_text = ""
         try:
+            yield {"event": "run_started", "runId": run_id, "provider": compiled["providerName"], "model": compiled["modelId"], "requestId": request_id}
             async for delta in provider.stream_chat(compiled["payload"]):
                 if run_id in self._cancelled_runs:
                     status = "cancelled"
@@ -683,9 +688,14 @@ class StoryService:
             status = "failed"
             error_code = "internal_error"
             yield {"event": "failed", "runId": run_id, "errorCode": error_code, "message": "模型调用发生内部错误。"}
+        except (asyncio.CancelledError, GeneratorExit):
+            status = "cancelled"
+            error_code = "client_disconnected"
+            self._cancelled_runs.add(run_id)
+            raise
         finally:
             if status != "succeeded":
-                self._complete_model_run_failure(project.id, project.folder_path, session_id, run_id, status, error_code or status, started)
+                self._complete_model_run_failure(project.id, project.folder_path, session_id, run_id, status, error_code or status, started, retry_count=provider.last_result.retry_count)
             self._cancelled_runs.discard(run_id)
 
     def cancel_model_run(self, project_id: str, run_id: str) -> dict[str, Any]:
@@ -695,7 +705,7 @@ class StoryService:
             run = session.get(ModelRun, run_id)
             if not run:
                 raise StoryError(404, "MODEL_RUN_NOT_FOUND", "模型调用记录不存在。", {"runId": run_id})
-            if run.status == "running":
+            if run.status in {"running", "cancel_requested"}:
                 run.status = "cancel_requested"
                 run.error_code = "cancel_requested"
                 run.ended_at = utc_now()
@@ -1014,13 +1024,24 @@ class StoryService:
                     if exc.code in {"EMPTY_PROPOSAL_JSON", "INVALID_PROPOSAL_JSON", "INVALID_PROPOSAL_STRUCTURE"} and attempts == 1:
                         last_failure = (exc.code, exc.message)
                         continue
+                    if exc.code in {"PROPOSAL_NO_OPERATIONS", "PROPOSAL_NO_EFFECT"}:
+                        self._complete_model_run_success(project_id, folder_path, session_id, run_id, "", result, started, create_message=False, diagnostic={
+                            "kind": "structured_proposal",
+                            "action": payload.action,
+                            "attempts": attempts,
+                            "reason": exc.code,
+                            "message": exc.message,
+                        })
+                        self._record_proposal_noop(project_id, folder_path, payload.selected_node_id, exc.code, exc.message, request_id, run_id)
+                        yield {"event": "proposal_skipped", "runId": run_id, "reasonCode": exc.code, "message": exc.message, "attempts": attempts}
+                        return
                     self._complete_model_run_failure(project_id, folder_path, session_id, run_id, "failed", exc.code, started, diagnostic={
                         "kind": "structured_proposal",
                         "action": payload.action,
                         "attempts": attempts,
                         "reason": exc.code,
                         "message": exc.message,
-                    })
+                    }, retry_count=result.retry_count)
                     self._record_proposal_failure(project_id, folder_path, payload.selected_node_id, exc.code, exc.message, request_id, run_id)
                     yield {"event": "proposal_failed", "runId": run_id, "errorCode": exc.code, "message": exc.message, "attempts": attempts}
                     return
@@ -1030,7 +1051,7 @@ class StoryService:
                 "action": payload.action,
                 "attempts": attempts,
                 "reason": code,
-            })
+            }, retry_count=provider.last_result.retry_count)
             self._record_proposal_failure(project_id, folder_path, payload.selected_node_id, code, message, request_id, run_id)
             yield {"event": "proposal_failed", "runId": run_id, "errorCode": code, "message": message, "attempts": attempts}
         except ModelProviderError as exc:
@@ -1039,7 +1060,7 @@ class StoryService:
                 "action": payload.action,
                 "attempts": attempts,
                 "reason": exc.code,
-            })
+            }, retry_count=provider.last_result.retry_count)
             self._record_proposal_failure(project_id, folder_path, payload.selected_node_id, exc.code, exc.message, request_id, run_id)
             yield {"event": "proposal_failed", "runId": run_id, "errorCode": exc.code, "message": exc.message, "attempts": attempts}
 
@@ -1092,7 +1113,9 @@ class StoryService:
         if not isinstance(target_id, str) or not target_id.strip():
             raise StoryError(422, "PROPOSAL_TARGET_REQUIRED", "结构化提案缺少目标里程碑。")
         operations = raw.get("operations")
-        if not isinstance(operations, list) or not operations:
+        if not isinstance(operations, list):
+            raise StoryError(422, "INVALID_PROPOSAL_STRUCTURE", "结构化提案 operations 必须是数组。")
+        if not operations:
             raise StoryError(422, "PROPOSAL_NO_OPERATIONS", "结构化提案没有可确认的修改项。")
         reason = raw.get("reason")
         if not isinstance(reason, str) or not reason.strip():
@@ -1237,6 +1260,15 @@ class StoryService:
                 "reversible": False,
             }, request_id))
 
+    def _record_proposal_noop(self, project_id: str, folder_path: str, target_id: str | None, code: str, message: str, request_id: str, run_id: str) -> None:
+        with self.db.project_write(project_id, folder_path) as session:
+            session.add(self._audit("proposal.noop", "plan_node", target_id or "unknown", {
+                "runId": run_id,
+                "code": code,
+                "message": message,
+                "reversible": False,
+            }, request_id))
+
     def _prepare_model_call(self, project_id: str, folder_path: str, session_id: str, payload: AgentMessageCreate, role: str, run_id: str, request_id: str, *, run_role: str | None = None, create_user_message: bool = True) -> dict[str, Any]:
         model_info = self._resolve_role_model(role)
         if not model_info:
@@ -1272,7 +1304,7 @@ class StoryService:
                 model_id=model.model_id,
                 status="running",
                 request_id=request_id,
-                retry_count=min(provider.max_retries, 1),
+                retry_count=0,
                 started_at=now,
             ))
             agent_session.status = "thinking"
@@ -1345,6 +1377,7 @@ class StoryService:
             run.prompt_tokens = result.prompt_tokens
             run.completion_tokens = result.completion_tokens
             run.total_tokens = result.total_tokens
+            run.retry_count = getattr(result, "retry_count", run.retry_count)
             run.duration_ms = duration
             if result.actual_model:
                 run.model_id = result.actual_model
@@ -1358,15 +1391,18 @@ class StoryService:
             session.flush()
             return self._message_dict(assistant) if assistant else {}
 
-    def _complete_model_run_failure(self, project_id: str, folder_path: str, session_id: str, run_id: str, status: str, error_code: str, started: float, *, diagnostic: dict[str, Any] | None = None) -> None:
+    def _complete_model_run_failure(self, project_id: str, folder_path: str, session_id: str, run_id: str, status: str, error_code: str, started: float, *, diagnostic: dict[str, Any] | None = None, retry_count: int | None = None) -> None:
         now = utc_now()
         duration = int((time.perf_counter() - started) * 1000)
         with self.db.project_write(project_id, folder_path) as session:
             run = session.get(ModelRun, run_id)
             if run:
-                if run.status != "cancel_requested":
-                    run.status = status
-                run.error_code = error_code
+                was_cancel_requested = run.status == "cancel_requested"
+                final_status = "cancelled" if was_cancel_requested else status
+                run.status = final_status
+                run.error_code = "cancelled" if final_status == "cancelled" and was_cancel_requested else error_code
+                if retry_count is not None:
+                    run.retry_count = retry_count
                 run.duration_ms = duration
                 if diagnostic is not None:
                     run.diagnostic_json = dumps(diagnostic)
@@ -1419,7 +1455,7 @@ class StoryService:
         return {"id": item.id, "role": item.role, "content": item.content, "timestamp": item.created_at}
 
     def _session_dict(self, item: AgentSession) -> dict[str, Any]:
-        active_run = next((run for run in sorted(item.model_runs, key=lambda row: row.started_at, reverse=True) if run.status in {"running", "cancel_requested"}), None)
+        active_run = next((run for run in sorted(item.model_runs, key=lambda row: row.started_at, reverse=True) if run.status == "running"), None)
         return {"id": item.id, "projectId": item.project_id, "scope": loads(item.scope_json), "status": item.status, "messages": [self._message_dict(message) for message in sorted(item.messages, key=lambda row: row.created_at)], "activeRunId": active_run.id if active_run else None}
 
     def _proposal_dict(self, item: ChangeProposal | None) -> dict[str, Any]:

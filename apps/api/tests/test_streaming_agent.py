@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import pytest
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
+from story_agent_api.schemas import AgentMessageCreate
 
 
 class StreamingOpenAIHandler(BaseHTTPRequestHandler):
@@ -60,6 +62,14 @@ class StreamingOpenAIHandler(BaseHTTPRequestHandler):
                 "expectedRevision": 999,
                 "reason": "过期版本提案",
                 "operations": [{"field": "targetChapter", "after": 23}],
+                "impacts": [],
+            }, ensure_ascii=False)
+        elif mode == "noop":
+            content = json.dumps({
+                "targetId": "milestone-paper-man",
+                "expectedRevision": 1,
+                "reason": "逻辑边界通过，不建议改动。",
+                "operations": [],
                 "impacts": [],
             }, ensure_ascii=False)
         else:
@@ -220,6 +230,36 @@ def test_cancel_model_run_marks_existing_running_record(client: TestClient, demo
         cancelled = client.post(f"/api/v1/projects/{demo_project['id']}/model-runs/{run_id}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancel_requested"
+        service._complete_model_run_failure(project.id, project.folder_path, session_id, run_id, "cancelled", "cancel_requested", 0)
+        runs = client.get(f"/api/v1/projects/{demo_project['id']}/model-runs").json()
+        assert next(run for run in runs if run["id"] == run_id)["status"] == "cancelled"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.anyio
+async def test_streaming_generator_close_marks_run_cancelled(client: TestClient, demo_project: dict) -> None:
+    server, base_url = start_server()
+    try:
+        configure_planner(client, base_url)
+        session_id = first_session(client, demo_project["id"])
+        service = client.app.state.story_service
+        generator = service.stream_agent_message(session_id, AgentMessageCreate(
+            projectId=demo_project["id"],
+            content="请检查当前节奏。",
+            selectedNodeId="milestone-paper-man",
+            action="chat",
+        ), "req-disconnect")
+        started = await generator.__anext__()
+        assert started["event"] == "run_started"
+        run_id = started["runId"]
+        await generator.aclose()
+
+        runs = client.get(f"/api/v1/projects/{demo_project['id']}/model-runs").json()
+        run = next(item for item in runs if item["id"] == run_id)
+        assert run["status"] == "cancelled"
+        assert run["errorCode"] == "client_disconnected"
     finally:
         server.shutdown()
         server.server_close()
@@ -266,6 +306,31 @@ def test_structured_json_repair_retry_before_proposal_success(client: TestClient
             body = "".join(response.iter_text())
         assert "event: proposal_completed" in body
         assert '"attempts": 2' in body or '"attempts":2' in body
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_logic_check_noop_is_successful_diagnostic_not_failed_proposal(client: TestClient, demo_project: dict) -> None:
+    server, base_url = start_server(mode="noop")
+    try:
+        configure_planner(client, base_url)
+        session_id = first_session(client, demo_project["id"])
+        with client.stream("POST", f"/api/v1/agent/sessions/{session_id}/messages/stream", json={
+            "projectId": demo_project["id"],
+            "content": "请检查逻辑，如果无需修改就说明通过。",
+            "selectedNodeId": "milestone-paper-man",
+            "action": "logic_check",
+        }) as response:
+            body = "".join(response.iter_text())
+        assert "event: proposal_skipped" in body
+        assert "proposal_failed" not in body
+        runs = client.get(f"/api/v1/projects/{demo_project['id']}/model-runs").json()
+        proposal_run = next(run for run in runs if run["role"] == "planner_proposal")
+        assert proposal_run["status"] == "succeeded"
+        assert proposal_run["diagnostic"]["reason"] == "PROPOSAL_NO_OPERATIONS"
+        audits = client.get(f"/api/v1/projects/{demo_project['id']}/audit-events").json()
+        assert audits[0]["eventType"] == "proposal.noop"
     finally:
         server.shutdown()
         server.server_close()

@@ -135,6 +135,14 @@ export interface StreamProposalFailed {
   attempts: number;
 }
 
+export interface StreamProposalSkipped {
+  event: "proposal_skipped";
+  runId: string;
+  reasonCode: string;
+  message: string;
+  attempts: number;
+}
+
 export interface StreamFailed {
   event: "failed";
   runId?: string;
@@ -155,6 +163,7 @@ export type AgentStreamEvent =
   | StreamCompleted
   | StreamProposalStarted
   | StreamProposalCompleted
+  | StreamProposalSkipped
   | StreamProposalFailed
   | StreamFailed
   | StreamCancelled;

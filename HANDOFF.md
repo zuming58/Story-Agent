@@ -1,10 +1,11 @@
 # Story Agent 第三阶段交接
 
 更新时间：2026-07-12
-当前状态：第三阶段已完成，停止开发，等待 GPT-5.6 审计
+当前状态：第三阶段已完成，本机审计问题已修复，停止开发，等待另一台 GPT-5.6 复审
 工作分支：`agent/model-provider-foundation`
 审计起点：`5fd8015`
 代码完成终点：`bf3569d`
+本机审计修复：推送后的最终 HEAD，提交信息为 `fix: address phase three audit findings`
 最终审计终点：推送后的 `agent/model-provider-foundation` 分支 HEAD，本文件所在交接提交；最终答复同步给出实际 hash。
 完整计划：`docs/plans/PHASE-3-MODEL-PROVIDER.md`
 
@@ -47,6 +48,16 @@
 - 模型调用记录支持按状态和角色过滤，诊断 UI 展示 request id、retry、错误码、中断/失败状态和安全诊断摘要。
 - 新增“安全与审计”页面，承载备份管理、审计时间线、模型调用记录和错误诊断；1440×1024 与 1280×800 e2e 均验证右侧 Agent 不遮挡。
 
+本机审计修复 `fix: address phase three audit findings`
+
+- 修复 SSE 客户端断开和手动停止后的 `model_runs` 状态收敛：断开写入 `cancelled/client_disconnected`，手动停止最终写入 `cancelled`，启动恢复同时处理遗留 `running` 与 `cancel_requested`。
+- 修复停止后的会话 active run 判断，不再把 `cancel_requested` 记录继续暴露为活动调用。
+- 修复 Windows Credential Manager 删除校验：`CredDeleteW` 失败会抛错，`not found` 作为幂等成功；删除 Provider 时先确认凭据清理成功，再删除目录库 Provider 行。
+- 修复 `logic_check` 无修改建议语义：空 `operations` 现在返回 `proposal_skipped`，记录 `proposal.noop` 审计和成功的结构化诊断，不再冒充失败。
+- 修复模型调用 `retryCount`：记录真实发生的重试次数，而不是 Provider 配置值。
+- 前端新增 `proposal_skipped` 事件处理，逻辑检查无修改时显示成功通知并刷新审计/调用记录。
+- 新增 API 测试覆盖 Credential 删除失败、取消最终状态、SSE 断开清理、`logic_check` 空提案成功语义。
+
 ## 未完成内容与范围边界
 
 - 第三阶段范围内未留下已知未完成项。
@@ -86,6 +97,10 @@ Agent 与调用审计:
 - `POST /api/v1/projects/{project_id}/model-runs/{run_id}/cancel`
 - `GET /api/v1/projects/{project_id}/model-runs?status=&role=&limit=`
 
+SSE 事件补充：
+
+- `proposal_skipped`：结构化逻辑检查无正式修改建议时返回，代表诊断成功但不创建待确认提案。
+
 提案闭环:
 
 - `GET /api/v1/projects/{project_id}/change-proposals`
@@ -106,6 +121,7 @@ Agent 与调用审计:
 - API Key 只经 `SecretStore` 保存；默认实现使用 Windows Credential Manager。
 - 自动化测试使用 `MemorySecretStore` 和本地假 OpenAI 服务。
 - Provider 响应只返回 `hasApiKey` 与 `apiKeyPreview`。
+- Provider 删除会先确认 Credential Manager 密钥删除成功，再删除目录库 Provider 行，避免密钥残留且无引用可追踪。
 - `model_runs` 和诊断记录不保存密钥或完整模型上下文。
 - 备份 ZIP 来源为 `project.json`、`story.db` 和 canon 文件，不包含目录库 Provider 密钥引用或 Credential Manager 内容。
 - 已运行敏感扫描：`rg "sk-[A-Za-z0-9_-]{16,}"` 无命中真实密钥；仅测试中保留 `unit-test-*` 假密钥。
@@ -116,7 +132,7 @@ Agent 与调用审计:
 
 - `npm run build`：通过。Vite 仅提示 chunk size warning。
 - `npm run test`：通过。
-  - API：20 passed，1 个 StarletteDeprecationWarning。
+  - API：23 passed，1 个 StarletteDeprecationWarning。
   - Web：3 files passed，8 tests passed。
 - `npm run test:e2e`：通过。
   - 1440×1024：规划提案接受/撤销、直接编辑持久化、安全审计页，共 3 条通过。
@@ -129,16 +145,23 @@ Agent 与调用审计:
 
 ## 审计建议入口
 
-请 GPT-5.6 以 `5fd8015` 为基线，审计 `agent/model-provider-foundation` 到最终推送 HEAD 的全部提交，重点关注：
+请 GPT-5.6 以 `5fd8015` 为基线，审计 `agent/model-provider-foundation` 到最终推送 HEAD 的全部提交。上一轮本机审计已发现并修复停止/断开、Credential 删除、空提案和 retry 统计问题；复审重点关注：
 
 - 密钥是否只存在 Credential Manager / `MemorySecretStore`，是否可能进入 SQLite、备份、日志或响应。
-- 流式 Agent 是否在失败时明确失败，不回退模拟内容冒充成功。
+- 流式 Agent 是否在失败、手动停止、客户端断开和启动恢复时明确收敛为正确状态，不回退模拟内容冒充成功。
 - 结构化 JSON 提案是否严格白名单、revision 校验、事务落库和失败不改变规划。
+- `logic_check` 无修改建议时的 `proposal_skipped`/`proposal.noop` 是否符合产品语义。
 - 备份恢复是否保留 SHA-256、路径穿越防护和新项目恢复语义。
 - 1440×1024 与 1280×800 UI 是否无右侧 Agent 遮挡。
+
+## 下一步工作建议
+
+- 先由另一台 GPT-5.6 对 `5fd8015..最终 HEAD` 做代码审计，不要合并 `main`。
+- 重点跑新增边界测试，并人工试一次真实浏览器停止流式调用、断网/关闭标签页、Credential Manager 不可用/删除失败。
+- 审计通过后再进入下一阶段设计，不要在第三阶段分支里继续开发 Canon、向量检索、章节正文生成或短剧功能。
 
 ## 返回 GPT-5.6 的口令
 
 ```text
-另一台电脑已经完成第三阶段并推送，请读取 HANDOFF.md，以 5fd8015 为基线审计全部提交，修复问题并运行全量测试。
+另一台电脑已经完成第三阶段并完成一轮本机审计修复，请读取 HANDOFF.md，以 5fd8015 为基线复审全部提交，重点检查停止/断开、Credential Manager、结构化提案和备份恢复，并运行全量测试。
 ```

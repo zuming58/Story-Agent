@@ -52,6 +52,7 @@ class UnavailableSecretStore:
 
 
 if os.name == "nt":
+    ERROR_NOT_FOUND = 1168
     CRED_TYPE_GENERIC = 1
     CRED_PERSIST_LOCAL_MACHINE = 2
 
@@ -80,6 +81,9 @@ if os.name == "nt":
     advapi32.CredDeleteW.restype = wintypes.BOOL
     advapi32.CredFree.argtypes = [wintypes.LPVOID]
     advapi32.CredFree.restype = None
+    kernel32 = ctypes.WinDLL("Kernel32.dll")
+    kernel32.GetLastError.argtypes = []
+    kernel32.GetLastError.restype = wintypes.DWORD
 
 
 @dataclass
@@ -121,7 +125,11 @@ class WindowsCredentialStore:
     def delete_secret(self, key: str) -> None:
         if os.name != "nt":
             raise SecretStoreUnavailable("Windows Credential Manager is not available.")
-        advapi32.CredDeleteW(self._target(key), CRED_TYPE_GENERIC, 0)  # type: ignore[name-defined]
+        ok = advapi32.CredDeleteW(self._target(key), CRED_TYPE_GENERIC, 0)  # type: ignore[name-defined]
+        if not ok:
+            error = kernel32.GetLastError()  # type: ignore[name-defined]
+            if error != ERROR_NOT_FOUND:  # type: ignore[name-defined]
+                raise SecretStoreUnavailable("Failed to delete Windows credential.")
 
 
 def default_secret_store() -> SecretStore:

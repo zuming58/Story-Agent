@@ -7,6 +7,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from story_agent_api.secrets import MemorySecretStore, SecretStoreUnavailable
+
+
+class FailingDeleteSecretStore(MemorySecretStore):
+    def delete_secret(self, key: str) -> None:
+        raise SecretStoreUnavailable("delete failed")
+
 
 class FakeOpenAIHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
@@ -119,3 +126,21 @@ def test_deleting_unused_provider_clears_secret_reference(client: TestClient, da
     with sqlite3.connect(data_dir / "catalog.db") as db:
         rows = db.execute("select api_key_ref from model_providers where id = ?", (created["id"],)).fetchall()
     assert rows == []
+
+
+def test_provider_delete_keeps_catalog_row_if_secret_delete_fails(client: TestClient, data_dir: Path) -> None:
+    service = client.app.state.story_service
+    service.secret_store = FailingDeleteSecretStore()
+    created = client.post("/api/v1/model-providers", json={
+        "name": "删除失败 Provider",
+        "baseUrl": "https://api.example.test",
+        "apiKey": "unit-test-stays-cleanup",
+    }).json()
+
+    deleted = client.delete(f"/api/v1/model-providers/{created['id']}")
+    assert deleted.status_code == 503
+    assert deleted.json()["code"] == "CREDENTIAL_STORE_UNAVAILABLE"
+
+    with sqlite3.connect(data_dir / "catalog.db") as db:
+        rows = db.execute("select id, api_key_ref from model_providers where id = ?", (created["id"],)).fetchall()
+    assert rows == [(created["id"], f"model-provider:{created['id']}")]

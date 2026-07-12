@@ -230,9 +230,13 @@ def test_cancel_model_run_marks_existing_running_record(client: TestClient, demo
         cancelled = client.post(f"/api/v1/projects/{demo_project['id']}/model-runs/{run_id}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancel_requested"
-        service._complete_model_run_failure(project.id, project.folder_path, session_id, run_id, "cancelled", "cancel_requested", 0)
+        # A provider failure may race with the cancel request. The persisted
+        # cancel request must still win and return the session to idle.
+        service._complete_model_run_failure(project.id, project.folder_path, session_id, run_id, "failed", "network_error", 0)
         runs = client.get(f"/api/v1/projects/{demo_project['id']}/model-runs").json()
         assert next(run for run in runs if run["id"] == run_id)["status"] == "cancelled"
+        sessions = client.get(f"/api/v1/projects/{demo_project['id']}/agent/sessions").json()
+        assert next(item for item in sessions if item["id"] == session_id)["status"] == "idle"
     finally:
         server.shutdown()
         server.server_close()
@@ -331,6 +335,93 @@ def test_logic_check_noop_is_successful_diagnostic_not_failed_proposal(client: T
         assert proposal_run["diagnostic"]["reason"] == "PROPOSAL_NO_OPERATIONS"
         audits = client.get(f"/api/v1/projects/{demo_project['id']}/audit-events").json()
         assert audits[0]["eventType"] == "proposal.noop"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.anyio
+async def test_disconnect_during_proposal_keeps_natural_reply_and_cancels_proposal_run(client: TestClient, demo_project: dict) -> None:
+    server, base_url = start_server()
+    try:
+        configure_planner(client, base_url)
+        session_id = first_session(client, demo_project["id"])
+        service = client.app.state.story_service
+        generator = service.stream_agent_message(session_id, AgentMessageCreate(
+            projectId=demo_project["id"],
+            content="请重排当前里程碑。",
+            selectedNodeId="milestone-paper-man",
+            action="replan",
+        ), "req-proposal-disconnect")
+
+        while True:
+            event = await generator.__anext__()
+            if event["event"] == "proposal_started":
+                break
+        await generator.aclose()
+
+        runs = client.get(f"/api/v1/projects/{demo_project['id']}/model-runs").json()
+        natural_run = next(run for run in runs if run["role"] == "planner")
+        proposal_run = next(run for run in runs if run["role"] == "planner_proposal")
+        assert natural_run["status"] == "succeeded"
+        assert proposal_run["status"] == "cancelled"
+        assert proposal_run["errorCode"] == "client_disconnected"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.anyio
+async def test_manual_stop_cancels_structured_proposal_before_model_request(client: TestClient, demo_project: dict) -> None:
+    server, base_url = start_server()
+    try:
+        configure_planner(client, base_url)
+        session_id = first_session(client, demo_project["id"])
+        service = client.app.state.story_service
+        pending_before = client.get(f"/api/v1/projects/{demo_project['id']}/change-proposals", params={"status": "pending"}).json()
+        generator = service.stream_agent_message(session_id, AgentMessageCreate(
+            projectId=demo_project["id"],
+            content="请重排当前里程碑。",
+            selectedNodeId="milestone-paper-man",
+            action="replan",
+        ), "req-proposal-stop")
+
+        proposal_started = None
+        while proposal_started is None:
+            event = await generator.__anext__()
+            if event["event"] == "proposal_started":
+                proposal_started = event
+        cancelled = service.cancel_model_run(demo_project["id"], proposal_started["runId"])
+        assert cancelled["status"] == "cancel_requested"
+        event = await generator.__anext__()
+        assert event["event"] == "cancelled"
+        await generator.aclose()
+
+        runs = client.get(f"/api/v1/projects/{demo_project['id']}/model-runs").json()
+        proposal_run = next(run for run in runs if run["id"] == proposal_started["runId"])
+        assert proposal_run["status"] == "cancelled"
+        pending_after = client.get(f"/api/v1/projects/{demo_project['id']}/change-proposals", params={"status": "pending"}).json()
+        assert pending_after == pending_before
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_replan_noop_is_reported_as_failed_proposal(client: TestClient, demo_project: dict) -> None:
+    server, base_url = start_server(mode="noop")
+    try:
+        configure_planner(client, base_url)
+        session_id = first_session(client, demo_project["id"])
+        with client.stream("POST", f"/api/v1/agent/sessions/{session_id}/messages/stream", json={
+            "projectId": demo_project["id"],
+            "content": "请重排当前里程碑。",
+            "selectedNodeId": "milestone-paper-man",
+            "action": "replan",
+        }) as response:
+            body = "".join(response.iter_text())
+        assert "event: proposal_failed" in body
+        assert "PROPOSAL_NO_OPERATIONS" in body
+        assert "event: proposal_skipped" not in body
     finally:
         server.shutdown()
         server.server_close()

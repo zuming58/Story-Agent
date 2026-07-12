@@ -83,6 +83,29 @@ def test_provider_base_url_requires_https_except_localhost(client: TestClient) -
     assert response.json()["code"] == "INSECURE_MODEL_BASE_URL"
 
 
+def test_provider_base_url_rejects_embedded_credentials_and_query(client: TestClient) -> None:
+    for base_url in ("https://user:secret@example.com/v1", "https://example.com/v1?key=secret"):
+        response = client.post("/api/v1/model-providers", json={
+            "name": "不安全 Provider",
+            "baseUrl": base_url,
+        })
+        assert response.status_code == 422
+        assert response.json()["code"] == "INVALID_MODEL_BASE_URL"
+
+
+def test_deepseek_preset_is_idempotent_and_uses_current_model_identifier(client: TestClient) -> None:
+    first = client.post("/api/v1/model-providers/deepseek-preset")
+    second = client.post("/api/v1/model-providers/deepseek-preset")
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]
+
+    providers = client.get("/api/v1/model-providers").json()
+    assert [item["id"] for item in providers].count(first.json()["id"]) == 1
+    models = client.get(f"/api/v1/model-providers/{first.json()['id']}/models").json()
+    assert [item["modelId"] for item in models] == ["deepseek-v4-pro"]
+
+
 def test_models_and_role_bindings_protect_provider_delete(client: TestClient) -> None:
     provider = client.post("/api/v1/model-providers", json={
         "name": "DeepSeek 中转",

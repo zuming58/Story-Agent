@@ -1,12 +1,12 @@
 # Story Agent 第三阶段交接
 
 更新时间：2026-07-12
-当前状态：第三阶段已完成，本机审计问题已修复，停止开发，等待另一台 GPT-5.6 复审
+当前状态：第三阶段已完成，GPT-5.6 完整复审与修复已通过，等待合并决策
 工作分支：`agent/model-provider-foundation`
 审计起点：`5fd8015`
 代码完成终点：`bf3569d`
 本机审计修复：推送后的最终 HEAD，提交信息为 `fix: address phase three audit findings`
-最终审计终点：推送后的 `agent/model-provider-foundation` 分支 HEAD，本文件所在交接提交；最终答复同步给出实际 hash。
+最终审计终点：本文件所在提交；最终答复同步给出实际 hash。
 完整计划：`docs/plans/PHASE-3-MODEL-PROVIDER.md`
 
 ## 完成内容
@@ -58,9 +58,24 @@
 - 前端新增 `proposal_skipped` 事件处理，逻辑检查无修改时显示成功通知并刷新审计/调用记录。
 - 新增 API 测试覆盖 Credential 删除失败、取消最终状态、SSE 断开清理、`logic_check` 空提案成功语义。
 
+GPT-5.6 完整复审修复（本文件所在提交）
+
+- 修复取消竞态：最后一个 SSE delta 后收到停止请求时不再误写成功；自然语言回复已经成功、结构化提案仍运行时断开，只取消提案运行，不覆盖已完成回复。
+- 结构化提案支持手动停止和客户端断开收敛，子生成器被显式关闭，不再遗留 `running`；非 `logic_check` 动作的空提案按失败处理。
+- 流式 Provider 在已经向 UI 发出文本后不再自动重放请求，避免网络中断重试导致开头内容重复。
+- Windows Credential Manager 读取失败会区分“未找到”和真实系统错误，后者不再伪装成缺少密钥。
+- Provider Base URL 禁止内嵌账号、密码、查询参数和 URL fragment，避免凭据随配置进入 SQLite。
+- DeepSeek 官方预设改为幂等创建；默认 `deepseek-v4-pro` 已按 2026-07-12 官方接入文档复核。
+- 备份恢复改为只解包清单白名单文件，补充 Windows 反斜杠/盘符穿越、ZIP 展开上限、512 MB 上传上限、清单结构和时间校验。
+- 损坏备份不会拖垮整个备份列表，仍可下载排查；恢复失败会同时回滚新目录与 catalog 行，不留下半成品项目。
+- 恢复项目同步保留 `currentChapter`、模式和总章节数，校验项目数据库必须包含作品元数据。
+- 实际浏览器复核规划中心、模型设置和质量中心；目标宽度无横向溢出、Agent 未遮挡主操作区，控制台无 error/warning。
+
 ## 未完成内容与范围边界
 
-- 第三阶段范围内未留下已知未完成项。
+- 第三阶段范围内未留下阻塞性未完成项。
+- 低优先级视觉债务：部分 9–10px 辅助说明文字对比度偏低；不影响本阶段功能验收，建议在下一轮统一可访问性校准时处理。
+- 低优先级构建债务：Vite 主 JS chunk 约 534 KB，建议功能模块继续增多前引入路由级拆包。
 - 未开发 Canon、向量检索、章节正文生成、短剧制作、媒体生成或发布能力；这些仍属于后续阶段。
 - 未合并 `main`。
 - 未提交 API Key、本地数据库、日志、备份 ZIP、截图、trace 或 `.e2e-data`。
@@ -124,6 +139,7 @@ SSE 事件补充：
 - Provider 删除会先确认 Credential Manager 密钥删除成功，再删除目录库 Provider 行，避免密钥残留且无引用可追踪。
 - `model_runs` 和诊断记录不保存密钥或完整模型上下文。
 - 备份 ZIP 来源为 `project.json`、`story.db` 和 canon 文件，不包含目录库 Provider 密钥引用或 Credential Manager 内容。
+- 恢复上传限制为 512 MB，ZIP 展开总量限制为 1 GB；仅 manifest 白名单文件会写入临时恢复目录。
 - 已运行敏感扫描：`rg "sk-[A-Za-z0-9_-]{16,}"` 无命中真实密钥；仅测试中保留 `unit-test-*` 假密钥。
 
 ## 测试结果
@@ -132,7 +148,7 @@ SSE 事件补充：
 
 - `npm run build`：通过。Vite 仅提示 chunk size warning。
 - `npm run test`：通过。
-  - API：23 passed，1 个 StarletteDeprecationWarning。
+  - API：33 passed，1 个 StarletteDeprecationWarning。
   - Web：3 files passed，8 tests passed。
 - `npm run test:e2e`：通过。
   - 1440×1024：规划提案接受/撤销、直接编辑持久化、安全审计页，共 3 条通过。
@@ -143,25 +159,22 @@ SSE 事件补充：
 
 - 本机 Playwright 期望 `chromium_headless_shell-1228`，缓存中已有 `1223`。`playwright install chromium` 下载超时后，为完成本地 e2e 验证，临时在用户缓存目录创建了指向既有 `1223` 的本地 Junction；该操作不在仓库内，不进入提交。
 
-## 审计建议入口
+## GPT-5.6 审计结论
 
-请 GPT-5.6 以 `5fd8015` 为基线，审计 `agent/model-provider-foundation` 到最终推送 HEAD 的全部提交。上一轮本机审计已发现并修复停止/断开、Credential 删除、空提案和 retry 统计问题；复审重点关注：
-
-- 密钥是否只存在 Credential Manager / `MemorySecretStore`，是否可能进入 SQLite、备份、日志或响应。
-- 流式 Agent 是否在失败、手动停止、客户端断开和启动恢复时明确收敛为正确状态，不回退模拟内容冒充成功。
-- 结构化 JSON 提案是否严格白名单、revision 校验、事务落库和失败不改变规划。
-- `logic_check` 无修改建议时的 `proposal_skipped`/`proposal.noop` 是否符合产品语义。
-- 备份恢复是否保留 SHA-256、路径穿越防护和新项目恢复语义。
-- 1440×1024 与 1280×800 UI 是否无右侧 Agent 遮挡。
+- 已以 `5fd8015` 为基线复核全部第三阶段提交及上一轮自审提交。
+- 密钥边界、SSE 状态机、结构化提案白名单/revision/确认事务、备份恢复与前端主路径均通过复审。
+- 修复后敏感扫描无真实密钥命中；新增边界测试全部通过。
+- DeepSeek 预设模型名依据 [DeepSeek 官方接入文档](https://api-docs.deepseek.com/) 与 [官方模型价格页](https://api-docs.deepseek.com/quick_start/pricing) 复核。
+- 结论：第三阶段具备合并到 `main` 的条件；合并动作仍由项目负责人决定。
 
 ## 下一步工作建议
 
-- 先由另一台 GPT-5.6 对 `5fd8015..最终 HEAD` 做代码审计，不要合并 `main`。
-- 重点跑新增边界测试，并人工试一次真实浏览器停止流式调用、断网/关闭标签页、Credential Manager 不可用/删除失败。
-- 审计通过后再进入下一阶段设计，不要在第三阶段分支里继续开发 Canon、向量检索、章节正文生成或短剧功能。
+- 项目负责人确认后，将当前草稿 PR 转为 Ready 并合并 `main`。
+- 下一阶段先设计 Canon、事实抽取、状态台账和检索边界，不在本分支继续扩大范围。
+- UI 继续由当前 GPT-5.6 电脑负责；其他电脑优先承担后端与模型链路实现。
 
-## 返回 GPT-5.6 的口令
+## 下一台电脑接力口令
 
 ```text
-另一台电脑已经完成第三阶段并完成一轮本机审计修复，请读取 HANDOFF.md，以 5fd8015 为基线复审全部提交，重点检查停止/断开、Credential Manager、结构化提案和备份恢复，并运行全量测试。
+第三阶段已经通过 GPT-5.6 完整复审。请先读取 HANDOFF.md 和 docs/plans/PHASE-3-MODEL-PROVIDER.md；除非收到新的阶段计划，不要继续修改当前分支，也不要在另一台电脑实施 UI。
 ```

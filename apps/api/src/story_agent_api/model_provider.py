@@ -51,13 +51,17 @@ class OpenAICompatibleModelProvider:
         for attempt in range(attempts):
             self._last_result = ModelStreamResult()
             self._last_result.retry_count = attempt
+            emitted_text = False
             try:
                 async for text in self._stream_once(payload):
+                    emitted_text = True
                     yield text
                 return
             except ModelProviderError as exc:
                 last_error = exc
-                if not exc.retryable or attempt >= attempts - 1:
+                # Retrying after a delta reached the caller would duplicate
+                # an already-rendered prefix in the conversation.
+                if emitted_text or not exc.retryable or attempt >= attempts - 1:
                     raise
         if last_error:
             raise last_error

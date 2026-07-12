@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import tempfile
 import json
 from contextlib import asynccontextmanager
@@ -43,6 +42,9 @@ from .schemas import (
 )
 from .secrets import SecretStore
 from .services import StoryError, StoryService
+
+
+MAX_BACKUP_UPLOAD_BYTES = 512 * 1024 * 1024
 
 
 def create_app(settings: Settings | None = None, secret_store: SecretStore | None = None) -> FastAPI:
@@ -232,13 +234,20 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/projects/restore", response_model=ProjectOut, status_code=201)
     async def restore_project(backup: UploadFile = File(...)) -> object:
         suffix = Path(backup.filename or "backup.zip").suffix or ".zip"
-        with tempfile.NamedTemporaryFile(dir=settings.data_dir, suffix=suffix, delete=False) as handle:
-            temp_path = Path(handle.name)
-            shutil.copyfileobj(backup.file, handle)
+        temp_path: Path | None = None
         try:
+            with tempfile.NamedTemporaryFile(dir=settings.data_dir, suffix=suffix, delete=False) as handle:
+                temp_path = Path(handle.name)
+                written = 0
+                while chunk := backup.file.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > MAX_BACKUP_UPLOAD_BYTES:
+                        raise StoryError(413, "BACKUP_UPLOAD_TOO_LARGE", "备份文件超过 512 MB 上传限制。")
+                    handle.write(chunk)
             return service.restore_backup(temp_path)
         finally:
-            temp_path.unlink(missing_ok=True)
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
     return app
 

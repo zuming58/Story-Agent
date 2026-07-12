@@ -114,7 +114,10 @@ class WindowsCredentialStore:
         credential_pointer = ctypes.POINTER(CREDENTIALW)()  # type: ignore[name-defined]
         ok = advapi32.CredReadW(self._target(key), CRED_TYPE_GENERIC, 0, ctypes.byref(credential_pointer))  # type: ignore[name-defined]
         if not ok:
-            return None
+            error = kernel32.GetLastError()  # type: ignore[name-defined]
+            if error == ERROR_NOT_FOUND:  # type: ignore[name-defined]
+                return None
+            raise SecretStoreUnavailable("Failed to read Windows credential.")
         try:
             credential = credential_pointer.contents
             raw = ctypes.string_at(credential.CredentialBlob, credential.CredentialBlobSize)

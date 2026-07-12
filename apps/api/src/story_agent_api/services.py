@@ -266,6 +266,31 @@ class StoryService:
             session.commit()
 
     def create_deepseek_preset(self) -> dict[str, Any]:
+        with self.db.catalog() as session:
+            existing = session.scalar(select(ModelProvider).where(
+                ModelProvider.name == "DeepSeek 官方",
+                ModelProvider.base_url == "https://api.deepseek.com",
+            ))
+            if existing:
+                has_current_model = session.scalar(select(ModelConfig.id).where(
+                    ModelConfig.provider_id == existing.id,
+                    ModelConfig.model_id == "deepseek-v4-pro",
+                ))
+                existing_id = existing.id
+                if has_current_model:
+                    return self._provider_dict(existing)
+            else:
+                existing_id = None
+        if existing_id:
+            self.create_model_config(existing_id, ModelConfigCreate(
+                model_id="deepseek-v4-pro",
+                display_name="DeepSeek V4 Pro",
+                temperature=0.7,
+                max_output_tokens=4096,
+                supports_reasoning=True,
+                is_enabled=True,
+            ))
+            return self.get_model_provider(existing_id)
         payload = ModelProviderCreate(name="DeepSeek 官方", base_url="https://api.deepseek.com", timeout_seconds=60, max_retries=1)
         provider = self.create_model_provider(payload)
         self.create_model_config(provider["id"], ModelConfigCreate(
@@ -649,6 +674,7 @@ class StoryService:
         status = "succeeded"
         error_code: str | None = None
         assistant_text = ""
+        natural_run_completed = False
         try:
             yield {"event": "run_started", "runId": run_id, "provider": compiled["providerName"], "model": compiled["modelId"], "requestId": request_id}
             async for delta in provider.stream_chat(compiled["payload"]):
@@ -659,6 +685,12 @@ class StoryService:
                     break
                 assistant_text += delta
                 yield {"event": "text_delta", "runId": run_id, "delta": delta}
+            # Cancellation can arrive after the provider's final delta but
+            # before the success transaction begins.
+            if status == "succeeded" and run_id in self._cancelled_runs:
+                status = "cancelled"
+                error_code = "cancelled"
+                yield {"event": "cancelled", "runId": run_id, "message": "模型调用已停止。"}
             if status == "succeeded":
                 if not assistant_text.strip():
                     status = "failed"
@@ -666,19 +698,23 @@ class StoryService:
                     yield {"event": "failed", "runId": run_id, "errorCode": error_code, "message": "模型没有返回内容。"}
                 else:
                     message = self._complete_model_run_success(project.id, project.folder_path, session_id, run_id, assistant_text, provider.last_result, started)
+                    natural_run_completed = True
                     yield {"event": "completed", "runId": run_id, "message": message, "usage": {
                         "promptTokens": provider.last_result.prompt_tokens,
                         "completionTokens": provider.last_result.completion_tokens,
                         "totalTokens": provider.last_result.total_tokens,
                     }}
                     if payload.action in STRUCTURED_ACTIONS:
+                        proposal_stream = self._stream_structured_proposal(project.id, project.folder_path, session_id, payload, request_id)
                         try:
-                            async for proposal_event in self._stream_structured_proposal(project.id, project.folder_path, session_id, payload, request_id):
+                            async for proposal_event in proposal_stream:
                                 yield proposal_event
                         except StoryError as exc:
                             yield {"event": "proposal_failed", "runId": None, "errorCode": exc.code, "message": exc.message, "attempts": 0}
                         except ModelProviderError as exc:
                             yield {"event": "proposal_failed", "runId": None, "errorCode": exc.code, "message": exc.message, "attempts": 0}
+                        finally:
+                            await proposal_stream.aclose()
                     return
         except ModelProviderError as exc:
             status = "failed"
@@ -689,12 +725,13 @@ class StoryService:
             error_code = "internal_error"
             yield {"event": "failed", "runId": run_id, "errorCode": error_code, "message": "模型调用发生内部错误。"}
         except (asyncio.CancelledError, GeneratorExit):
-            status = "cancelled"
-            error_code = "client_disconnected"
-            self._cancelled_runs.add(run_id)
+            if not natural_run_completed:
+                status = "cancelled"
+                error_code = "client_disconnected"
+                self._cancelled_runs.add(run_id)
             raise
         finally:
-            if status != "succeeded":
+            if status != "succeeded" and not natural_run_completed:
                 self._complete_model_run_failure(project.id, project.folder_path, session_id, run_id, status, error_code or status, started, retry_count=provider.last_result.retry_count)
             self._cancelled_runs.discard(run_id)
 
@@ -855,7 +892,16 @@ class StoryService:
         folder = Path(project.folder_path)
         backups: list[dict[str, Any]] = []
         for archive in sorted((folder / "backups").glob("*.zip"), key=lambda path: path.stat().st_mtime, reverse=True):
-            item = self._read_backup_manifest(archive, require_checksums=False)
+            try:
+                item = self._read_backup_manifest(archive, require_checksums=False)
+            except StoryError:
+                item = {
+                    "backupId": archive.stem,
+                    "projectId": project.id,
+                    "projectTitle": project.title,
+                    "createdAt": datetime.fromtimestamp(archive.stat().st_mtime, tz=timezone.utc).isoformat(),
+                    "files": {},
+                }
             item["archivePath"] = str(archive)
             item["sizeBytes"] = archive.stat().st_size
             item["isValid"] = self._backup_archive_is_valid(archive)
@@ -869,57 +915,81 @@ class StoryService:
             try:
                 manifest = self._read_backup_manifest(archive, require_checksums=False)
             except StoryError:
+                if archive.stem == backup_id:
+                    return archive
                 continue
             if manifest.get("backupId") == backup_id:
                 return archive
         raise StoryError(404, "BACKUP_NOT_FOUND", "备份不存在。", {"backupId": backup_id})
 
     def restore_backup(self, archive_path: Path) -> CatalogProject:
-        if not zipfile.is_zipfile(archive_path):
-            raise StoryError(422, "INVALID_BACKUP", "备份文件不是有效 ZIP。")
+        manifest = self._read_backup_manifest(archive_path, require_checksums=True)
         with tempfile.TemporaryDirectory(dir=self.settings.data_dir) as temp_name:
             temp = Path(temp_name)
             with zipfile.ZipFile(archive_path) as package:
-                names = set(package.namelist())
-                if "manifest.json" not in names:
-                    raise StoryError(422, "INVALID_BACKUP", "备份缺少 manifest.json。")
-                for name in names:
-                    path = PurePosixPath(name)
-                    if path.is_absolute() or ".." in path.parts:
-                        raise StoryError(422, "INVALID_BACKUP_PATH", "备份包含不安全路径。", {"path": name})
-                package.extractall(temp)
-            manifest = json.loads((temp / "manifest.json").read_text(encoding="utf-8"))
-            for name, expected in manifest.get("files", {}).items():
-                path = temp / Path(name)
-                if not path.is_file() or sha256(path) != expected:
-                    raise StoryError(422, "BACKUP_CHECKSUM_MISMATCH", "备份校验失败。", {"path": name})
-            source_json = json.loads((temp / "project.json").read_text(encoding="utf-8"))
-            restored = self.create_project(ProjectCreate(
-                title=f"{source_json['title']}（恢复）", mode=source_json["mode"], total_chapters=source_json["totalChapters"]
-            ))
-            target_folder = Path(restored.folder_path)
-            engine = self.db._project_engines.pop(restored.id, None)
-            self.db._project_factories.pop(restored.id, None)
-            if engine:
-                engine.dispose()
-            shutil.copy2(temp / "story.db", target_folder / "story.db")
-            if (temp / "canon").exists():
-                for canon_file in (temp / "canon").rglob("*"):
-                    if canon_file.is_file():
-                        destination = target_folder / canon_file.relative_to(temp)
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(canon_file, destination)
-            self.db.ensure_project_database(restored.id, target_folder)
-            with self.db.project_write(restored.id, target_folder) as session:
-                old_meta = session.scalar(select(ProjectMeta))
-                if old_meta:
+                for name in manifest["files"]:
+                    safe_name = self._safe_backup_member(name)
+                    destination = temp / Path(*PurePosixPath(safe_name).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with package.open(name) as source, destination.open("wb") as target:
+                        shutil.copyfileobj(source, target)
+            try:
+                source_json = json.loads((temp / "project.json").read_text(encoding="utf-8"))
+                source_title = str(source_json["title"])
+                source_mode = str(source_json["mode"])
+                source_total = int(source_json["totalChapters"])
+                source_current = int(source_json.get("currentChapter", 0))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise StoryError(422, "INVALID_BACKUP_PROJECT", "备份中的 project.json 无效。") from exc
+            if source_current < 0 or source_current > source_total:
+                raise StoryError(422, "INVALID_BACKUP_PROJECT", "备份中的当前章节超出作品范围。")
+
+            restored: CatalogProject | None = None
+            try:
+                restored = self.create_project(ProjectCreate(
+                    title=f"{source_title}（恢复）", mode=source_mode, total_chapters=source_total
+                ))
+                target_folder = Path(restored.folder_path)
+                engine = self.db._project_engines.pop(restored.id, None)
+                self.db._project_factories.pop(restored.id, None)
+                if engine:
+                    engine.dispose()
+                shutil.copy2(temp / "story.db", target_folder / "story.db")
+                if (temp / "canon").exists():
+                    for canon_file in (temp / "canon").rglob("*"):
+                        if canon_file.is_file():
+                            destination = target_folder / canon_file.relative_to(temp)
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(canon_file, destination)
+                self.db.ensure_project_database(restored.id, target_folder)
+                with self.db.project_write(restored.id, target_folder) as session:
+                    old_meta = session.scalar(select(ProjectMeta))
+                    if not old_meta:
+                        raise StoryError(422, "INVALID_BACKUP_DATABASE", "备份数据库缺少作品元数据。")
                     old_id = old_meta.id
                     old_meta.id = restored.id
                     old_meta.title = restored.title
+                    old_meta.mode = source_mode
+                    old_meta.current_chapter = source_current
+                    old_meta.total_chapters = source_total
                     for agent_session in session.scalars(select(AgentSession).where(AgentSession.project_id == old_id)):
                         agent_session.project_id = restored.id
-            self._write_project_files(restored)
-            return restored
+                with self.db.catalog() as session:
+                    catalog = session.get(CatalogProject, restored.id)
+                    assert catalog
+                    catalog.current_chapter = source_current
+                    catalog.total_chapters = source_total
+                    catalog.mode = source_mode
+                    catalog.updated_at = utc_now()
+                    session.commit()
+                    session.refresh(catalog)
+                    restored = catalog
+                self._write_project_files(restored)
+                return restored
+            except Exception:
+                if restored is not None:
+                    self._remove_failed_restore(restored)
+                raise
 
     def _read_backup_manifest(self, archive: Path, *, require_checksums: bool) -> dict[str, Any]:
         if not zipfile.is_zipfile(archive):
@@ -928,14 +998,28 @@ class StoryService:
             names = set(package.namelist())
             if "manifest.json" not in names:
                 raise StoryError(422, "INVALID_BACKUP", "备份缺少 manifest.json。")
-            manifest = json.loads(package.read("manifest.json"))
+            try:
+                manifest = json.loads(package.read("manifest.json"))
+            except (KeyError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+                raise StoryError(422, "INVALID_BACKUP_MANIFEST", "备份清单无法解析。") from exc
+            if not isinstance(manifest, dict) or not all(isinstance(manifest.get(field), str) and manifest[field] for field in ("backupId", "projectId", "projectTitle", "createdAt")) or not isinstance(manifest.get("files"), dict):
+                raise StoryError(422, "INVALID_BACKUP_MANIFEST", "备份清单结构无效。")
+            try:
+                datetime.fromisoformat(manifest["createdAt"].replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise StoryError(422, "INVALID_BACKUP_MANIFEST", "备份清单时间无效。") from exc
+            if not all(isinstance(name, str) and isinstance(digest, str) for name, digest in manifest["files"].items()):
+                raise StoryError(422, "INVALID_BACKUP_MANIFEST", "备份清单文件列表无效。")
             if require_checksums:
+                if len(names) > 10_000 or sum(info.file_size for info in package.infolist()) > 1024 * 1024 * 1024:
+                    raise StoryError(422, "BACKUP_TOO_LARGE", "备份展开后超过安全限制。")
                 for name in names:
-                    path = PurePosixPath(name)
-                    if path.is_absolute() or ".." in path.parts:
-                        raise StoryError(422, "INVALID_BACKUP_PATH", "备份包含不安全路径。", {"path": name})
+                    self._safe_backup_member(name)
+                if not {"project.json", "story.db"}.issubset(manifest["files"]):
+                    raise StoryError(422, "INVALID_BACKUP_MANIFEST", "备份清单缺少必要文件。")
                 for name, expected in manifest.get("files", {}).items():
-                    if name not in names:
+                    self._safe_backup_member(name)
+                    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or name not in names:
                         raise StoryError(422, "BACKUP_CHECKSUM_MISMATCH", "备份校验失败。", {"path": name})
                     digest = hashlib.sha256()
                     with package.open(name) as handle:
@@ -944,6 +1028,28 @@ class StoryService:
                     if digest.hexdigest() != expected:
                         raise StoryError(422, "BACKUP_CHECKSUM_MISMATCH", "备份校验失败。", {"path": name})
             return manifest
+
+    def _safe_backup_member(self, name: str) -> str:
+        if not isinstance(name, str) or not name or "\\" in name:
+            raise StoryError(422, "INVALID_BACKUP_PATH", "备份包含不安全路径。", {"path": name})
+        path = PurePosixPath(name)
+        if path.is_absolute() or ".." in path.parts or (path.parts and ":" in path.parts[0]):
+            raise StoryError(422, "INVALID_BACKUP_PATH", "备份包含不安全路径。", {"path": name})
+        return path.as_posix()
+
+    def _remove_failed_restore(self, project: CatalogProject) -> None:
+        engine = self.db._project_engines.pop(project.id, None)
+        self.db._project_factories.pop(project.id, None)
+        if engine:
+            engine.dispose()
+        with self.db.catalog() as session:
+            row = session.get(CatalogProject, project.id)
+            if row:
+                session.delete(row)
+                session.commit()
+        folder = Path(project.folder_path).resolve()
+        if self.settings.projects_dir.resolve() in folder.parents:
+            shutil.rmtree(folder, ignore_errors=True)
 
     def _backup_archive_is_valid(self, archive: Path) -> bool:
         try:
@@ -956,6 +1062,8 @@ class StoryService:
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise StoryError(422, "INVALID_MODEL_BASE_URL", "模型服务地址必须是有效的 HTTP(S) URL。")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise StoryError(422, "INVALID_MODEL_BASE_URL", "模型服务地址不得包含账号、密码、查询参数或片段。")
         if parsed.scheme == "https":
             return
         host = (parsed.hostname or "").lower()
@@ -996,15 +1104,23 @@ class StoryService:
             timeout_seconds=compiled["timeoutSeconds"],
             max_retries=compiled["maxRetries"],
         )
-        yield {"event": "proposal_started", "runId": run_id, "provider": compiled["providerName"], "model": compiled["modelId"], "requestId": request_id}
         attempts = 0
         last_failure: tuple[str, str] | None = None
         try:
+            yield {"event": "proposal_started", "runId": run_id, "provider": compiled["providerName"], "model": compiled["modelId"], "requestId": request_id}
             while attempts < 2:
                 attempts += 1
+                if run_id in self._cancelled_runs:
+                    self._complete_model_run_failure(project_id, folder_path, session_id, run_id, "cancelled", "cancelled", started, retry_count=provider.last_result.retry_count)
+                    yield {"event": "cancelled", "runId": run_id, "message": "结构化提案生成已停止。"}
+                    return
                 proposal_payload = self._structured_proposal_payload(compiled["payload"], payload, last_failure)
                 try:
                     result = await provider.complete_chat(proposal_payload)
+                    if run_id in self._cancelled_runs:
+                        self._complete_model_run_failure(project_id, folder_path, session_id, run_id, "cancelled", "cancelled", started, retry_count=result.retry_count)
+                        yield {"event": "cancelled", "runId": run_id, "message": "结构化提案生成已停止。"}
+                        return
                     proposal = self._parse_structured_proposal_text(result.text)
                     created = self._create_structured_proposal(project_id, folder_path, proposal, run_id, request_id)
                     self._complete_model_run_success(project_id, folder_path, session_id, run_id, "", result, started, create_message=False, diagnostic={
@@ -1024,7 +1140,7 @@ class StoryService:
                     if exc.code in {"EMPTY_PROPOSAL_JSON", "INVALID_PROPOSAL_JSON", "INVALID_PROPOSAL_STRUCTURE"} and attempts == 1:
                         last_failure = (exc.code, exc.message)
                         continue
-                    if exc.code in {"PROPOSAL_NO_OPERATIONS", "PROPOSAL_NO_EFFECT"}:
+                    if payload.action == "logic_check" and exc.code in {"PROPOSAL_NO_OPERATIONS", "PROPOSAL_NO_EFFECT"}:
                         self._complete_model_run_success(project_id, folder_path, session_id, run_id, "", result, started, create_message=False, diagnostic={
                             "kind": "structured_proposal",
                             "action": payload.action,
@@ -1063,6 +1179,12 @@ class StoryService:
             }, retry_count=provider.last_result.retry_count)
             self._record_proposal_failure(project_id, folder_path, payload.selected_node_id, exc.code, exc.message, request_id, run_id)
             yield {"event": "proposal_failed", "runId": run_id, "errorCode": exc.code, "message": exc.message, "attempts": attempts}
+        except (asyncio.CancelledError, GeneratorExit):
+            self._cancelled_runs.add(run_id)
+            self._complete_model_run_failure(project_id, folder_path, session_id, run_id, "cancelled", "client_disconnected", started, retry_count=provider.last_result.retry_count)
+            raise
+        finally:
+            self._cancelled_runs.discard(run_id)
 
     def _structured_proposal_payload(self, base_payload: dict[str, Any], payload: AgentMessageCreate, last_failure: tuple[str, str] | None) -> dict[str, Any]:
         messages = list(base_payload["messages"])
@@ -1407,9 +1529,11 @@ class StoryService:
                 if diagnostic is not None:
                     run.diagnostic_json = dumps(diagnostic)
                 run.ended_at = now
+            else:
+                final_status = status
             agent_session = session.get(AgentSession, session_id)
             if agent_session:
-                agent_session.status = "idle" if status == "cancelled" else "error"
+                agent_session.status = "idle" if final_status == "cancelled" else "error"
                 agent_session.updated_at = now
 
     def _validate_node(self, node: PlanNode) -> None:

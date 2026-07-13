@@ -1,7 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 import { resolve } from "node:path";
 
-const e2eDataDir = resolve(process.cwd(), ".e2e-data");
+// Every invocation gets an isolated catalog/project root. A timed-out Windows
+// migration must never poison the next Playwright run.
+const e2eRunId = process.env.STORY_AGENT_E2E_RUN_ID ?? `${Date.now()}-${process.pid}`;
+const e2eDataDir = resolve(process.cwd(), ".e2e-data", e2eRunId);
 
 export default defineConfig({
   testDir: "./e2e",

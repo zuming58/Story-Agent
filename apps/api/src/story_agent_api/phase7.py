@@ -20,6 +20,7 @@ from .models import (
     AutomationRunItem,
     ChapterCommit,
     ChapterContract,
+    ChapterDraft,
     ChapterJob,
     ModelConfig,
     ModelRoleBinding,
@@ -52,6 +53,16 @@ MODEL_ROLES_FOR_AUTOMATION = {
 }
 LEASE_SECONDS = 300
 MODEL_FAILURE_THRESHOLD = 2
+ACTIVE_CHAPTER_JOB_STATUSES = {
+    "compiling_context",
+    "drafting",
+    "extracting",
+    "validating",
+    "reviewing",
+    "revising",
+    "committing",
+    "cancel_requested",
+}
 
 
 def _now() -> datetime:
@@ -83,23 +94,40 @@ class Phase7Service:
             "automation_execution_context",
             default=None,
         )
+        self._lease_owner_context: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+            "automation_lease_owner_context",
+            default=None,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle and scheduler
     # ------------------------------------------------------------------
     def recover_interrupted_automation(self) -> None:
+        self.reconcile_orphaned_automation()
+        self.check_due_policies(execute_due=False)
+
+    def reconcile_orphaned_automation(self) -> None:
         now = _now()
         for project in self.service.list_projects():
+            refreshed_run_ids: list[str] = []
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 lease = session.get(AutomationLease, project.id)
-                active_owner = None
-                if lease and _as_utc(lease.lease_expires_at) and _as_utc(lease.lease_expires_at) > now:
-                    active_owner = lease.owner_id
+                lease_live = bool(
+                    lease
+                    and _as_utc(lease.lease_expires_at)
+                    and _as_utc(lease.lease_expires_at) > now
+                )
+                active_run_id: str | None = None
+                if lease_live and lease and lease.owner_id.startswith("automation:"):
+                    parts = lease.owner_id.split(":", 2)
+                    if len(parts) == 3:
+                        active_run_id = parts[1]
                 for run in session.scalars(select(AutomationRun).where(AutomationRun.status.in_(["running", "cancel_requested"]))).all():
-                    if active_owner and active_owner.startswith(f"automation:{run.id}:"):
+                    if active_run_id == run.id:
                         continue
+                    recovery_reason = "automation_lease_expired" if lease and not lease_live else "startup_recovery"
                     run.status = "interrupted" if run.status != "cancel_requested" else "cancelled"
-                    run.stop_reason = "startup_recovery"
+                    run.stop_reason = recovery_reason
                     run.completed_at = now
                     run.updated_at = now
                     run.revision += 1
@@ -108,13 +136,21 @@ class Phase7Service:
                         AutomationRunItem.status.in_(["waiting", "running"]),
                     )).all():
                         item.status = "waiting" if run.status == "interrupted" else "cancelled"
-                        item.error_code = "startup_recovery"
+                        item.error_code = recovery_reason
                         item.completed_at = None if item.status == "waiting" else now
                         item.updated_at = now
-                for lease in session.scalars(select(AutomationLease)).all():
-                    if _as_utc(lease.lease_expires_at) and _as_utc(lease.lease_expires_at) <= now:
-                        session.delete(lease)
-        self.check_due_policies(execute_due=False)
+                        job = session.get(ChapterJob, item.chapter_job_id) if item.chapter_job_id else None
+                        if job and job.status in ACTIVE_CHAPTER_JOB_STATUSES:
+                            job.status = "interrupted" if run.status == "interrupted" else "cancelled"
+                            job.error_code = "automation_lease_recovery"
+                            job.finished_at = now
+                            job.updated_at = now
+                            job.revision += 1
+                    refreshed_run_ids.append(run.id)
+                if lease and not lease_live:
+                    session.delete(lease)
+            for recovered_run_id in refreshed_run_ids:
+                self._refresh_daily_report(project.id, project.folder_path, recovered_run_id)
 
     def start_scheduler(self) -> None:
         try:
@@ -125,11 +161,7 @@ class Phase7Service:
             return
         self._stop_event = asyncio.Event()
         self._loop_task = asyncio.create_task(self._scheduler_loop())
-        for project in self.service.list_projects():
-            with self.service.db.project(project.id, project.folder_path) as session:
-                queued_ids = session.scalars(select(AutomationRun.id).where(AutomationRun.status == "queued")).all()
-            for run_id in queued_ids:
-                self.dispatch_run(project.id, run_id)
+        self._dispatch_queued_runs()
 
     async def stop_scheduler(self) -> None:
         if self._stop_event is not None:
@@ -147,7 +179,9 @@ class Phase7Service:
     async def _scheduler_loop(self) -> None:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
+            self.reconcile_orphaned_automation()
             self.check_due_policies(execute_due=True)
+            self._dispatch_queued_runs()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=30)
             except TimeoutError:
@@ -179,7 +213,25 @@ class Phase7Service:
             for run_id in project_created:
                 if execute_due:
                     self.dispatch_run(project.id, run_id)
+                else:
+                    self._refresh_daily_report(project.id, project.folder_path, run_id)
         return created
+
+    def _dispatch_queued_runs(self) -> None:
+        now = _now()
+        for project in self.service.list_projects():
+            with self.service.db.project(project.id, project.folder_path) as session:
+                lease = session.get(AutomationLease, project.id)
+                if lease and _as_utc(lease.lease_expires_at) and _as_utc(lease.lease_expires_at) > now:
+                    continue
+                run_id = session.scalar(
+                    select(AutomationRun.id)
+                    .where(AutomationRun.project_id == project.id, AutomationRun.status == "queued")
+                    .order_by(AutomationRun.created_at.asc())
+                    .limit(1)
+                )
+            if run_id:
+                self.dispatch_run(project.id, run_id)
 
     # ------------------------------------------------------------------
     # Policy and run APIs
@@ -213,21 +265,26 @@ class Phase7Service:
     def create_manual_run(self, project_id: str, payload: AutomationRunCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         today = self._today_for_project(project.id, project.folder_path)
+        should_dispatch = False
         with self.service.db.project_write(project.id, project.folder_path) as session:
             policy = self._get_or_create_policy(session, project.id)
             if policy.daily_cost_limit is not None:
                 self.assert_required_prices(project.id)
+            existing: AutomationRun | None = None
             if payload.idempotency_key:
                 existing = session.scalar(select(AutomationRun).where(
                     AutomationRun.project_id == project.id,
                     AutomationRun.idempotency_key == payload.idempotency_key,
                 ))
-                if existing:
-                    return self.get_run(project.id, existing.id)
-            run = self._create_run_row(session, policy, "manual", today, payload.idempotency_key, _now())
-            session.add(self.service._audit("automation_run.queued", "automation_run", run.id, {"trigger": "manual", "requestId": request_id}, request_id))
+            if existing:
+                run = existing
+            else:
+                run = self._create_run_row(session, policy, "manual", today, payload.idempotency_key, _now())
+                session.add(self.service._audit("automation_run.queued", "automation_run", run.id, {"trigger": "manual", "requestId": request_id}, request_id))
             run_id = run.id
-        self.dispatch_run(project.id, run_id)
+            should_dispatch = run.status == "queued"
+        if should_dispatch:
+            self.dispatch_run(project.id, run_id)
         return self.get_run(project.id, run_id)
 
     def list_runs(self, project_id: str) -> list[dict[str, Any]]:
@@ -245,12 +302,26 @@ class Phase7Service:
     def cancel_run(self, project_id: str, run_id: str, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         active_job_id: str | None = None
+        finalized_immediately = False
         with self.service.db.project_write(project.id, project.folder_path) as session:
             run = self._get_run(session, project.id, run_id)
             if run.status in TERMINAL_STATUSES:
                 return self._run_dict(session, run, include_items=True)
-            run.status = "cancel_requested"
+            original_status = run.status
+            run.status = "cancelled" if original_status == "queued" else "cancel_requested"
             run.stop_reason = "cancel_requested"
+            if original_status == "queued":
+                run.completed_at = _now()
+                finalized_immediately = True
+                for item in session.scalars(select(AutomationRunItem).where(
+                    AutomationRunItem.automation_run_id == run.id,
+                    AutomationRunItem.status == "waiting",
+                )).all():
+                    item.status = "cancelled"
+                    item.error_code = "cancelled"
+                    item.completed_at = _now()
+                    item.updated_at = _now()
+                self._recount_run(session, run)
             run.revision += 1
             run.updated_at = _now()
             active = session.scalar(select(AutomationRunItem).where(
@@ -259,6 +330,9 @@ class Phase7Service:
             ))
             active_job_id = active.chapter_job_id if active else None
             session.add(self.service._audit("automation_run.cancel_requested", "automation_run", run.id, {"requestId": request_id}, request_id))
+        if finalized_immediately:
+            self._refresh_daily_report(project.id, project.folder_path, run_id)
+            return self.get_run(project.id, run_id)
         if active_job_id:
             try:
                 self.service.phase5.cancel_chapter_job(project.id, active_job_id, request_id)
@@ -298,6 +372,7 @@ class Phase7Service:
 
     def catch_up_run(self, project_id: str, run_id: str, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
+        should_dispatch = False
         with self.service.db.project_write(project.id, project.folder_path) as session:
             missed = self._get_run(session, project.id, run_id)
             if missed.status != "missed":
@@ -305,21 +380,29 @@ class Phase7Service:
             policy = self._get_or_create_policy(session, project.id)
             if policy.daily_cost_limit is not None:
                 self.assert_required_prices(project.id)
-            catch_up = self._create_run_row(
-                session,
-                policy,
-                "catch_up",
-                missed.scheduled_local_date,
-                f"catch-up:{missed.id}",
-                _now(),
-            )
-            missed.stop_reason = "catch_up_created"
-            missed.diagnostic_json = dumps({"catchUpRunId": catch_up.id})
-            missed.updated_at = _now()
-            missed.revision += 1
-            session.add(self.service._audit("automation_run.catch_up_queued", "automation_run", catch_up.id, {"missedRunId": missed.id, "requestId": request_id}, request_id))
+            catch_up_key = f"catch-up:{missed.id}"
+            catch_up = session.scalar(select(AutomationRun).where(
+                AutomationRun.project_id == project.id,
+                AutomationRun.idempotency_key == catch_up_key,
+            ))
+            if catch_up is None:
+                catch_up = self._create_run_row(
+                    session,
+                    policy,
+                    "catch_up",
+                    missed.scheduled_local_date,
+                    catch_up_key,
+                    _now(),
+                )
+                missed.stop_reason = "catch_up_created"
+                missed.diagnostic_json = dumps({"catchUpRunId": catch_up.id})
+                missed.updated_at = _now()
+                missed.revision += 1
+                session.add(self.service._audit("automation_run.catch_up_queued", "automation_run", catch_up.id, {"missedRunId": missed.id, "requestId": request_id}, request_id))
             catch_up_id = catch_up.id
-        self.dispatch_run(project.id, catch_up_id)
+            should_dispatch = catch_up.status == "queued"
+        if should_dispatch:
+            self.dispatch_run(project.id, catch_up_id)
         return self.get_run(project.id, catch_up_id)
 
     # ------------------------------------------------------------------
@@ -379,13 +462,24 @@ class Phase7Service:
                 lease = session.get(AutomationLease, project.id)
                 if lease and lease.owner_id.startswith(f"automation:{run_id}:"):
                     return self.get_run(project.id, run_id)
-            self._mark_run_terminal(project.id, project.folder_path, run_id, "blocked", "AUTOMATION_LEASE_BUSY", {"ownerId": owner_id})
+            # Another run owns the project. Keep this run queued so the local
+            # scheduler can dispatch it after the lease is released.
             return self.get_run(project.id, run_id)
         heartbeat_stop = threading.Event()
+        lease_lost = threading.Event()
 
         def keep_lease_alive() -> None:
             while not heartbeat_stop.wait(LEASE_SECONDS / 3):
-                self._heartbeat(project.id, project.folder_path, owner_id)
+                try:
+                    renewed = self._heartbeat(project.id, project.folder_path, owner_id)
+                except Exception:
+                    # A transient SQLite lock must not permanently kill the
+                    # heartbeat thread. The next interval retries; commit-time
+                    # fencing still rejects an expired or replaced lease.
+                    continue
+                if renewed is False:
+                    lease_lost.set()
+                    break
 
         heartbeat_thread = threading.Thread(
             target=keep_lease_alive,
@@ -405,7 +499,9 @@ class Phase7Service:
             if self._run_has_daily_limit(project.id, project.folder_path, run_id):
                 self.assert_required_prices(project.id)
             while True:
-                self._heartbeat(project.id, project.folder_path, owner_id)
+                renewed = self._heartbeat(project.id, project.folder_path, owner_id)
+                if lease_lost.is_set() or renewed is False:
+                    raise StoryError(409, "AUTOMATION_LEASE_LOST", "Automation lease was lost during execution.")
                 item = self._next_waiting_item(project.id, project.folder_path, run_id)
                 if item is None:
                     self._finish_run_from_items(project.id, project.folder_path, run_id)
@@ -415,7 +511,7 @@ class Phase7Service:
                     self._mark_run_terminal(project.id, project.folder_path, run_id, "cancelled", "cancel_requested", {})
                     break
                 try:
-                    self._execute_item(project, run_id, item.id)
+                    self._execute_item(project, run_id, item.id, owner_id)
                 except StoryError as exc:
                     if self._run_cancel_requested(project.id, project.folder_path, run_id):
                         self._mark_item_terminal(project.id, project.folder_path, item.id, "cancelled", "cancelled", {})
@@ -461,33 +557,48 @@ class Phase7Service:
             heartbeat_thread.join()
             self._release_lease(project.id, project.folder_path, owner_id)
 
-    def _execute_item(self, project: Any, run_id: str, item_id: str) -> None:
-        with self.service.db.project_write(project.id, project.folder_path) as session:
-            item = session.get(AutomationRunItem, item_id)
-            if not item:
-                raise StoryError(404, "AUTOMATION_RUN_ITEM_NOT_FOUND", "Automation run item not found.")
-            item.status = "running"
-            item.started_at = item.started_at or _now()
-            item.updated_at = _now()
-            chapter_number = item.chapter_number
-        existing_commit = self._current_commit(project.id, project.folder_path, chapter_number)
-        if existing_commit:
-            self._mark_item_skipped(project.id, project.folder_path, item_id, existing_commit["id"])
-            return
-        contract = self._ensure_locked_contract(project, chapter_number, run_id)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
-            item = session.get(AutomationRunItem, item_id)
-            if item:
-                item.chapter_contract_id = contract["id"]
-                item.updated_at = _now()
-        job = self._ensure_job(project, contract["id"], run_id, chapter_number)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
-            item = session.get(AutomationRunItem, item_id)
-            if item:
-                item.chapter_job_id = job["id"]
-                item.updated_at = _now()
+    def _execute_item(self, project: Any, run_id: str, item_id: str, owner_id: str) -> None:
         token = self._execution_context.set((run_id, item_id))
+        owner_token = self._lease_owner_context.set(owner_id)
         try:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                self.assert_current_automation_lease(session, project.id)
+                item = session.get(AutomationRunItem, item_id)
+                if not item:
+                    raise StoryError(404, "AUTOMATION_RUN_ITEM_NOT_FOUND", "Automation run item not found.")
+                item.status = "running"
+                item.started_at = item.started_at or _now()
+                item.updated_at = _now()
+                chapter_number = item.chapter_number
+                linked_job_id = item.chapter_job_id
+            existing_commit = self._current_commit(project.id, project.folder_path, chapter_number)
+            if existing_commit:
+                if linked_job_id and existing_commit.get("chapterJobId") == linked_job_id:
+                    self._mark_item_committed(
+                        project.id,
+                        project.folder_path,
+                        item_id,
+                        existing_commit["id"],
+                        existing_commit.get("chapterContractId"),
+                        linked_job_id,
+                    )
+                else:
+                    self._mark_item_skipped(project.id, project.folder_path, item_id, existing_commit["id"])
+                return
+            contract = self._ensure_locked_contract(project, chapter_number, run_id)
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                self.assert_current_automation_lease(session, project.id)
+                item = session.get(AutomationRunItem, item_id)
+                if item:
+                    item.chapter_contract_id = contract["id"]
+                    item.updated_at = _now()
+            job = self._ensure_job(project, contract["id"], run_id, chapter_number)
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                self.assert_current_automation_lease(session, project.id)
+                item = session.get(AutomationRunItem, item_id)
+                if item:
+                    item.chapter_job_id = job["id"]
+                    item.updated_at = _now()
             job_state = self._advance_job_to_review(project.id, job["id"])
             if job_state["status"] == "completed":
                 commit = self._current_commit(project.id, project.folder_path, chapter_number)
@@ -504,6 +615,7 @@ class Phase7Service:
             self._mark_item_committed(project.id, project.folder_path, item_id, commit["id"], contract["id"], job["id"])
         finally:
             self._sync_run_costs(project.id, project.folder_path, run_id)
+            self._lease_owner_context.reset(owner_token)
             self._execution_context.reset(token)
 
     def _advance_job_to_review(self, project_id: str, job_id: str) -> dict[str, Any]:
@@ -748,12 +860,21 @@ class Phase7Service:
     # ------------------------------------------------------------------
     def _current_commit(self, project_id: str, folder_path: str, chapter_number: int) -> dict[str, Any] | None:
         with self.service.db.project(project_id, folder_path) as session:
-            commit = session.scalar(select(ChapterCommit).where(
-                ChapterCommit.project_id == project_id,
-                ChapterCommit.chapter_number == chapter_number,
-                ChapterCommit.is_current.is_(True),
-            ))
-            return self.service.phase5._commit_dict(commit) if commit else None
+            row = session.execute(
+                select(ChapterCommit, ChapterDraft.chapter_job_id)
+                .join(ChapterDraft, ChapterDraft.id == ChapterCommit.approved_draft_id)
+                .where(
+                    ChapterCommit.project_id == project_id,
+                    ChapterCommit.chapter_number == chapter_number,
+                    ChapterCommit.is_current.is_(True),
+                )
+            ).first()
+            if not row:
+                return None
+            commit, chapter_job_id = row
+            result = self.service.phase5._commit_dict(commit)
+            result["chapterJobId"] = chapter_job_id
+            return result
 
     def _ensure_locked_contract(self, project: Any, chapter_number: int, run_id: str) -> dict[str, Any]:
         with self.service.db.project(project.id, project.folder_path) as session:
@@ -819,6 +940,41 @@ class Phase7Service:
     def current_execution_context(self) -> tuple[str, str] | None:
         return self._execution_context.get()
 
+    def should_preserve_active_job(self, session: Session, project_id: str, job_id: str) -> bool:
+        lease = session.get(AutomationLease, project_id)
+        expires_at = _as_utc(lease.lease_expires_at) if lease else None
+        if not lease or not expires_at or expires_at <= _now() or not lease.owner_id.startswith("automation:"):
+            return False
+        parts = lease.owner_id.split(":", 2)
+        if len(parts) != 3:
+            return False
+        run_id = parts[1]
+        run = session.get(AutomationRun, run_id)
+        if not run or run.project_id != project_id or run.status not in {"running", "cancel_requested"}:
+            return False
+        return session.scalar(select(AutomationRunItem.id).where(
+            AutomationRunItem.automation_run_id == run_id,
+            AutomationRunItem.chapter_job_id == job_id,
+            AutomationRunItem.status == "running",
+        ).limit(1)) is not None
+
+    def assert_current_automation_lease(self, session: Session, project_id: str) -> None:
+        context = self.current_execution_context()
+        owner_id = self._lease_owner_context.get()
+        if context is None or owner_id is None:
+            return
+        run_id, _item_id = context
+        lease = session.get(AutomationLease, project_id)
+        expires_at = _as_utc(lease.lease_expires_at) if lease else None
+        if not lease or lease.owner_id != owner_id or not expires_at or expires_at <= _now():
+            raise StoryError(409, "AUTOMATION_LEASE_LOST", "Automation lease is no longer owned by this execution.", {
+                "runId": run_id,
+                "ownerId": owner_id,
+            })
+        run = self._get_run(session, project_id, run_id)
+        if run.status == "cancel_requested":
+            raise StoryError(409, "AUTOMATION_RUN_CANCELLED", "Automation run cancellation was requested.")
+
     def before_model_call(self, project_id: str, role: str, messages: list[dict[str, str]], model_id: str) -> None:
         context = self.current_execution_context()
         if context is None:
@@ -827,6 +983,7 @@ class Phase7Service:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
             policy = session.get(AutomationPolicy, project.id)
+            self.assert_current_automation_lease(session, project.id)
             run = self._get_run(session, project.id, run_id)
             item = session.get(AutomationRunItem, item_id)
             if run.status == "cancel_requested":
@@ -849,15 +1006,18 @@ class Phase7Service:
                 return
             if not item or item.automation_run_id != run.id:
                 raise StoryError(409, "AUTOMATION_RUN_ITEM_NOT_FOUND", "Automation run item not found.")
+            zone = _zone(policy.timezone)
+            local_today = _now().astimezone(zone).date()
+            local_start = datetime.combine(local_today, time.min, tzinfo=zone)
+            local_end = datetime.combine(local_today + timedelta(days=1), time.min, tzinfo=zone)
+            utc_start = local_start.astimezone(timezone.utc)
+            utc_end = local_end.astimezone(timezone.utc)
             daily_spend = sum(
                 session.scalars(
                     select(ModelRun.estimated_cost).where(
-                        ModelRun.automation_run_id.in_(
-                            select(AutomationRun.id).where(
-                                AutomationRun.project_id == project.id,
-                                AutomationRun.scheduled_local_date == run.scheduled_local_date,
-                            )
-                        )
+                        ModelRun.automation_run_id.is_not(None),
+                        ModelRun.started_at >= utc_start,
+                        ModelRun.started_at < utc_end,
                     )
                 ).all()
             )
@@ -994,13 +1154,17 @@ class Phase7Service:
                 session.add(AutomationLease(project_id=project_id, owner_id=owner_id, lease_expires_at=expires, heartbeat_at=now))
             return True
 
-    def _heartbeat(self, project_id: str, folder_path: str, owner_id: str) -> None:
+    def _heartbeat(self, project_id: str, folder_path: str, owner_id: str) -> bool:
         with self.service.db.project_write(project_id, folder_path) as session:
             lease = session.get(AutomationLease, project_id)
-            if lease and lease.owner_id == owner_id:
-                lease.heartbeat_at = _now()
-                lease.lease_expires_at = _now() + timedelta(seconds=LEASE_SECONDS)
+            now = _now()
+            expires_at = _as_utc(lease.lease_expires_at) if lease else None
+            if lease and lease.owner_id == owner_id and expires_at and expires_at > now:
+                lease.heartbeat_at = now
+                lease.lease_expires_at = now + timedelta(seconds=LEASE_SECONDS)
                 lease.revision += 1
+                return True
+            return False
 
     def _release_lease(self, project_id: str, folder_path: str, owner_id: str) -> None:
         with self.service.db.project_write(project_id, folder_path) as session:

@@ -109,6 +109,9 @@ class Phase5Service:
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 jobs = session.scalars(select(ChapterJob).where(ChapterJob.status.in_(ACTIVE_JOB_STATUSES))).all()
                 for job in jobs:
+                    phase7 = getattr(self.service, "phase7", None)
+                    if phase7 is not None and phase7.should_preserve_active_job(session, project.id, job.id):
+                        continue
                     if job.status == "cancel_requested":
                         job.status = "cancelled"
                         job.error_code = "startup_recovery_cancelled"
@@ -128,6 +131,9 @@ class Phase5Service:
         if payload.chapter_number > project.total_chapters:
             raise StoryError(422, "CHAPTER_NUMBER_OUT_OF_RANGE", "Chapter number exceeds the project's planned chapter count.", {"totalChapters": project.total_chapters})
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            phase7 = getattr(self.service, "phase7", None)
+            if phase7 is not None:
+                phase7.assert_current_automation_lease(session, project.id)
             locked_docs = session.scalars(select(CanonDocument).where(CanonDocument.status == "locked").order_by(CanonDocument.id.asc())).all()
             if not locked_docs:
                 raise StoryError(409, "CANON_NOT_LOCKED", "Canon must be locked before deriving chapter contracts.")
@@ -246,6 +252,9 @@ class Phase5Service:
         project = self.service.get_project(project_id)
         try:
             with self.service.db.project_write(project.id, project.folder_path) as session:
+                phase7 = getattr(self.service, "phase7", None)
+                if phase7 is not None:
+                    phase7.assert_current_automation_lease(session, project.id)
                 item = self._get_contract(session, project.id, contract_id)
                 if item.revision != payload.expected_revision:
                     raise StoryError(409, "CHAPTER_CONTRACT_REVISION_CONFLICT", "Chapter contract revision conflict.", {"currentRevision": item.revision})
@@ -307,6 +316,9 @@ class Phase5Service:
         project = self.service.get_project(project_id)
         key = payload.idempotency_key or f"default:{payload.chapter_contract_id}"
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            phase7 = getattr(self.service, "phase7", None)
+            if phase7 is not None:
+                phase7.assert_current_automation_lease(session, project.id)
             contract = self._get_contract(session, project.id, payload.chapter_contract_id)
             if contract.status != "locked":
                 raise StoryError(409, "CHAPTER_CONTRACT_NOT_LOCKED", "Chapter contract must be locked before creating a job.")
@@ -350,6 +362,9 @@ class Phase5Service:
     def run_chapter_job(self, project_id: str, job_id: str, payload: ChapterJobRun, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            phase7 = getattr(self.service, "phase7", None)
+            if phase7 is not None:
+                phase7.assert_current_automation_lease(session, project.id)
             job = self._get_job(session, project.id, job_id)
             if job.status in ACTIVE_JOB_STATUSES:
                 raise StoryError(409, "CHAPTER_JOB_ALREADY_RUNNING", "Chapter job is already running.")
@@ -435,6 +450,9 @@ class Phase5Service:
     def resume_chapter_job(self, project_id: str, job_id: str, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            phase7 = getattr(self.service, "phase7", None)
+            if phase7 is not None:
+                phase7.assert_current_automation_lease(session, project.id)
             job = self._get_job(session, project.id, job_id)
             contract = self._get_contract(session, project.id, job.chapter_contract_id)
             self._assert_contract_fresh(session, project.id, contract)
@@ -536,6 +554,9 @@ class Phase5Service:
     def retry_chapter_job(self, project_id: str, job_id: str, payload: ChapterJobRetry, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            phase7 = getattr(self.service, "phase7", None)
+            if phase7 is not None:
+                phase7.assert_current_automation_lease(session, project.id)
             job = self._get_job(session, project.id, job_id)
             if job.status not in {"failed", "interrupted", "cancelled", "human_review"}:
                 raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Chapter job cannot be retried from its current status.")
@@ -615,6 +636,9 @@ class Phase5Service:
     def revise_chapter_job(self, project_id: str, job_id: str, payload: ChapterRevisionRequest, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            phase7 = getattr(self.service, "phase7", None)
+            if phase7 is not None:
+                phase7.assert_current_automation_lease(session, project.id)
             job = self._get_job(session, project.id, job_id)
             if job.status != "human_review":
                 raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only a chapter in human review can be revised.")
@@ -788,6 +812,9 @@ class Phase5Service:
     def approve_chapter_job(self, project_id: str, job_id: str, payload: ChapterApproveRequest, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
+            phase7 = getattr(self.service, "phase7", None)
+            if phase7 is not None:
+                phase7.assert_current_automation_lease(session, project.id)
             job = self._get_job(session, project.id, job_id)
             if job.revision != payload.expected_job_revision:
                 raise StoryError(409, "CHAPTER_JOB_REVISION_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
@@ -836,6 +863,9 @@ class Phase5Service:
         mirror: tuple[int, str] | None = None
         try:
             with self.service.db.project_write(project.id, project.folder_path) as session:
+                phase7 = getattr(self.service, "phase7", None)
+                if phase7 is not None:
+                    phase7.assert_current_automation_lease(session, project.id)
                 job = self._get_job(session, project.id, job_id)
                 if job.status == "completed":
                     existing_commit = session.scalar(

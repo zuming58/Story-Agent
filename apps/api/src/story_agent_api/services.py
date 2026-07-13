@@ -1179,6 +1179,16 @@ class StoryService:
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
                         ), {"new_id": restored.id, "old_id": old_id})
+                    # AutomationPolicy uses project_id as its identity. Runs
+                    # keep a separate policy_id reference, so remap that
+                    # reference as part of the same restore transaction too.
+                    session.execute(text(
+                        "UPDATE automation_runs SET policy_id = :new_id WHERE policy_id = :old_id"
+                    ), {"new_id": restored.id, "old_id": old_id})
+                    # Lease rows are runtime ownership, not transferable
+                    # authority. Keep them in the backup for auditability, but
+                    # never let a restored clone inherit another process lease.
+                    session.execute(text("DELETE FROM automation_leases"))
                     index_state = session.get(RetrievalIndexState, old_id)
                     if index_state:
                         index_state.project_id = restored.id
@@ -1198,6 +1208,9 @@ class StoryService:
                     session.refresh(catalog)
                     restored = catalog
                 self._write_project_files(restored)
+                # With runtime leases cleared, active copied runs/jobs converge
+                # to interrupted and require an explicit resume in the clone.
+                self.phase7.reconcile_orphaned_automation()
                 return restored
             except Exception:
                 if restored is not None:

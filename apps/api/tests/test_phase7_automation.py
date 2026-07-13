@@ -5,10 +5,12 @@ from pathlib import Path
 import threading
 
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import select
 from story_agent_api.models import AutomationLease, AutomationRun, AutomationRunItem, ChapterContract, ChapterJob, ModelRun
 from story_agent_api.model_provider import ModelProviderError
 from story_agent_api.schemas import ChapterContractDerive, ChapterContractLock, ChapterJobCreate, ChapterJobRun
+from story_agent_api.services import StoryError
 
 from test_phase5 import configure_phase5_roles, lock_canon, start_phase5_server
 
@@ -141,6 +143,32 @@ def test_automation_runs_one_chapter_through_guarded_commit(client: TestClient, 
         assert run["estimatedCost"] > 0
         project = client.get(f"/api/v1/projects/{project_id}").json()
         assert project["currentChapter"] >= 1
+
+        # Simulate a crash after the official commit transaction succeeded but
+        # before the automation item was acknowledged as committed.
+        service = client.app.state.story_service
+        catalog_project = service.get_project(project_id)
+        model_calls_before_resume = server.RequestHandlerClass.post_count
+        with service.db.project_write(catalog_project.id, catalog_project.folder_path) as session:
+            persisted_run = session.get(AutomationRun, run["id"])
+            persisted_item = session.get(AutomationRunItem, run["items"][0]["id"])
+            assert persisted_run is not None and persisted_item is not None
+            persisted_run.status = "interrupted"
+            persisted_run.succeeded_count = 0
+            persisted_run.completed_at = datetime.now(timezone.utc)
+            persisted_run.updated_at = datetime.now(timezone.utc)
+            persisted_item.status = "waiting"
+            persisted_item.chapter_commit_id = None
+            persisted_item.completed_at = None
+            persisted_item.updated_at = datetime.now(timezone.utc)
+        resumed = client.post(f"/api/v1/projects/{project_id}/automation/runs/{run['id']}/resume")
+        assert resumed.status_code == 200, resumed.text
+        recovered = wait_for_run(client, project_id, run["id"])
+        assert recovered["status"] == "completed"
+        assert recovered["succeededCount"] == 1
+        assert recovered["items"][0]["status"] == "committed"
+        assert recovered["items"][0]["chapterCommitId"] == run["items"][0]["chapterCommitId"]
+        assert server.RequestHandlerClass.post_count == model_calls_before_resume
     finally:
         server.shutdown()
         server.server_close()
@@ -204,6 +232,9 @@ def test_missed_run_and_catch_up_use_same_executor(client: TestClient, demo_proj
         assert missed_ids
         missed = client.get(f"/api/v1/projects/{project_id}/automation/runs/{missed_ids[0]}").json()
         assert missed["status"] == "missed"
+        missed_reports = client.get(f"/api/v1/projects/{project_id}/automation/reports").json()
+        missed_report = next(report for report in missed_reports if report["localDate"] == missed["scheduledLocalDate"])
+        assert missed_report["statusSummary"]["missed"] == 1
         caught = client.post(f"/api/v1/projects/{project_id}/automation/runs/{missed['id']}/catch-up")
         assert caught.status_code == 200, caught.text
         completed = wait_for_run(client, project_id, caught.json()["id"])
@@ -263,6 +294,27 @@ def test_startup_recovery_preserves_run_with_live_lease(client: TestClient, demo
         policy = service.phase7._get_or_create_policy(session, project.id)
         run = service.phase7._create_run_row(session, policy, "manual", "2026-07-13", "live-lease-run", datetime.now(timezone.utc))
         run.status = "running"
+        job = ChapterJob(
+            id="live-lease-job",
+            project_id=project.id,
+            chapter_contract_id="live-lease-contract",
+            status="drafting",
+            idempotency_key="live-lease-job",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        session.add(job)
+        session.add(AutomationRunItem(
+            id="live-lease-item",
+            project_id=project.id,
+            automation_run_id=run.id,
+            chapter_number=1,
+            sequence_number=1,
+            chapter_job_id=job.id,
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ))
         session.add(AutomationLease(
             project_id=project.id,
             owner_id=f"automation:{run.id}:other-process",
@@ -270,11 +322,105 @@ def test_startup_recovery_preserves_run_with_live_lease(client: TestClient, demo
             heartbeat_at=datetime.now(timezone.utc),
         ))
         run_id = run.id
+    service.phase5.recover_interrupted_jobs()
+    with service.db.project(project.id, project.folder_path) as session:
+        assert session.get(ChapterJob, "live-lease-job").status == "drafting"
     service.phase7.recover_interrupted_automation()
     preserved = client.get(f"/api/v1/projects/{project_id}/automation/runs/{run_id}").json()
     assert preserved["status"] == "running"
     with service.db.project(project.id, project.folder_path) as session:
         assert session.get(AutomationLease, project.id) is not None
+
+    with service.db.project_write(project.id, project.folder_path) as session:
+        lease = session.get(AutomationLease, project.id)
+        assert lease is not None
+        lease.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    service.phase7.reconcile_orphaned_automation()
+    reconciled = client.get(f"/api/v1/projects/{project_id}/automation/runs/{run_id}").json()
+    assert reconciled["status"] == "interrupted"
+    with service.db.project(project.id, project.folder_path) as session:
+        assert session.get(AutomationLease, project.id) is None
+        assert session.get(ChapterJob, "live-lease-job").status == "interrupted"
+    reports = client.get(f"/api/v1/projects/{project_id}/automation/reports").json()
+    assert any(report["localDate"] == "2026-07-13" for report in reports)
+
+
+def test_busy_project_keeps_run_queued_and_queued_cancel_is_terminal(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    service = client.app.state.story_service
+    project = service.get_project(project_id)
+    with service.db.project_write(project.id, project.folder_path) as session:
+        policy = service.phase7._get_or_create_policy(session, project.id)
+        run = service.phase7._create_run_row(
+            session,
+            policy,
+            "manual",
+            "2026-07-13",
+            "queued-behind-lease",
+            datetime.now(timezone.utc),
+        )
+        run_id = run.id
+    assert service.phase7._acquire_lease(project.id, project.folder_path, "other-run-owner") is True
+    try:
+        state = service.phase7.execute_run(project.id, run_id)
+        assert state["status"] == "queued"
+        cancelled = client.post(f"/api/v1/projects/{project_id}/automation/runs/{run_id}/cancel")
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+        assert "cancel" not in cancelled.json()["availableActions"]
+    finally:
+        service.phase7._release_lease(project.id, project.folder_path, "other-run-owner")
+
+
+def test_replaced_lease_fences_stale_execution(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    service = client.app.state.story_service
+    project = service.get_project(project_id)
+    with service.db.project_write(project.id, project.folder_path) as session:
+        policy = service.phase7._get_or_create_policy(session, project.id)
+        run = service.phase7._create_run_row(
+            session,
+            policy,
+            "manual",
+            "2026-07-13",
+            "fenced-run",
+            datetime.now(timezone.utc),
+        )
+        item = AutomationRunItem(
+            id="fenced-item",
+            project_id=project.id,
+            automation_run_id=run.id,
+            chapter_number=1,
+            sequence_number=1,
+            status="running",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        session.add(item)
+        run_id = run.id
+        owner_id = f"automation:{run.id}:old-owner"
+        session.add(AutomationLease(
+            project_id=project.id,
+            owner_id=owner_id,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            heartbeat_at=datetime.now(timezone.utc),
+        ))
+    execution_token = service.phase7._execution_context.set((run_id, "fenced-item"))
+    owner_token = service.phase7._lease_owner_context.set(owner_id)
+    try:
+        with service.db.project(project.id, project.folder_path) as session:
+            service.phase7.assert_current_automation_lease(session, project.id)
+        with service.db.project_write(project.id, project.folder_path) as session:
+            lease = session.get(AutomationLease, project.id)
+            assert lease is not None
+            lease.owner_id = f"automation:{run_id}:new-owner"
+        with service.db.project(project.id, project.folder_path) as session:
+            with pytest.raises(StoryError) as raised:
+                service.phase7.assert_current_automation_lease(session, project.id)
+        assert raised.value.code == "AUTOMATION_LEASE_LOST"
+    finally:
+        service.phase7._lease_owner_context.reset(owner_token)
+        service.phase7._execution_context.reset(execution_token)
 
 
 def test_automation_backup_restore_remaps_project_id(client: TestClient, demo_project: dict) -> None:
@@ -294,6 +440,21 @@ def test_automation_backup_restore_remaps_project_id(client: TestClient, demo_pr
         "approvalMode": "guarded_auto",
     }).status_code == 200
     run = client.post(f"/api/v1/projects/{project_id}/automation/runs", json={"idempotencyKey": "backup-run"}).json()
+    wait_for_run(client, project_id, run["id"])
+    service = client.app.state.story_service
+    project = service.get_project(project_id)
+    with service.db.project_write(project.id, project.folder_path) as session:
+        persisted_run = session.get(AutomationRun, run["id"])
+        assert persisted_run is not None
+        persisted_run.status = "running"
+        persisted_run.completed_at = None
+        persisted_run.updated_at = datetime.now(timezone.utc)
+        session.add(AutomationLease(
+            project_id=project.id,
+            owner_id=f"automation:{run['id']}:backup-owner",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            heartbeat_at=datetime.now(timezone.utc),
+        ))
     backup = client.post(f"/api/v1/projects/{project_id}/backups").json()
     archive = Path(backup["archivePath"])
     restored = client.post("/api/v1/projects/restore", files={"backup": (archive.name, archive.read_bytes(), "application/zip")})
@@ -304,7 +465,12 @@ def test_automation_backup_restore_remaps_project_id(client: TestClient, demo_pr
     restored_runs = client.get(f"/api/v1/projects/{restored_id}/automation/runs").json()
     assert restored_runs
     assert restored_runs[0]["projectId"] == restored_id
+    assert restored_runs[0]["policyId"] == restored_id
     assert restored_runs[0]["id"] == run["id"]
+    assert restored_runs[0]["status"] == "interrupted"
+    restored_project = service.get_project(restored_id)
+    with service.db.project(restored_project.id, restored_project.folder_path) as session:
+        assert session.get(AutomationLease, restored_project.id) is None
     restored_reports = client.get(f"/api/v1/projects/{restored_id}/automation/reports")
     assert restored_reports.status_code == 200, restored_reports.text
     assert {report["projectId"] for report in restored_reports.json()} <= {restored_id}
@@ -392,6 +558,51 @@ def test_daily_limit_counts_prior_runs_and_creates_report(client: TestClient, de
         assert reports.status_code == 200, reports.text
         assert reports.json()[0]["localDate"] == today
         assert reports.json()[0]["estimatedCost"] >= 0.999
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_daily_limit_uses_actual_execution_day_not_scheduled_day(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_automation_roles(client, base_url, priced=True)
+        update_policy(client, project_id, dailyCostLimit=1.0)
+        service = client.app.state.story_service
+        project = service.get_project(project_id)
+        with service.db.project_write(project.id, project.folder_path) as session:
+            prior = AutomationRun(
+                id="old-schedule-current-spend",
+                project_id=project.id,
+                policy_id=project.id,
+                scheduled_local_date="2026-01-01",
+                trigger="catch_up",
+                status="completed",
+                estimated_cost=0.9999,
+                created_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            session.add(prior)
+            session.add(ModelRun(
+                id="old-schedule-current-model-run",
+                session_id=None,
+                role="chinese_writer",
+                model_id="phase5-fake-model",
+                automation_run_id=prior.id,
+                status="succeeded",
+                estimated_cost=0.9999,
+                request_id="actual-day-cost",
+                started_at=datetime.now(timezone.utc),
+                ended_at=datetime.now(timezone.utc),
+            ))
+        created = client.post(f"/api/v1/projects/{project_id}/automation/runs", json={"idempotencyKey": "actual-day-budget"})
+        blocked = wait_for_run(client, project_id, created.json()["id"])
+        assert blocked["status"] == "blocked"
+        assert blocked["stopReason"] == "AUTOMATION_COST_LIMIT_REACHED"
+        assert server.RequestHandlerClass.post_count == 0
     finally:
         server.shutdown()
         server.server_close()

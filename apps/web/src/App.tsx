@@ -4,8 +4,9 @@ import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { StoryPlanningPage } from "./pages/StoryPlanningPage";
 import { StoryWorkspaceProvider } from "./context/StoryWorkspaceContext";
 import { ProjectOverviewPage } from "./pages/ProjectOverviewPage";
-import { ModelSettingsPage } from "./pages/ModelSettingsPage";
-import { SafetyAuditPage } from "./pages/SafetyAuditPage";
+import { ChapterWritingPage } from "./pages/ChapterWritingPage";
+import { QualityCenterPage } from "./pages/QualityCenterPage";
+import { SettingsHubPage } from "./pages/SettingsHubPage";
 
 export function App() {
   return (
@@ -15,11 +16,11 @@ export function App() {
         <Route path="overview" element={<ProjectOverviewPage />} />
         <Route path="canon" element={<PlaceholderPage page="canon" />} />
         <Route path="planning" element={<StoryPlanningPage />} />
-        <Route path="writing" element={<PlaceholderPage page="writing" />} />
-        <Route path="quality" element={<SafetyAuditPage />} />
+        <Route path="writing" element={<ChapterWritingPage />} />
+        <Route path="quality" element={<QualityCenterPage />} />
         <Route path="state" element={<PlaceholderPage page="state" />} />
         <Route path="automation" element={<PlaceholderPage page="automation" />} />
-        <Route path="settings" element={<ModelSettingsPage />} />
+        <Route path="settings" element={<SettingsHubPage />} />
         <Route path="drama" element={<PlaceholderPage page="drama" />} />
       </Route>
       <Route path="*" element={<Navigate to="/planning" replace />} />

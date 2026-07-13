@@ -52,6 +52,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
   const setActiveProjectId = useStoryStore((state) => state.setActiveProjectId);
   const selectMilestone = useStoryStore((state) => state.selectMilestone);
   const setNotice = useStoryStore((state) => state.setNotice);
+  const agentScopeLabels = useStoryStore((state) => state.agentScopeLabels);
   const [streamPreview, setStreamPreview] = useState("");
   const [runStatus, setRunStatus] = useState<StoryWorkspaceValue["runStatus"]>({ runId: null, provider: null, model: null, status: "idle", error: null });
   const [proposalStatus, setProposalStatus] = useState<StoryWorkspaceValue["proposalStatus"]>({ status: "idle", runId: null, error: null, attempts: 0 });
@@ -117,17 +118,17 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
   };
 
   const sendStreamMessage = async (content: string, action = "chat") => {
-    if (!project || !selected) return;
+    if (!project) return;
     try {
       lastPrompt.current = { content, action };
       setStreamPreview("");
       setRunStatus({ runId: null, provider: null, model: null, status: "running", error: null });
       setProposalStatus({ status: "idle", runId: null, error: null, attempts: 0 });
       let activeSession = session;
-      if (!activeSession) activeSession = await api.createSession(project.id, [plan?.volumeTitle ?? "当前作品"]);
+      if (!activeSession) activeSession = await api.createSession(project.id, agentScopeLabels.length ? agentScopeLabels : [plan?.volumeTitle ?? "当前作品"]);
       const controller = new AbortController();
       abortRef.current = controller;
-      await api.streamMessage(activeSession.id, { projectId: project.id, content, selectedNodeId: selected.id, action }, (event: AgentStreamEvent) => {
+      await api.streamMessage(activeSession.id, { projectId: project.id, content, selectedNodeId: selected?.id, action }, (event: AgentStreamEvent) => {
         if (event.event === "run_started") setRunStatus({ runId: event.runId, provider: event.provider, model: event.model, status: "running", error: null });
         if (event.event === "text_delta") setStreamPreview((current) => current + event.delta);
         if (event.event === "completed") setRunStatus((current) => ({ ...current, runId: event.runId, status: "idle", error: null }));

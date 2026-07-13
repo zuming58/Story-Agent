@@ -25,6 +25,10 @@ describe("Story Agent shell", () => {
       if (url.includes("/change-proposals")) return json([initialProposal]);
       if (url.includes("/audit-events")) return json([]);
       if (url.includes("/model-runs")) return json([]);
+      if (url.includes("/chapter-contracts")) return json([]);
+      if (url.includes("/chapter-jobs")) return json([]);
+      if (url.includes("/chapters/") && url.endsWith("/drafts")) return json([]);
+      if (url.includes("/chapters/") && url.endsWith("/commits")) return json([]);
       if (url.includes("/backups") && init?.method === "POST") return json({
         backupId: "backup-1",
         projectId: project.id,
@@ -99,13 +103,28 @@ describe("Story Agent shell", () => {
   });
 
   it("opens the safety audit workspace with backup and diagnostics panels", async () => {
+    const user = userEvent.setup();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/quality"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
 
+    await user.click(await screen.findByRole("button", { name: /安全审计/ }));
     expect(await screen.findByRole("heading", { name: "备份恢复与调用诊断" })).toBeInTheDocument();
     expect(screen.getByRole("article", { name: "备份管理" })).toBeInTheDocument();
     expect(screen.getByRole("article", { name: "审计时间线" })).toBeInTheDocument();
     expect(screen.getByRole("article", { name: "模型调用记录" })).toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+  });
+
+  it("opens the real chapter writing and quality workspaces", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/writing"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    expect(await screen.findByRole("heading", { name: "章节写作工作台" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /生成章节契约/ })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: /质量中心/ }));
+    expect(await screen.findByRole("heading", { name: "章节质量中心" })).toBeInTheDocument();
+    expect(screen.getByText("综合质量门")).toBeInTheDocument();
   });
 });

@@ -255,6 +255,8 @@ export type ModelRole =
   | "chinese_writer"
   | "fact_extractor"
   | "logic_reviewer"
+  | "continuity_reviewer"
+  | "story_editor"
   | "style_reviewer"
   | "reviser"
   | "embedding";
@@ -308,4 +310,172 @@ export interface ProjectCreateRequest {
   title: string;
   mode: StoryMode;
   totalChapters: number;
+}
+
+export interface ChapterContract {
+  id: string;
+  projectId: string;
+  chapterNumber: number;
+  title: string;
+  planNodeId: string | null;
+  planNodeRevision: number;
+  canonRevisionDigest: string;
+  stateSnapshotId: string | null;
+  objective: Record<string, unknown>;
+  allowedScope: Record<string, unknown>;
+  forbiddenScope: Record<string, unknown>;
+  requiredCharacters: string[];
+  requiredForeshadows: string[];
+  requiredHooks: string[];
+  completionConditions: string[];
+  pov: string;
+  targetWordsMin: number;
+  targetWordsMax: number;
+  pace: string;
+  status: "draft" | "locked" | "superseded";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  lockedAt: string | null;
+}
+
+export type ChapterJobStatus =
+  | "queued" | "compiling_context" | "drafting" | "extracting" | "validating"
+  | "reviewing" | "revising" | "human_review" | "approved" | "completed"
+  | "failed" | "cancel_requested" | "cancelled" | "interrupted";
+
+export interface ChapterJob {
+  id: string;
+  projectId: string;
+  chapterContractId: string;
+  status: ChapterJobStatus;
+  attemptNumber: number;
+  currentRevisionRound: number;
+  contextTraceId: string | null;
+  idempotencyKey: string;
+  errorCode: string | null;
+  diagnostic: Record<string, unknown> | null;
+  revision: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+  contract: ChapterContract | null;
+}
+
+export interface ChapterExtraction {
+  id: string;
+  projectId: string;
+  chapterDraftId: string;
+  modelRunId: string | null;
+  payload: Record<string, unknown>;
+  schemaVersion: number;
+  status: string;
+  validationErrors: Array<Record<string, unknown>>;
+  checksum: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChapterDraft {
+  id: string;
+  projectId: string;
+  chapterJobId: string;
+  chapterContractId: string;
+  versionNumber: number;
+  parentDraftId: string | null;
+  kind: string;
+  contentMarkdown: string;
+  wordCount: number;
+  checksum: string;
+  modelRunId: string | null;
+  contextTraceId: string | null;
+  status: string;
+  isCurrent: boolean;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  extraction?: ChapterExtraction;
+}
+
+export interface QualityFinding {
+  id: string;
+  projectId: string;
+  qualityRunId: string;
+  chapterDraftId: string;
+  ruleCode: string;
+  severity: "info" | "warning" | "error" | "blocker";
+  category: string;
+  message: string;
+  evidence: unknown[];
+  location: Record<string, unknown>;
+  suggestedFix: string;
+  fingerprint: string;
+  status: "open" | "fixed" | "accepted_risk" | "superseded";
+  acceptedReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QualityRun {
+  id: string;
+  projectId: string;
+  chapterJobId: string;
+  chapterDraftId: string;
+  gateType: "deterministic" | "model";
+  reviewerRole: string | null;
+  modelRunId: string | null;
+  status: string;
+  summary: Record<string, unknown>;
+  createdAt: string;
+  completedAt: string | null;
+  findings: QualityFinding[];
+}
+
+export interface QualityReport {
+  jobId: string;
+  currentDraftId: string | null;
+  openBlockingCount: number;
+  runs: QualityRun[];
+  findings: QualityFinding[];
+}
+
+export interface ChapterCommit {
+  id: string;
+  projectId: string;
+  chapterNumber: number;
+  chapterContractId: string;
+  approvedDraftId: string;
+  sourceVersionId: string;
+  stateSnapshotId: string | null;
+  qualitySummary: Record<string, unknown>;
+  checksum: string;
+  status: string;
+  isCurrent: boolean;
+  revision: number;
+  committedAt: string;
+  createdAt: string;
+}
+
+export interface ContextTraceItem {
+  id: string;
+  kind: string;
+  sourceId: string;
+  sourceVersionId: string | null;
+  title: string;
+  reason: string;
+  tokenEstimate: number;
+  payload: Record<string, unknown>;
+}
+
+export interface ContextPackage {
+  traceId: string;
+  projectId: string;
+  role: string;
+  query: string;
+  selectedNodeId: string | null;
+  tokenBudget: number;
+  items: ContextTraceItem[];
+  payload: Record<string, unknown>;
+  checksum: string;
 }

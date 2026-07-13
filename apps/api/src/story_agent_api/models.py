@@ -582,6 +582,12 @@ class ChapterDraft(ProjectBase):
     __tablename__ = "chapter_drafts"
     __table_args__ = (
         Index("uq_chapter_drafts_job_version", "chapter_job_id", "version_number", unique=True),
+        Index(
+            "uq_chapter_drafts_current",
+            "chapter_job_id",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -597,6 +603,7 @@ class ChapterDraft(ProjectBase):
     model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     context_trace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="candidate", index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

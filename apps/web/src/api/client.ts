@@ -6,6 +6,11 @@ import type {
   AuditEvent,
   BackupRecord,
   BackupManifest,
+  ChapterCommit,
+  ChapterContract,
+  ChapterDraft,
+  ChapterJob,
+  ContextPackage,
   ChangeProposal,
   ModelConfig,
   ModelRun,
@@ -15,6 +20,8 @@ import type {
   ProjectCreateRequest,
   ProjectSummary,
   ProviderConnectionTest,
+  QualityFinding,
+  QualityReport,
   StoryPlan,
 } from "../types";
 
@@ -169,4 +176,40 @@ export const api = {
   roleBindings: () => request<ModelRoleBinding[]>("/model-role-bindings"),
   updateRoleBinding: (role: string, payload: { modelId: string | null; dailyCostLimit?: number | null }) =>
     request<ModelRoleBinding>(`/model-role-bindings/${role}`, { method: "PUT", body: JSON.stringify(payload) }),
+  chapterContracts: (projectId: string) => request<ChapterContract[]>(`/projects/${projectId}/chapter-contracts`),
+  deriveChapterContract: (projectId: string, payload: {
+    chapterNumber: number; planNodeId?: string | null; title?: string; authorNote?: string;
+    targetWordsMin?: number; targetWordsMax?: number; pov?: string;
+  }) => request<ChapterContract>(`/projects/${projectId}/chapter-contracts/derive`, { method: "POST", body: JSON.stringify(payload) }),
+  updateChapterContract: (projectId: string, contractId: string, payload: Partial<ChapterContract> & { expectedRevision: number }) =>
+    request<ChapterContract>(`/projects/${projectId}/chapter-contracts/${contractId}`, { method: "PUT", body: JSON.stringify(payload) }),
+  lockChapterContract: (projectId: string, contractId: string, expectedRevision: number) =>
+    request<ChapterContract>(`/projects/${projectId}/chapter-contracts/${contractId}/lock`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  chapterJobs: (projectId: string) => request<ChapterJob[]>(`/projects/${projectId}/chapter-jobs`),
+  createChapterJob: (projectId: string, chapterContractId: string) =>
+    request<ChapterJob>(`/projects/${projectId}/chapter-jobs`, { method: "POST", body: JSON.stringify({ chapterContractId, idempotencyKey: `workbench:${chapterContractId}` }) }),
+  runChapterJob: (projectId: string, jobId: string, authorNote = "") =>
+    request<ChapterJob>(`/projects/${projectId}/chapter-jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({ authorNote }) }),
+  cancelChapterJob: (projectId: string, jobId: string) =>
+    request<ChapterJob>(`/projects/${projectId}/chapter-jobs/${jobId}/cancel`, { method: "POST" }),
+  retryChapterJob: (projectId: string, jobId: string, reason = "") =>
+    request<ChapterJob>(`/projects/${projectId}/chapter-jobs/${jobId}/retry`, { method: "POST", body: JSON.stringify({ reason }) }),
+  reviseChapterJob: (projectId: string, jobId: string, reason = "") =>
+    request<ChapterJob>(`/projects/${projectId}/chapter-jobs/${jobId}/revise`, { method: "POST", body: JSON.stringify({ reason }) }),
+  approveChapterJob: (projectId: string, jobId: string, expectedJobRevision: number, mode: "manual" | "guarded_auto") =>
+    request<ChapterJob>(`/projects/${projectId}/chapter-jobs/${jobId}/approve`, { method: "POST", body: JSON.stringify({ expectedJobRevision, mode }) }),
+  commitChapterJob: (projectId: string, jobId: string, expectedJobRevision: number) =>
+    request<ChapterCommit>(`/projects/${projectId}/chapter-jobs/${jobId}/commit`, { method: "POST", body: JSON.stringify({ expectedJobRevision }) }),
+  chapterDrafts: (projectId: string, chapterNumber: number) => request<ChapterDraft[]>(`/projects/${projectId}/chapters/${chapterNumber}/drafts`),
+  chapterDraft: (projectId: string, draftId: string) => request<ChapterDraft>(`/projects/${projectId}/chapter-drafts/${draftId}`),
+  createManualRevision: (projectId: string, jobId: string, payload: {
+    contentMarkdown: string; reason: string; parentDraftId: string; expectedParentRevision: number; expectedJobRevision: number;
+  }) => request<ChapterJob>(`/projects/${projectId}/chapter-jobs/${jobId}/manual-revisions`, { method: "POST", body: JSON.stringify(payload) }),
+  activateChapterDraft: (projectId: string, jobId: string, draftId: string, payload: { expectedDraftRevision: number; expectedJobRevision: number }) =>
+    request<ChapterJob>(`/projects/${projectId}/chapter-jobs/${jobId}/drafts/${draftId}/activate`, { method: "POST", body: JSON.stringify(payload) }),
+  chapterQuality: (projectId: string, jobId: string) => request<QualityReport>(`/projects/${projectId}/chapter-jobs/${jobId}/quality`),
+  acceptQualityRisk: (projectId: string, findingId: string, reason: string) =>
+    request<QualityFinding>(`/projects/${projectId}/quality-findings/${findingId}/accept-risk`, { method: "POST", body: JSON.stringify({ reason }) }),
+  chapterCommits: (projectId: string, chapterNumber: number) => request<ChapterCommit[]>(`/projects/${projectId}/chapters/${chapterNumber}/commits`),
+  contextTrace: (projectId: string, traceId: string) => request<ContextPackage>(`/projects/${projectId}/context/traces/${traceId}`),
 };

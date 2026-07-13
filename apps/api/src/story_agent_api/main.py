@@ -39,6 +39,8 @@ from .schemas import (
     ChapterContractLock,
     ChapterContractOut,
     ChapterContractUpdate,
+    ChapterDraftActivateRequest,
+    ChapterManualRevisionRequest,
     ChapterDraftOut,
     ChapterJobCreate,
     ChapterJobOut,
@@ -330,6 +332,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def get_chapter_draft(project_id: str, draft_id: str) -> object:
         return service.phase5.get_chapter_draft(project_id, draft_id)
 
+    @app.get("/api/v1/projects/{project_id}/chapters/{chapter_number}/commits", response_model=list[ChapterCommitOut])
+    def list_chapter_commits(project_id: str, chapter_number: int) -> object:
+        return service.phase5.list_chapter_commits(project_id, chapter_number)
+
     @app.get("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality", response_model=QualityReportOut)
     def get_chapter_quality(project_id: str, job_id: str) -> object:
         return service.phase5.get_quality_report(project_id, job_id)
@@ -341,6 +347,14 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/revise", response_model=ChapterJobOut)
     def revise_chapter_job(project_id: str, job_id: str, payload: ChapterRevisionRequest, request: Request) -> object:
         return service.phase5.revise_chapter_job(project_id, job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/manual-revisions", response_model=ChapterJobOut)
+    def create_manual_chapter_revision(project_id: str, job_id: str, payload: ChapterManualRevisionRequest, request: Request) -> object:
+        return service.phase5.create_manual_revision(project_id, job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/drafts/{draft_id}/activate", response_model=ChapterJobOut)
+    def activate_chapter_draft(project_id: str, job_id: str, draft_id: str, payload: ChapterDraftActivateRequest, request: Request) -> object:
+        return service.phase5.activate_chapter_draft(project_id, job_id, draft_id, payload, request.state.request_id)
 
     @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/approve", response_model=ChapterJobOut)
     def approve_chapter_job(project_id: str, job_id: str, payload: ChapterApproveRequest, request: Request) -> object:

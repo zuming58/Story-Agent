@@ -47,9 +47,11 @@ from .schemas import (
     ChapterContractDerive,
     ChapterContractLock,
     ChapterContractUpdate,
+    ChapterDraftActivateRequest,
     ChapterJobCreate,
     ChapterJobRetry,
     ChapterJobRun,
+    ChapterManualRevisionRequest,
     ChapterRevisionRequest,
     ContextCompileRequest,
     QualityFindingAcceptRisk,
@@ -490,6 +492,19 @@ class Phase5Service:
                 out["extraction"] = self._extraction_dict(extraction)
             return out
 
+    def list_chapter_commits(self, project_id: str, chapter_number: int) -> list[dict[str, Any]]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            rows = session.scalars(
+                select(ChapterCommit)
+                .where(
+                    ChapterCommit.project_id == project.id,
+                    ChapterCommit.chapter_number == chapter_number,
+                )
+                .order_by(ChapterCommit.committed_at.desc())
+            ).all()
+            return [self._commit_dict(item) for item in rows]
+
     # Quality/approval/commit methods are completed in the later work packages.
     def get_quality_report(self, project_id: str, job_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -588,6 +603,108 @@ class Phase5Service:
         except Exception as exc:
             self._return_revision_to_human_review(project.id, project.folder_path, job_id, "CHAPTER_REVISION_FAILED", {"errorType": type(exc).__name__}, restore_round=True)
             raise
+
+    def create_manual_revision(self, project_id: str, job_id: str, payload: ChapterManualRevisionRequest, request_id: str) -> dict[str, Any]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            if job.revision != payload.expected_job_revision:
+                raise StoryError(409, "CHAPTER_JOB_REVISION_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
+            if job.status != "human_review":
+                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only a chapter in human review can be edited.")
+            parent = self._get_draft(session, project.id, payload.parent_draft_id)
+            if parent.chapter_job_id != job.id or not parent.is_current:
+                raise StoryError(409, "CHAPTER_DRAFT_NOT_CURRENT", "The edited draft is no longer the current candidate.")
+            if parent.revision != payload.expected_parent_revision:
+                raise StoryError(409, "CHAPTER_DRAFT_REVISION_CONFLICT", "Chapter draft revision conflict.", {"currentRevision": parent.revision})
+            contract = self._get_contract(session, project.id, job.chapter_contract_id)
+            self._assert_contract_fresh(session, project.id, contract)
+            job.status = "revising"
+            job.revision += 1
+            job.updated_at = _now()
+            contract_id = contract.id
+            context_trace_id = parent.context_trace_id
+
+        try:
+            draft = self._store_draft(
+                project.id,
+                project.folder_path,
+                job_id,
+                contract_id,
+                payload.content_markdown,
+                None,
+                context_trace_id,
+                "manual",
+                parent_id=payload.parent_draft_id,
+            )
+            extraction = self._extract_for_draft(project, draft["id"], request_id)
+            self._validate_extraction(project, extraction["id"])
+            self._run_quality_pipeline(project, job_id, draft["id"], request_id)
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                job = self._get_job(session, project.id, job_id)
+                for finding in session.scalars(select(QualityFinding).where(
+                    QualityFinding.chapter_draft_id == payload.parent_draft_id,
+                    QualityFinding.status == "open",
+                )).all():
+                    finding.status = "superseded"
+                    finding.updated_at = _now()
+                job.status = "human_review"
+                job.error_code = None
+                job.diagnostic_json = dumps({"manualRevisionReason": payload.reason}) if payload.reason else None
+                job.revision += 1
+                job.updated_at = _now()
+                session.add(self.service._audit(
+                    "chapter_job.manual_revision_created",
+                    "chapter_job",
+                    job.id,
+                    {"draftId": draft["id"], "parentDraftId": payload.parent_draft_id, "reason": payload.reason, "requestId": request_id},
+                    request_id,
+                ))
+                return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
+        except StoryError:
+            self._return_revision_to_human_review(project.id, project.folder_path, job_id, "CHAPTER_MANUAL_REVISION_FAILED", {"parentDraftId": payload.parent_draft_id}, restore_round=False)
+            raise
+        except Exception as exc:
+            self._return_revision_to_human_review(project.id, project.folder_path, job_id, "CHAPTER_MANUAL_REVISION_FAILED", {"errorType": type(exc).__name__}, restore_round=False)
+            raise StoryError(500, "CHAPTER_MANUAL_REVISION_FAILED", "Manual chapter revision failed.") from exc
+
+    def activate_chapter_draft(self, project_id: str, job_id: str, draft_id: str, payload: ChapterDraftActivateRequest, request_id: str) -> dict[str, Any]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            if job.revision != payload.expected_job_revision:
+                raise StoryError(409, "CHAPTER_JOB_REVISION_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
+            if job.status not in {"human_review", "failed", "interrupted"}:
+                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Draft versions can only be restored while the job is awaiting review.")
+            target = self._get_draft(session, project.id, draft_id)
+            if target.chapter_job_id != job.id:
+                raise StoryError(404, "CHAPTER_DRAFT_NOT_FOUND", "Chapter draft not found for this job.")
+            if target.revision != payload.expected_draft_revision:
+                raise StoryError(409, "CHAPTER_DRAFT_REVISION_CONFLICT", "Chapter draft revision conflict.", {"currentRevision": target.revision})
+            if target.is_current:
+                return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
+            current = self._current_draft(session, job.id)
+            if current:
+                current.is_current = False
+                current.revision += 1
+                current.updated_at = _now()
+                session.flush()
+            target.is_current = True
+            target.revision += 1
+            target.updated_at = _now()
+            job.status = "human_review"
+            job.error_code = None
+            job.diagnostic_json = dumps({"restoredDraftId": target.id})
+            job.revision += 1
+            job.updated_at = _now()
+            session.add(self.service._audit(
+                "chapter_job.draft_activated",
+                "chapter_job",
+                job.id,
+                {"draftId": target.id, "previousDraftId": current.id if current else None, "requestId": request_id},
+                request_id,
+            ))
+            return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
 
     def approve_chapter_job(self, project_id: str, job_id: str, payload: ChapterApproveRequest, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -863,6 +980,11 @@ class Phase5Service:
         with self.service.db.project_write(project_id, folder_path) as session:
             next_version = (session.scalar(select(ChapterDraft.version_number).where(ChapterDraft.chapter_job_id == job_id).order_by(ChapterDraft.version_number.desc())) or 0) + 1
             now = _now()
+            for previous in session.scalars(select(ChapterDraft).where(ChapterDraft.chapter_job_id == job_id, ChapterDraft.is_current.is_(True))).all():
+                previous.is_current = False
+                previous.revision += 1
+                previous.updated_at = now
+            session.flush()
             draft = ChapterDraft(
                 id=str(uuid4()),
                 project_id=project_id,
@@ -877,6 +999,7 @@ class Phase5Service:
                 model_run_id=model_run_id,
                 context_trace_id=context_trace_id,
                 status="candidate",
+                is_current=True,
                 revision=1,
                 created_at=now,
                 updated_at=now,
@@ -1336,6 +1459,12 @@ class Phase5Service:
             return self._get_job(session, project.id, job_id).chapter_contract_id
 
     def _current_draft(self, session: Session, job_id: str) -> ChapterDraft | None:
+        current = session.scalar(select(ChapterDraft).where(
+            ChapterDraft.chapter_job_id == job_id,
+            ChapterDraft.is_current.is_(True),
+        ))
+        if current:
+            return current
         return session.scalar(select(ChapterDraft).where(ChapterDraft.chapter_job_id == job_id).order_by(ChapterDraft.version_number.desc()))
 
     def _raise_if_cancel_requested(self, project: Any, job_id: str) -> None:
@@ -1466,6 +1595,7 @@ class Phase5Service:
             "modelRunId": item.model_run_id,
             "contextTraceId": item.context_trace_id,
             "status": item.status,
+            "isCurrent": item.is_current,
             "revision": item.revision,
             "createdAt": item.created_at,
             "updatedAt": item.updated_at,

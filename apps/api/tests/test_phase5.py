@@ -674,3 +674,73 @@ def test_rewrite_supersedes_prior_source_and_keeps_one_current_fact_and_commit(c
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_manual_revision_creates_version_and_can_restore_previous_candidate(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        run = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={})
+        assert run.status_code == 200, run.text
+        initial_job = run.json()
+        first = client.get(f"/api/v1/projects/{project_id}/chapters/1/drafts").json()[0]
+        assert first["isCurrent"] is True
+
+        manual = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/manual-revisions", json={
+            "contentMarkdown": "Lin Mo entered the old house slowly. The required condition is now visible.",
+            "reason": "tighten the opening",
+            "parentDraftId": first["id"],
+            "expectedParentRevision": first["revision"],
+            "expectedJobRevision": initial_job["revision"],
+        })
+        assert manual.status_code == 200, manual.text
+        versions = client.get(f"/api/v1/projects/{project_id}/chapters/1/drafts").json()
+        current = next(item for item in versions if item["isCurrent"])
+        previous = next(item for item in versions if item["id"] == first["id"])
+        assert current["versionNumber"] == 2
+        assert current["kind"] == "manual"
+        assert previous["isCurrent"] is False
+
+        stale = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/manual-revisions", json={
+            "contentMarkdown": "stale edit",
+            "parentDraftId": first["id"],
+            "expectedParentRevision": previous["revision"],
+            "expectedJobRevision": manual.json()["revision"],
+        })
+        assert stale.status_code == 409
+        assert stale.json()["code"] == "CHAPTER_DRAFT_NOT_CURRENT"
+
+        restored = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/drafts/{previous['id']}/activate", json={
+            "expectedDraftRevision": previous["revision"],
+            "expectedJobRevision": manual.json()["revision"],
+        })
+        assert restored.status_code == 200, restored.text
+        versions = client.get(f"/api/v1/projects/{project_id}/chapters/1/drafts").json()
+        assert next(item for item in versions if item["isCurrent"])["id"] == previous["id"]
+        assert sum(1 for item in versions if item["isCurrent"]) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_chapter_commit_history_endpoint_survives_refresh(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        _contract, job, approved = run_and_approve_job(client, project_id)
+        committed = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/commit", json={"expectedJobRevision": approved["revision"]})
+        assert committed.status_code == 200, committed.text
+        history = client.get(f"/api/v1/projects/{project_id}/chapters/1/commits")
+        assert history.status_code == 200, history.text
+        assert history.json()[0]["id"] == committed.json()["id"]
+        assert history.json()[0]["isCurrent"] is True
+        assert client.get(f"/api/v1/projects/{project_id}/chapters/2/commits").json() == []
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -17,6 +17,10 @@ from .model_provider import ModelProviderError, OpenAICompatibleModelProvider
 from .models import (
     AuditEvent,
     CanonDocument,
+    CanonEntity,
+    CanonEntityType,
+    CanonRelation,
+    CanonRule,
     ChapterCommit,
     ChapterContract,
     ChapterDraft,
@@ -119,6 +123,8 @@ class Phase5Service:
         if payload.target_words_min > payload.target_words_max:
             raise StoryError(422, "INVALID_CHAPTER_WORD_TARGET", "targetWordsMin must not exceed targetWordsMax.")
         project = self.service.get_project(project_id)
+        if payload.chapter_number > project.total_chapters:
+            raise StoryError(422, "CHAPTER_NUMBER_OUT_OF_RANGE", "Chapter number exceeds the project's planned chapter count.", {"totalChapters": project.total_chapters})
         with self.service.db.project_write(project.id, project.folder_path) as session:
             locked_docs = session.scalars(select(CanonDocument).where(CanonDocument.status == "locked").order_by(CanonDocument.id.asc())).all()
             if not locked_docs:
@@ -127,7 +133,9 @@ class Phase5Service:
             node = self._resolve_contract_node(session, payload, plan)
             latest_snapshot = session.scalar(
                 select(StateSnapshot)
+                .join(SourceVersion, SourceVersion.id == StateSnapshot.source_version_id)
                 .where(StateSnapshot.project_id == project.id)
+                .where(SourceVersion.status == "official")
                 .order_by(StateSnapshot.snapshot_number.desc(), StateSnapshot.created_at.desc())
             )
             future_nodes = []
@@ -136,19 +144,26 @@ class Phase5Service:
                     self.service._node_dict(item)
                     for item in session.scalars(select(PlanNode).where(PlanNode.target_chapter > payload.chapter_number).order_by(PlanNode.target_chapter.asc())).all()
                 ]
+            node_payload = self.service._node_dict(node) if node else {}
+            node_is_due = bool(node and payload.chapter_number >= node.range_min)
             objective = {
-                "mustAdvance": self.service._node_dict(node) if node else {},
+                "mustAdvance": node_payload if node_is_due else {
+                    "chapterNumber": payload.chapter_number,
+                    "setupForPlanNodeId": node.id if node else None,
+                    "instruction": "Advance setup only; do not complete the future milestone.",
+                },
                 "authorNote": payload.author_note,
             }
             allowed_scope = {
                 "chapterNumber": payload.chapter_number,
                 "planNodeId": node.id if node else payload.plan_node_id,
-                "mayAdvance": _safe_loads(node.contracts_json, []) if node else [],
-                "completionConditions": _safe_loads(node.completion_conditions_json, []) if node else [],
+                "mayAdvance": [node_payload] if node and not node_is_due else (_safe_loads(node.contracts_json, []) if node else []),
+                "completionConditions": _safe_loads(node.completion_conditions_json, []) if node_is_due else [],
             }
             forbidden_scope = {
-                "mustNotAdvance": future_nodes,
-                "futureKeywords": [item.get("title", "") for item in future_nodes if item.get("title")],
+                "mustNotAdvance": [item for item in future_nodes if not node or item.get("id") != node.id],
+                "mustNotComplete": [node_payload] if node and not node_is_due else [],
+                "futureKeywords": [item.get("title", "") for item in future_nodes if item.get("title") and (not node or item.get("id") != node.id)],
             }
             now = _now()
             item = ChapterContract(
@@ -158,12 +173,12 @@ class Phase5Service:
                 title=payload.title or (node.title if node else f"Chapter {payload.chapter_number}"),
                 plan_node_id=node.id if node else payload.plan_node_id,
                 plan_node_revision=node.revision if node else 1,
-                canon_revision_digest=stable_digest([{"id": doc.id, "revision": doc.revision, "checksum": stable_digest(doc.content_markdown)} for doc in locked_docs]),
+                canon_revision_digest=self._current_canon_digest(session),
                 state_snapshot_id=latest_snapshot.id if latest_snapshot else None,
                 objective_json=dumps(objective),
                 allowed_scope_json=dumps(allowed_scope),
                 forbidden_scope_json=dumps(forbidden_scope),
-                required_characters_json=dumps(self._strings_from_payload(node, "prerequisites_json")),
+                required_characters_json="[]",
                 required_foreshadows_json=dumps(self._strings_from_payload(node, "foreshadows_json")),
                 required_hooks_json=dumps(self._strings_from_payload(node, "contracts_json")),
                 completion_conditions_json=dumps(self._strings_from_payload(node, "completion_conditions_json")),
@@ -211,6 +226,8 @@ class Phase5Service:
                 "completion_conditions": "completion_conditions_json",
             }
             for key, value in changes.items():
+                if value is None:
+                    raise StoryError(422, "INVALID_CHAPTER_CONTRACT", f"Chapter contract field cannot be null: {key}")
                 if key in mapping:
                     setattr(item, mapping[key], dumps(value))
                 else:
@@ -234,7 +251,43 @@ class Phase5Service:
                     return self._contract_dict(item)
                 if item.status != "draft":
                     raise StoryError(409, "CHAPTER_CONTRACT_NOT_RESUMABLE", "Only draft contracts can be locked.")
+                self._assert_contract_fresh(session, project.id, item)
                 now = _now()
+                previous_locked = session.scalar(select(ChapterContract).where(
+                    ChapterContract.project_id == project.id,
+                    ChapterContract.chapter_number == item.chapter_number,
+                    ChapterContract.status == "locked",
+                    ChapterContract.id != item.id,
+                ))
+                if previous_locked is not None:
+                    current_commit_id = session.scalar(select(ChapterCommit.id).where(
+                        ChapterCommit.project_id == project.id,
+                        ChapterCommit.chapter_number == item.chapter_number,
+                        ChapterCommit.is_current.is_(True),
+                    ))
+                    if current_commit_id is None:
+                        raise StoryError(
+                            409,
+                            "CHAPTER_CONTRACT_LOCK_CONFLICT",
+                            "Only one locked contract is allowed per project chapter.",
+                        )
+                    previous_locked.status = "superseded"
+                    previous_locked.revision += 1
+                    previous_locked.updated_at = now
+                    session.add(self.service._audit(
+                        "chapter_contract.superseded",
+                        "chapter_contract",
+                        previous_locked.id,
+                        {
+                            "replacementContractId": item.id,
+                            "chapterNumber": item.chapter_number,
+                            "currentCommitId": current_commit_id,
+                            "requestId": request_id,
+                        },
+                        request_id,
+                    ))
+                    # Release the partial unique index before locking the replacement.
+                    session.flush()
                 item.status = "locked"
                 item.revision += 1
                 item.locked_at = now
@@ -298,11 +351,12 @@ class Phase5Service:
             job = self._get_job(session, project.id, job_id)
             if job.status in ACTIVE_JOB_STATUSES:
                 raise StoryError(409, "CHAPTER_JOB_ALREADY_RUNNING", "Chapter job is already running.")
-            if job.status not in {"queued", "failed", "interrupted", "human_review"}:
-                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Chapter job cannot be run from its current status.")
+            if job.status != "queued":
+                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Queue or retry the chapter job before running it.")
             contract = self._get_contract(session, project.id, job.chapter_contract_id)
             if contract.status != "locked":
                 raise StoryError(409, "CHAPTER_CONTRACT_NOT_LOCKED", "Chapter contract must be locked before running.")
+            self._assert_contract_fresh(session, project.id, contract)
             now = _now()
             job.status = "compiling_context"
             job.started_at = job.started_at or now
@@ -318,10 +372,12 @@ class Phase5Service:
                 selected_node_id=self._contract_plan_node_id(project, job_id),
                 token_budget=6000,
             ), request_id)
+            self._raise_if_cancel_requested(project, job_id)
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 job = self._get_job(session, project.id, job_id)
                 job.status = "drafting"
                 job.context_trace_id = context["traceId"]
+                job.revision += 1
                 job.updated_at = _now()
             contract_data = self.get_chapter_contract(project.id, self._job_contract_id(project, job_id))
             draft_text, draft_run_id = self._complete_role_text(
@@ -331,30 +387,40 @@ class Phase5Service:
                 self._writer_messages(contract_data, context, payload.author_note),
                 response_json=False,
             )
+            self._raise_if_cancel_requested(project, job_id)
             draft = self._store_draft(project.id, project.folder_path, job_id, contract_data["id"], draft_text, draft_run_id, context["traceId"], "generated")
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 job = self._get_job(session, project.id, job_id)
                 job.status = "extracting"
+                job.revision += 1
                 job.updated_at = _now()
             extraction = self._extract_for_draft(project, draft["id"], request_id)
+            self._raise_if_cancel_requested(project, job_id)
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 job = self._get_job(session, project.id, job_id)
                 job.status = "validating"
+                job.revision += 1
                 job.updated_at = _now()
             self._validate_extraction(project, extraction["id"])
+            self._raise_if_cancel_requested(project, job_id)
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 job = self._get_job(session, project.id, job_id)
                 job.status = "reviewing"
+                job.revision += 1
                 job.updated_at = _now()
             self._run_quality_pipeline(project, job_id, draft["id"], request_id)
+            self._raise_if_cancel_requested(project, job_id)
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 job = self._get_job(session, project.id, job_id)
                 job.status = "human_review"
+                job.revision += 1
                 job.updated_at = _now()
                 session.add(self.service._audit("chapter_job.draft_ready", "chapter_job", job.id, {"draftId": draft["id"], "requestId": request_id}, request_id))
                 session.flush()
                 return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
         except StoryError as exc:
+            if exc.code == "CHAPTER_JOB_CANCELLED":
+                return self.get_chapter_job(project.id, job_id)
             self._fail_job(project.id, project.folder_path, job_id, exc.code, {"message": exc.message, "details": exc.details})
             raise
         except ModelProviderError as exc:
@@ -368,16 +434,22 @@ class Phase5Service:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = self._get_job(session, project.id, job_id)
+            if job.status == "cancel_requested" or job.status == "cancelled":
+                return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
             if job.status in ACTIVE_JOB_STATUSES:
                 job.status = "cancel_requested"
                 job.error_code = "cancel_requested"
-            else:
+                event_type = "chapter_job.cancel_requested"
+            elif job.status in {"queued", "failed", "interrupted", "human_review"}:
                 job.status = "cancelled"
                 job.error_code = "cancelled"
                 job.finished_at = _now()
+                event_type = "chapter_job.cancelled"
+            else:
+                raise StoryError(409, "CHAPTER_JOB_NOT_CANCELLABLE", "Chapter job cannot be cancelled from its current status.")
             job.revision += 1
             job.updated_at = _now()
-            session.add(self.service._audit("chapter_job.cancelled", "chapter_job", job.id, {"requestId": request_id}, request_id))
+            session.add(self.service._audit(event_type, "chapter_job", job.id, {"requestId": request_id}, request_id))
             return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
 
     def retry_chapter_job(self, project_id: str, job_id: str, payload: ChapterJobRetry, request_id: str) -> dict[str, Any]:
@@ -390,6 +462,8 @@ class Phase5Service:
             job.attempt_number += 1
             job.error_code = None
             job.diagnostic_json = dumps({"retryReason": payload.reason})
+            job.started_at = None
+            job.finished_at = None
             job.revision += 1
             job.updated_at = _now()
             session.add(self.service._audit("chapter_job.retry_queued", "chapter_job", job.id, {"reason": payload.reason, "requestId": request_id}, request_id))
@@ -436,6 +510,8 @@ class Phase5Service:
             finding = session.get(QualityFinding, finding_id)
             if not finding or finding.project_id != project.id:
                 raise StoryError(404, "QUALITY_FINDING_NOT_FOUND", "Quality finding not found.")
+            if finding.status != "open":
+                raise StoryError(409, "QUALITY_FINDING_ALREADY_RESOLVED", "Only an open quality finding can be accepted as risk.")
             finding.status = "accepted_risk"
             finding.accepted_reason = payload.reason
             finding.updated_at = _now()
@@ -446,6 +522,8 @@ class Phase5Service:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = self._get_job(session, project.id, job_id)
+            if job.status != "human_review":
+                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only a chapter in human review can be revised.")
             if job.current_revision_round >= MAX_REVISION_ROUNDS:
                 raise StoryError(409, "CHAPTER_REVISION_LIMIT_REACHED", "Chapter revision limit reached.")
             draft = self._current_draft(session, job.id)
@@ -462,38 +540,54 @@ class Phase5Service:
             job.current_revision_round += 1
             job.revision += 1
             job.updated_at = _now()
-            for finding in findings:
-                finding.status = "superseded"
-                finding.updated_at = _now()
             contract = self._get_contract(session, project.id, job.chapter_contract_id)
             contract_data = self._contract_dict(contract)
             draft_data = self._draft_dict(draft)
             finding_data = [self._finding_dict(item) for item in findings]
 
-        revised_text, run_id = self._complete_role_text(
-            project,
-            "reviser",
-            request_id,
-            self._revision_messages(contract_data, draft_data, finding_data, payload.reason),
-            response_json=True,
-        )
         try:
-            data = _json_object_from_text(revised_text)
-            content = str(data.get("contentMarkdown") or data.get("content_markdown") or "").strip()
-        except (ValueError, json.JSONDecodeError):
-            content = revised_text.strip()
-        revised = self._store_draft(project.id, project.folder_path, job_id, contract_data["id"], content, run_id, draft_data.get("contextTraceId"), "revised", parent_id=draft_data["id"])
-        extraction = self._extract_for_draft(project, revised["id"], request_id)
-        self._validate_extraction(project, extraction["id"])
-        self._run_quality_pipeline(project, job_id, revised["id"], request_id)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
-            job = self._get_job(session, project.id, job_id)
-            current = self._current_draft(session, job.id)
-            open_blocking = self._open_blocking_count(session.scalars(select(QualityFinding).where(QualityFinding.chapter_draft_id == current.id)).all()) if current else 0
-            job.status = "human_review" if open_blocking or job.current_revision_round >= MAX_REVISION_ROUNDS else "human_review"
-            job.updated_at = _now()
-            session.add(self.service._audit("chapter_job.revised", "chapter_job", job.id, {"draftId": revised["id"], "revisionRound": job.current_revision_round, "requestId": request_id}, request_id))
-            return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
+            revised_text, run_id = self._complete_role_text(
+                project,
+                "reviser",
+                request_id,
+                self._revision_messages(contract_data, draft_data, finding_data, payload.reason),
+                response_json=True,
+            )
+            self._raise_if_cancel_requested(project, job_id)
+            try:
+                data = _json_object_from_text(revised_text)
+                content = str(data.get("contentMarkdown") or data.get("content_markdown") or "").strip()
+            except (ValueError, json.JSONDecodeError):
+                content = revised_text.strip()
+            revised = self._store_draft(project.id, project.folder_path, job_id, contract_data["id"], content, run_id, draft_data.get("contextTraceId"), "revised", parent_id=draft_data["id"])
+            extraction = self._extract_for_draft(project, revised["id"], request_id)
+            self._raise_if_cancel_requested(project, job_id)
+            self._validate_extraction(project, extraction["id"])
+            self._run_quality_pipeline(project, job_id, revised["id"], request_id)
+            self._raise_if_cancel_requested(project, job_id)
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                job = self._get_job(session, project.id, job_id)
+                for finding in session.scalars(select(QualityFinding).where(QualityFinding.chapter_draft_id == draft_data["id"], QualityFinding.status == "open")).all():
+                    finding.status = "superseded"
+                    finding.updated_at = _now()
+                job.status = "human_review"
+                job.error_code = None
+                job.diagnostic_json = None
+                job.revision += 1
+                job.updated_at = _now()
+                session.add(self.service._audit("chapter_job.revised", "chapter_job", job.id, {"draftId": revised["id"], "revisionRound": job.current_revision_round, "requestId": request_id}, request_id))
+                return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
+        except StoryError as exc:
+            if exc.code == "CHAPTER_JOB_CANCELLED":
+                return self.get_chapter_job(project.id, job_id)
+            self._return_revision_to_human_review(project.id, project.folder_path, job_id, exc.code, {"message": exc.message, "details": exc.details}, restore_round=True)
+            raise
+        except ModelProviderError as exc:
+            self._return_revision_to_human_review(project.id, project.folder_path, job_id, exc.code, {"message": exc.message, "retryable": exc.retryable}, restore_round=True)
+            raise StoryError(502, exc.code, exc.message) from exc
+        except Exception as exc:
+            self._return_revision_to_human_review(project.id, project.folder_path, job_id, "CHAPTER_REVISION_FAILED", {"errorType": type(exc).__name__}, restore_round=True)
+            raise
 
     def approve_chapter_job(self, project_id: str, job_id: str, payload: ChapterApproveRequest, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -501,13 +595,30 @@ class Phase5Service:
             job = self._get_job(session, project.id, job_id)
             if job.revision != payload.expected_job_revision:
                 raise StoryError(409, "CHAPTER_JOB_REVISION_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
+            if job.status == "approved":
+                return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
+            if job.status != "human_review":
+                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only a chapter in human review can be approved.")
             draft = self._current_draft(session, job.id)
             if not draft:
                 raise StoryError(409, "CHAPTER_DRAFT_EMPTY", "No draft is available for approval.")
             findings = session.scalars(select(QualityFinding).where(QualityFinding.chapter_draft_id == draft.id)).all()
             open_blocking = self._open_blocking_count(findings)
-            if payload.mode == "guarded_auto" and open_blocking:
-                raise StoryError(409, "CHAPTER_QUALITY_BLOCKED", "Open blocker/error findings prevent guarded auto approval.", {"openBlockingCount": open_blocking})
+            extraction = session.scalar(select(ChapterExtraction).where(ChapterExtraction.chapter_draft_id == draft.id).order_by(ChapterExtraction.created_at.desc()))
+            if not extraction or extraction.status != "validated":
+                raise StoryError(409, "CHAPTER_EXTRACTION_INVALID", "Validated extraction is required before approval.")
+            if payload.mode == "guarded_auto":
+                runs = session.scalars(select(QualityRun).where(QualityRun.chapter_draft_id == draft.id)).all()
+                succeeded_reviewers = {run.reviewer_role for run in runs if run.gate_type == "model" and run.status == "succeeded"}
+                required_reviewers = {"continuity_reviewer", "story_editor", "style_reviewer"}
+                deterministic_ok = any(run.gate_type == "deterministic" and run.status == "succeeded" for run in runs)
+                accepted_blocking = sum(1 for item in findings if item.status == "accepted_risk" and item.severity in BLOCKING_SEVERITIES)
+                if open_blocking or accepted_blocking or not deterministic_ok or succeeded_reviewers != required_reviewers:
+                    raise StoryError(409, "CHAPTER_QUALITY_BLOCKED", "Guarded auto approval requires every quality gate to pass without blocking accepted risks.", {
+                        "openBlockingCount": open_blocking,
+                        "acceptedBlockingCount": accepted_blocking,
+                        "missingReviewers": sorted(required_reviewers - succeeded_reviewers),
+                    })
             if payload.mode == "manual" and any(item.status == "open" and item.severity == "blocker" for item in findings):
                 raise StoryError(409, "CHAPTER_QUALITY_BLOCKED", "Open blocker findings prevent manual approval.", {"openBlockingCount": open_blocking})
             for other in session.scalars(select(ChapterDraft).where(ChapterDraft.chapter_job_id == job.id, ChapterDraft.id != draft.id, ChapterDraft.status == "approved")).all():
@@ -530,23 +641,23 @@ class Phase5Service:
         try:
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 job = self._get_job(session, project.id, job_id)
+                if job.status == "completed":
+                    existing_commit = session.scalar(
+                        select(ChapterCommit)
+                        .join(ChapterDraft, ChapterDraft.id == ChapterCommit.approved_draft_id)
+                        .where(ChapterDraft.chapter_job_id == job.id, ChapterCommit.is_current.is_(True))
+                        .order_by(ChapterCommit.committed_at.desc())
+                    )
+                    if existing_commit:
+                        return self._commit_dict(existing_commit)
                 if job.revision != payload.expected_job_revision:
-                    job.status = "human_review"
-                    job.error_code = "CHAPTER_COMMIT_CONFLICT"
-                    job.updated_at = _now()
                     raise StoryError(409, "CHAPTER_COMMIT_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
                 if job.status != "approved":
                     raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only approved chapter jobs can be committed.")
                 contract = self._get_contract(session, project.id, job.chapter_contract_id)
                 if contract.status != "locked":
                     raise StoryError(409, "CHAPTER_CONTRACT_NOT_LOCKED", "Chapter contract is no longer locked.")
-                if contract.plan_node_id:
-                    node = session.get(PlanNode, contract.plan_node_id)
-                    if not node or node.revision != contract.plan_node_revision:
-                        job.status = "human_review"
-                        job.error_code = "CHAPTER_CONTEXT_STALE"
-                        job.updated_at = _now()
-                        raise StoryError(409, "CHAPTER_CONTEXT_STALE", "Plan node changed after contract derivation.")
+                self._assert_contract_fresh(session, project.id, contract)
                 draft = self._current_draft(session, job.id)
                 if not draft or draft.status != "approved":
                     raise StoryError(409, "CHAPTER_DRAFT_NOT_APPROVED", "Approved draft is required before commit.")
@@ -565,11 +676,14 @@ class Phase5Service:
                     ChapterCommit.chapter_number == contract.chapter_number,
                     ChapterCommit.is_current.is_(True),
                 ))
-                previous_version_number = 0
+                previous_version_number = session.scalar(
+                    select(SourceVersion.version_number)
+                    .where(SourceVersion.project_id == project.id, SourceVersion.source_id == source_id)
+                    .order_by(SourceVersion.version_number.desc())
+                ) or 0
                 if previous_commit:
                     previous_source = session.get(SourceVersion, previous_commit.source_version_id)
                     if previous_source and previous_source.status == "official":
-                        previous_version_number = previous_source.version_number
                         self.service.phase4._supersede_source_version_in_session(session, project.id, previous_source, now) if hasattr(self.service.phase4, "_supersede_source_version_in_session") else self._supersede_previous_source_inline(session, project.id, previous_source, now)
                     previous_commit.is_current = False
                     previous_commit.status = "superseded"
@@ -627,12 +741,8 @@ class Phase5Service:
                 session.flush()
                 committed = self._commit_dict(commit)
                 mirror = (contract.chapter_number, draft.content_markdown)
-            with self.service.db.catalog() as session:
-                catalog = session.get(type(project), project.id)
-                if catalog:
-                    catalog.current_chapter = max(catalog.current_chapter, mirror[0] if mirror else catalog.current_chapter)
-                    catalog.updated_at = utc_now()
-                    session.commit()
+            if mirror:
+                self._sync_catalog_chapter_safely(project, mirror[0])
             if mirror:
                 self._mirror_chapter_markdown_safely(project.id, project.folder_path, mirror[0], mirror[1])
             return committed
@@ -646,7 +756,26 @@ class Phase5Service:
                         job.updated_at = _now()
                     session.add(self.service._audit("chapter.state_conflict_detected", "chapter_job", job_id, {**exc.details, "requestId": request_id}, request_id))
                 raise StoryError(409, "CHAPTER_STATE_CONFLICT", "Chapter state conflicts with current facts.", exc.details) from exc
+            if exc.code in {"CHAPTER_COMMIT_CONFLICT", "CHAPTER_CONTEXT_STALE"}:
+                with self.service.db.project_write(project.id, project.folder_path) as session:
+                    job = session.get(ChapterJob, job_id)
+                    if job:
+                        job.status = "human_review"
+                        job.error_code = exc.code
+                        job.diagnostic_json = dumps(exc.details)
+                        job.updated_at = _now()
+                        job.revision += 1
             raise
+        except Exception as exc:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                job = session.get(ChapterJob, job_id)
+                if job:
+                    job.status = "human_review"
+                    job.error_code = "CHAPTER_COMMIT_FAILED"
+                    job.diagnostic_json = dumps({"errorType": type(exc).__name__})
+                    job.updated_at = _now()
+                    job.revision += 1
+            raise StoryError(500, "CHAPTER_COMMIT_FAILED", "Chapter commit failed and was rolled back.") from exc
 
     # ------------------------------------------------------------------
     # Model and persistence helpers
@@ -661,7 +790,10 @@ class Phase5Service:
             raise StoryError(409, "CHAPTER_MODEL_ROLE_NOT_CONFIGURED", f"Model role is disabled: {role}", {"role": role})
         if not provider.api_key_ref:
             raise StoryError(409, "MODEL_API_KEY_MISSING", "Provider API key is missing.", {"providerId": provider.id})
-        api_key = self.service.secret_store.get_secret(provider.api_key_ref)
+        try:
+            api_key = self.service.secret_store.get_secret(provider.api_key_ref)
+        except Exception as exc:
+            raise StoryError(503, "CREDENTIAL_STORE_UNAVAILABLE", "Credential store is unavailable.", {"providerId": provider.id}) from exc
         if not api_key:
             raise StoryError(409, "MODEL_API_KEY_MISSING", "Provider API key is missing.", {"providerId": provider.id})
         run_id = str(uuid4())
@@ -695,6 +827,9 @@ class Phase5Service:
         except ModelProviderError as exc:
             self._complete_model_run_failure(project.id, project.folder_path, run_id, exc.code, started, {"retryable": exc.retryable})
             raise
+        except Exception as exc:
+            self._complete_model_run_failure(project.id, project.folder_path, run_id, "MODEL_PROVIDER_ERROR", started, {"errorType": type(exc).__name__})
+            raise StoryError(502, "MODEL_PROVIDER_ERROR", "Model provider call failed.") from exc
         duration = int((time.perf_counter() - started) * 1000)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             run = session.get(ModelRun, run_id)
@@ -838,14 +973,17 @@ class Phase5Service:
         }
 
     def _run_quality_pipeline(self, project: Any, job_id: str, draft_id: str, request_id: str) -> None:
+        self._raise_if_cancel_requested(project, job_id)
         self._run_deterministic_quality(project, job_id, draft_id, request_id)
         for role in ("continuity_reviewer", "story_editor", "style_reviewer"):
+            self._raise_if_cancel_requested(project, job_id)
             try:
                 self._run_model_quality(project, job_id, draft_id, role, request_id)
             except StoryError as exc:
                 if exc.code != "CHAPTER_MODEL_ROLE_NOT_CONFIGURED":
                     raise
                 self._record_missing_reviewer(project, job_id, draft_id, role, request_id)
+        self._raise_if_cancel_requested(project, job_id)
 
     def _run_deterministic_quality(self, project: Any, job_id: str, draft_id: str, request_id: str) -> None:
         with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -886,8 +1024,82 @@ class Phase5Service:
                     findings.append(self._finding_payload("REQUIRED_CONDITION_MISSING", "error", "contract", "A required completion condition is not evident in the draft.", [condition], {}, "Add clear evidence for this completion condition."))
             if not extraction or extraction.status != "validated":
                 findings.append(self._finding_payload("CHAPTER_EXTRACTION_INVALID", "blocker", "state", "Validated extraction is missing.", [], {}, "Run fact extraction and validation."))
-            elif not _safe_loads(extraction.payload_json, {}).get("events"):
-                findings.append(self._finding_payload("CHAPTER_EXTRACTION_EMPTY_EVENTS", "error", "state", "Extraction does not include any story events.", [], {}, "Extract at least one event from the chapter."))
+                extraction_payload: dict[str, Any] = {}
+            else:
+                extraction_payload = _safe_loads(extraction.payload_json, {})
+                if not extraction_payload.get("events"):
+                    findings.append(self._finding_payload("CHAPTER_EXTRACTION_EMPTY_EVENTS", "error", "state", "Extraction does not include any story events.", [], {}, "Extract at least one event from the chapter."))
+
+            extracted_entities = {
+                str(item.get("canonicalName") or item.get("canonical_name") or "").strip().lower()
+                for item in extraction_payload.get("entities", [])
+                if isinstance(item, dict)
+            }
+            extracted_participants = {
+                str(participant).strip().lower()
+                for event in extraction_payload.get("events", [])
+                if isinstance(event, dict)
+                for participant in event.get("participants", [])
+                if isinstance(participant, str)
+            }
+            for character in _safe_loads(contract.required_characters_json, []):
+                if isinstance(character, str) and character.strip() and character.lower() not in lowered and character.lower() not in extracted_entities | extracted_participants:
+                    findings.append(self._finding_payload("REQUIRED_CHARACTER_MISSING", "error", "contract", "A required character is missing from this chapter.", [character], {}, "Add the required character or revise the contract."))
+            extracted_foreshadows = {
+                str(value).strip().lower()
+                for item in extraction_payload.get("foreshadows", [])
+                if isinstance(item, dict)
+                for value in (item.get("code"), item.get("label"), item.get("name"))
+                if isinstance(value, str) and value.strip()
+            }
+            for required in _safe_loads(contract.required_foreshadows_json, []):
+                if isinstance(required, str) and required.strip() and required.lower() not in lowered and required.lower() not in extracted_foreshadows:
+                    findings.append(self._finding_payload("REQUIRED_FORESHADOW_MISSING", "error", "foreshadow", "A required foreshadow is not present in the chapter or extraction.", [required], {}, "Plant or advance the required foreshadow, or revise the contract."))
+
+            forbidden_scope = forbidden if isinstance(forbidden, dict) else {}
+            for key, rule_code, label in (
+                ("forbiddenCharacters", "FORBIDDEN_CHARACTER_EARLY", "character"),
+                ("forbiddenAbilities", "FORBIDDEN_ABILITY_EARLY", "ability"),
+                ("forbiddenItems", "FORBIDDEN_ITEM_EARLY", "item"),
+            ):
+                for value in forbidden_scope.get(key, []) if isinstance(forbidden_scope.get(key), list) else []:
+                    if isinstance(value, str) and value.strip() and value.lower() in lowered:
+                        findings.append(self._finding_payload(rule_code, "blocker", "scope", f"A forbidden {label} appears before its allowed chapter.", [value], {}, f"Remove the early {label} or revise the locked contract."))
+
+            pace_budget = _safe_loads(contract.allowed_scope_json, {}).get("paceBudget", {})
+            max_events = pace_budget.get("maxMajorEvents") if isinstance(pace_budget, dict) else None
+            if isinstance(max_events, int) and not isinstance(max_events, bool) and len(extraction_payload.get("events", [])) > max_events:
+                findings.append(self._finding_payload("PACE_MAJOR_EVENT_OVERFLOW", "blocker", "pace", "The extraction contains more major events than the chapter pace budget allows.", [{"eventCount": len(extraction_payload.get("events", [])), "maximum": max_events}], {}, "Move excess major events to later chapters."))
+
+            for fact in extraction_payload.get("facts", []):
+                if not isinstance(fact, dict):
+                    continue
+                entity_name = str(fact.get("entity") or fact.get("entityName") or "").strip()
+                field_path = str(fact.get("fieldPath") or fact.get("field_path") or "").strip()
+                entity = session.scalar(select(StoryEntity).where(StoryEntity.project_id == project.id, StoryEntity.canonical_name == entity_name, StoryEntity.status == "active"))
+                current = session.scalar(select(StateFact).where(
+                    StateFact.project_id == project.id,
+                    StateFact.entity_id == entity.id,
+                    StateFact.field_path == field_path,
+                    StateFact.is_current.is_(True),
+                )) if entity and field_path else None
+                new_value = fact.get("value")
+                if not current or _safe_loads(current.value_json, None) == new_value:
+                    continue
+                expected_present = "expectedCurrentValue" in fact or "expected_current_value" in fact
+                expected_value = fact.get("expectedCurrentValue") if "expectedCurrentValue" in fact else fact.get("expected_current_value")
+                if not expected_present or expected_value != _safe_loads(current.value_json, None):
+                    findings.append(self._finding_payload("CHAPTER_STATE_CONFLICT", "blocker", "state", "A changed fact is missing the correct expectedCurrentValue.", [{"entity": entity_name, "fieldPath": field_path, "currentValue": _safe_loads(current.value_json, None)}], {}, "Regenerate extraction with the exact current value or resolve the conflict manually."))
+
+            for foreshadow in extraction_payload.get("foreshadows", []):
+                if not isinstance(foreshadow, dict) or str(foreshadow.get("status") or "") != "resolved":
+                    continue
+                code = str(foreshadow.get("code") or "").strip()
+                existing = session.scalar(select(Foreshadow).where(Foreshadow.project_id == project.id, Foreshadow.code == code, Foreshadow.status != "superseded")) if code else None
+                earliest = foreshadow.get("earliestChapter") or foreshadow.get("earliest_chapter") or (existing.earliest_chapter if existing else None)
+                latest = foreshadow.get("latestChapter") or foreshadow.get("latest_chapter") or (existing.latest_chapter if existing else None)
+                if (isinstance(earliest, int) and contract.chapter_number < earliest) or (isinstance(latest, int) and contract.chapter_number > latest):
+                    findings.append(self._finding_payload("FORESHADOW_WINDOW_VIOLATION", "blocker", "foreshadow", "A foreshadow is resolved outside its allowed chapter window.", [{"code": code, "earliestChapter": earliest, "latestChapter": latest, "chapterNumber": contract.chapter_number}], {}, "Move the payoff into its allowed window or revise Canon/contract explicitly."))
             for payload in findings:
                 self._add_finding(session, project.id, run.id, draft_id, payload, now)
             run.summary_json = dumps({"findingCount": len(findings), "blockingCount": sum(1 for item in findings if item["severity"] in BLOCKING_SEVERITIES)})
@@ -1057,6 +1269,40 @@ class Phase5Service:
         value = _safe_loads(getattr(node, attr), [])
         return [item for item in value if isinstance(item, str)]
 
+    def _current_canon_digest(self, session: Session) -> str:
+        locked_docs = session.scalars(select(CanonDocument).where(CanonDocument.status == "locked").order_by(CanonDocument.id.asc())).all()
+        payload: list[dict[str, Any]] = [
+            {"kind": "document", "id": doc.id, "revision": doc.revision, "checksum": stable_digest(doc.content_markdown)}
+            for doc in locked_docs
+        ]
+        for kind, model in (
+            ("entity_type", CanonEntityType),
+            ("entity", CanonEntity),
+            ("relation", CanonRelation),
+            ("rule", CanonRule),
+        ):
+            for item in session.scalars(select(model).where(model.status == "locked").order_by(model.id.asc())).all():
+                payload.append({"kind": kind, "id": item.id, "revision": item.revision})
+        return stable_digest(payload)
+
+    def _latest_official_snapshot_id(self, session: Session, project_id: str) -> str | None:
+        return session.scalar(
+            select(StateSnapshot.id)
+            .join(SourceVersion, SourceVersion.id == StateSnapshot.source_version_id)
+            .where(StateSnapshot.project_id == project_id, SourceVersion.status == "official")
+            .order_by(StateSnapshot.snapshot_number.desc(), StateSnapshot.created_at.desc())
+        )
+
+    def _assert_contract_fresh(self, session: Session, project_id: str, contract: ChapterContract) -> None:
+        if self._current_canon_digest(session) != contract.canon_revision_digest:
+            raise StoryError(409, "CHAPTER_CONTEXT_STALE", "Locked Canon changed after the chapter contract was derived.", {"reason": "canon_revision_changed"})
+        if self._latest_official_snapshot_id(session, project_id) != contract.state_snapshot_id:
+            raise StoryError(409, "CHAPTER_CONTEXT_STALE", "Official story state changed after the chapter contract was derived.", {"reason": "state_snapshot_changed"})
+        if contract.plan_node_id:
+            node = session.get(PlanNode, contract.plan_node_id)
+            if not node or node.revision != contract.plan_node_revision:
+                raise StoryError(409, "CHAPTER_CONTEXT_STALE", "Plan node changed after the chapter contract was derived.", {"reason": "plan_node_changed"})
+
     def _get_contract(self, session: Session, project_id: str, contract_id: str) -> ChapterContract:
         item = session.get(ChapterContract, contract_id)
         if not item or item.project_id != project_id:
@@ -1092,15 +1338,49 @@ class Phase5Service:
     def _current_draft(self, session: Session, job_id: str) -> ChapterDraft | None:
         return session.scalar(select(ChapterDraft).where(ChapterDraft.chapter_job_id == job_id).order_by(ChapterDraft.version_number.desc()))
 
+    def _raise_if_cancel_requested(self, project: Any, job_id: str) -> None:
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            if job.status != "cancel_requested":
+                return
+            now = _now()
+            job.status = "cancelled"
+            job.error_code = "cancelled"
+            job.finished_at = now
+            job.updated_at = now
+            job.revision += 1
+        raise StoryError(409, "CHAPTER_JOB_CANCELLED", "Chapter job was cancelled.")
+
     def _fail_job(self, project_id: str, folder_path: str, job_id: str, error_code: str, diagnostic: dict[str, Any]) -> None:
         with self.service.db.project_write(project_id, folder_path) as session:
             job = session.get(ChapterJob, job_id)
             if job:
+                if job.status in {"cancel_requested", "cancelled"}:
+                    job.status = "cancelled"
+                    job.error_code = "cancelled"
+                    job.finished_at = _now()
+                    job.updated_at = _now()
+                    job.revision += 1
+                    return
                 job.status = "failed"
                 job.error_code = error_code
                 job.diagnostic_json = dumps(diagnostic)
                 job.finished_at = _now()
                 job.updated_at = _now()
+                job.revision += 1
+
+    def _return_revision_to_human_review(self, project_id: str, folder_path: str, job_id: str, error_code: str, diagnostic: dict[str, Any], *, restore_round: bool) -> None:
+        with self.service.db.project_write(project_id, folder_path) as session:
+            job = session.get(ChapterJob, job_id)
+            if not job:
+                return
+            job.status = "human_review"
+            job.error_code = error_code
+            job.diagnostic_json = dumps(diagnostic)
+            if restore_round:
+                job.current_revision_round = max(0, job.current_revision_round - 1)
+            job.updated_at = _now()
+            job.revision += 1
 
     def _writer_messages(self, contract: dict[str, Any], context: dict[str, Any], author_note: str) -> list[dict[str, str]]:
         return [
@@ -1266,6 +1546,24 @@ class Phase5Service:
             "committedAt": item.committed_at,
             "createdAt": item.created_at,
         }
+
+    def _sync_catalog_chapter_safely(self, project: Any, chapter_number: int) -> None:
+        try:
+            with self.service.db.catalog() as session:
+                catalog = session.get(type(project), project.id)
+                if catalog:
+                    catalog.current_chapter = max(catalog.current_chapter, chapter_number)
+                    catalog.updated_at = utc_now()
+                    session.commit()
+        except Exception as exc:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                session.add(self.service._audit(
+                    "chapter.catalog_sync_failed",
+                    "chapter",
+                    f"chapter-{chapter_number:04d}",
+                    {"errorType": type(exc).__name__, "rebuildRequired": True},
+                    str(uuid4()),
+                ))
 
     def _mirror_chapter_markdown_safely(self, project_id: str, folder_path: str, chapter_number: int, content: str) -> None:
         path = Path(folder_path) / "manuscripts" / f"chapter-{chapter_number:04d}.md"

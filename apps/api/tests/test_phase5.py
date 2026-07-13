@@ -3,12 +3,21 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+import story_agent_api.phase5 as phase5_module
+from story_agent_api.model_provider import ModelStreamResult
+from story_agent_api.models import ChapterCommit, ChapterJob, StateFact, SourceVersion
+from story_agent_api.services import StoryError
 
 
 class Phase5OpenAIHandler(BaseHTTPRequestHandler):
     post_count = 0
+    invalid_extraction = False
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/chat/completions":
@@ -26,7 +35,9 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
         wants_json = request.get("response_format", {}).get("type") == "json_object"
         messages = request.get("messages", [])
         joined = "\n".join(str(item.get("content", "")) for item in messages if isinstance(item, dict))
-        if wants_json and "contentMarkdown" in joined:
+        if wants_json and type(self).invalid_extraction and "chapterMarkdown" in joined:
+            content = "not-json"
+        elif wants_json and "contentMarkdown" in joined:
             content = json.dumps({"contentMarkdown": "Lin Mo pushed open the old house door. The required condition is now visible."})
         elif wants_json and "requiredOutput" in joined:
             content = json.dumps({"findings": []})
@@ -61,11 +72,12 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
         return
 
 
-def start_phase5_server() -> tuple[ThreadingHTTPServer, str]:
+def start_phase5_server(*, invalid_extraction: bool = False) -> tuple[ThreadingHTTPServer, str]:
     class Handler(Phase5OpenAIHandler):
         pass
 
     Handler.post_count = 0
+    Handler.invalid_extraction = invalid_extraction
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -116,6 +128,52 @@ def derive_locked_contract(client: TestClient, project_id: str) -> dict:
     })
     assert locked.status_code == 200, locked.text
     return locked.json()
+
+
+def seed_official_state(client: TestClient, project_id: str, *, name: str, location: str, source_id: str) -> dict:
+    entity_type = next(item for item in client.get(f"/api/v1/projects/{project_id}/canon").json()["entityTypes"] if item["name"] == "person")
+    candidate = client.post(f"/api/v1/projects/{project_id}/state/candidates", json={
+        "sourceId": source_id,
+        "versionNumber": 1,
+        "sourceKind": "manual",
+        "entities": [{
+            "entityTypeId": entity_type["id"],
+            "canonicalName": name,
+            "attributes": {"name": name},
+        }],
+        "facts": [{"entity": name, "fieldPath": "location", "value": location}],
+        "events": [{"eventOrder": 1, "summary": f"{name} is at {location}."}],
+    })
+    assert candidate.status_code == 200, candidate.text
+    committed = client.post(f"/api/v1/state/candidates/{candidate.json()['id']}/commit", json={
+        "projectId": project_id,
+        "expectedRevision": candidate.json()["revision"],
+    })
+    assert committed.status_code == 200, committed.text
+    return committed.json()
+
+
+def accept_open_blocking_findings(client: TestClient, project_id: str, job_id: str) -> None:
+    quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality").json()
+    for finding in quality["findings"]:
+        if finding["status"] == "open" and finding["severity"] in {"error", "blocker"}:
+            accepted = client.post(f"/api/v1/projects/{project_id}/quality-findings/{finding['id']}/accept-risk", json={"reason": "explicit unit-test risk acceptance"})
+            assert accepted.status_code == 200, accepted.text
+
+
+def run_and_approve_job(client: TestClient, project_id: str) -> tuple[dict, dict, dict]:
+    contract = derive_locked_contract(client, project_id)
+    job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+    run = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={})
+    assert run.status_code == 200, run.text
+    accept_open_blocking_findings(client, project_id, job["id"])
+    state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+    approved = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/approve", json={
+        "mode": "manual",
+        "expectedJobRevision": state["revision"],
+    })
+    assert approved.status_code == 200, approved.text
+    return contract, job, approved.json()
 
 
 def test_chapter_contract_lock_blocks_in_place_edits(client: TestClient, demo_project: dict) -> None:
@@ -249,6 +307,370 @@ def test_approve_and_commit_materializes_chapter_state_and_mirror(client: TestCl
         from pathlib import Path
 
         assert Path(mirror_path).exists()
+        repeated = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/commit", json={
+            "expectedJobRevision": approved.json()["revision"],
+        })
+        assert repeated.status_code == 200
+        assert repeated.json()["id"] == commit["id"]
+        cannot_cancel = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/cancel")
+        assert cannot_cancel.status_code == 409
+        assert cannot_cancel.json()["code"] == "CHAPTER_JOB_NOT_CANCELLABLE"
+
+        backup = client.post(f"/api/v1/projects/{project_id}/backups").json()
+        archive = Path(backup["archivePath"])
+        restored = client.post("/api/v1/projects/restore", files={"backup": (archive.name, archive.read_bytes(), "application/zip")})
+        assert restored.status_code == 201, restored.text
+        restored_id = restored.json()["id"]
+        restored_drafts = client.get(f"/api/v1/projects/{restored_id}/chapters/1/drafts").json()
+        assert restored_drafts and restored_drafts[0]["contentMarkdown"]
+        restored_project = client.get(f"/api/v1/projects/{restored_id}").json()
+        assert Path(restored_project["folderPath"], "manuscripts", "chapter-0001.md").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_contract_for_early_chapter_sets_up_future_milestone_without_consuming_it(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    node = client.get(f"/api/v1/projects/{project_id}/plan").json()["milestones"][0]
+    derived = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+        "chapterNumber": 1,
+        "planNodeId": node["id"],
+        "targetWordsMin": 10,
+        "targetWordsMax": 100,
+    })
+    assert derived.status_code == 200, derived.text
+    contract = derived.json()
+    assert contract["objective"]["mustAdvance"]["setupForPlanNodeId"] == node["id"]
+    assert contract["allowedScope"]["completionConditions"] == []
+    assert contract["forbiddenScope"]["mustNotComplete"][0]["id"] == node["id"]
+
+    out_of_range = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={"chapterNumber": demo_project["totalChapters"] + 1})
+    assert out_of_range.status_code == 422
+    assert out_of_range.json()["code"] == "CHAPTER_NUMBER_OUT_OF_RANGE"
+    null_update = client.put(f"/api/v1/projects/{project_id}/chapter-contracts/{contract['id']}", json={
+        "expectedRevision": contract["revision"],
+        "objective": None,
+    })
+    assert null_update.status_code == 422
+    assert null_update.json()["code"] == "INVALID_CHAPTER_CONTRACT"
+
+
+def test_contract_lock_rejects_stale_plan_revision(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    node = client.get(f"/api/v1/projects/{project_id}/plan").json()["milestones"][0]
+    contract = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+        "chapterNumber": 1,
+        "planNodeId": node["id"],
+    }).json()
+    updated = client.patch(f"/api/v1/projects/{project_id}/plan/nodes/{node['id']}", json={
+        "expectedRevision": node["revision"],
+        "note": "changed after contract derivation",
+    })
+    assert updated.status_code == 200, updated.text
+    locked = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/{contract['id']}/lock", json={"expectedRevision": contract["revision"]})
+    assert locked.status_code == 409
+    assert locked.json()["code"] == "CHAPTER_CONTEXT_STALE"
+
+
+def test_state_conflict_is_a_deterministic_blocker_before_approval(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    seed_official_state(client, project_id, name="Lin Mo", location="street", source_id="preexisting-state")
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        run = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={})
+        assert run.status_code == 200, run.text
+        quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        conflict = next(item for item in quality["findings"] if item["ruleCode"] == "CHAPTER_STATE_CONFLICT")
+        assert conflict["severity"] == "blocker"
+        state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        approval = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/approve", json={
+            "mode": "guarded_auto",
+            "expectedJobRevision": state["revision"],
+        })
+        assert approval.status_code == 409
+        assert approval.json()["code"] == "CHAPTER_QUALITY_BLOCKED"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_guarded_auto_cannot_use_accepted_risk_to_fake_missing_reviewers(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        assert client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={}).status_code == 200
+        accept_open_blocking_findings(client, project_id, job["id"])
+        state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        approval = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/approve", json={
+            "mode": "guarded_auto",
+            "expectedJobRevision": state["revision"],
+        })
+        assert approval.status_code == 409
+        assert set(approval.json()["details"]["missingReviewers"]) == {"continuity_reviewer", "story_editor", "style_reviewer"}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_failed_revision_preserves_open_findings_and_does_not_consume_round(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        assert client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={}).status_code == 200
+        before = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        open_ids = {item["id"] for item in before["findings"] if item["status"] == "open"}
+        revised = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/revise", json={"reason": "reviser is intentionally unconfigured"})
+        assert revised.status_code == 409
+        assert revised.json()["code"] == "CHAPTER_MODEL_ROLE_NOT_CONFIGURED"
+        state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        assert state["status"] == "human_review"
+        assert state["currentRevisionRound"] == 0
+        after = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        assert open_ids.issubset({item["id"] for item in after["findings"] if item["status"] == "open"})
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_startup_recovery_and_retry_reset_job_timing(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    contract = derive_locked_contract(client, project_id)
+    job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+    service = client.app.state.story_service
+    project = service.get_project(project_id)
+    with service.db.project_write(project.id, project.folder_path) as session:
+        row = session.get(ChapterJob, job["id"])
+        row.status = "drafting"
+        row.started_at = row.updated_at
+    service.phase5.recover_interrupted_jobs()
+    interrupted = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+    assert interrupted["status"] == "interrupted"
+    retried = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/retry", json={"reason": "resume after restart"})
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "queued"
+    assert retried.json()["startedAt"] is None
+    assert retried.json()["finishedAt"] is None
+
+
+def test_phase5_project_namespaces_are_isolated(client: TestClient, demo_project: dict) -> None:
+    first_id = demo_project["id"]
+    second = client.post("/api/v1/projects", json={"title": "Phase Five Second", "mode": "long-form", "totalChapters": 100}).json()
+    for project_id in (first_id, second["id"]):
+        lock_canon(client, project_id)
+    first_contract = derive_locked_contract(client, first_id)
+    second_contract = derive_locked_contract(client, second["id"])
+    first_job = client.post(f"/api/v1/projects/{first_id}/chapter-jobs", json={"chapterContractId": first_contract["id"], "idempotencyKey": "same-key"}).json()
+    second_job = client.post(f"/api/v1/projects/{second['id']}/chapter-jobs", json={"chapterContractId": second_contract["id"], "idempotencyKey": "same-key"}).json()
+    assert first_job["id"] != second_job["id"]
+    assert {item["id"] for item in client.get(f"/api/v1/projects/{first_id}/chapter-jobs").json()} == {first_job["id"]}
+    assert {item["id"] for item in client.get(f"/api/v1/projects/{second['id']}/chapter-jobs").json()} == {second_job["id"]}
+
+
+def test_commit_rejects_stale_story_snapshot_and_persists_human_review(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        _contract, job, approved = run_and_approve_job(client, project_id)
+        seed_official_state(client, project_id, name="External Witness", location="station", source_id="state-after-approval")
+        committed = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/commit", json={
+            "expectedJobRevision": approved["revision"],
+        })
+        assert committed.status_code == 409
+        assert committed.json()["code"] == "CHAPTER_CONTEXT_STALE"
+        state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        assert state["status"] == "human_review"
+        assert state["errorCode"] == "CHAPTER_CONTEXT_STALE"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_commit_failure_rolls_back_source_state_and_commit(client: TestClient, demo_project: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        _contract, job, approved = run_and_approve_job(client, project_id)
+        service = client.app.state.story_service
+
+        def fail_materialization(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("injected materialization failure")
+
+        monkeypatch.setattr(service.phase4, "_materialize_state_payload", fail_materialization)
+        committed = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/commit", json={
+            "expectedJobRevision": approved["revision"],
+        })
+        assert committed.status_code == 500
+        assert committed.json()["code"] == "CHAPTER_COMMIT_FAILED"
+        state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        assert state["status"] == "human_review"
+        assert state["errorCode"] == "CHAPTER_COMMIT_FAILED"
+        assert client.get(f"/api/v1/projects/{project_id}/state/entities").json() == []
+        project = service.get_project(project_id)
+        with service.db.project(project.id, project.folder_path) as session:
+            chapter_sources = session.scalars(select(SourceVersion).where(SourceVersion.source_kind == "chapter")).all()
+            assert chapter_sources == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_canon_change_invalidates_unlocked_chapter_contract(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    node_id = client.get(f"/api/v1/projects/{project_id}/plan").json()["milestones"][0]["id"]
+    contract = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={"chapterNumber": 1, "planNodeId": node_id}).json()
+    change = client.post(f"/api/v1/projects/{project_id}/canon/change-requests", json={
+        "projectId": project_id,
+        "targetKind": "document",
+        "targetId": "story-core",
+        "reason": "change canon after contract derivation",
+        "afterJson": {"title": "Changed Story Core"},
+    })
+    assert change.status_code == 200, change.text
+    applied = client.post(f"/api/v1/canon/change-requests/{change.json()['id']}/apply", json={
+        "projectId": project_id,
+        "expectedRevision": change.json()["revision"],
+    })
+    assert applied.status_code == 200, applied.text
+    locked = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/{contract['id']}/lock", json={"expectedRevision": contract["revision"]})
+    assert locked.status_code == 409
+    assert locked.json()["code"] == "CHAPTER_CONTEXT_STALE"
+    assert locked.json()["details"]["reason"] == "canon_revision_changed"
+
+
+def test_invalid_extraction_repairs_once_and_never_touches_official_state(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server(invalid_extraction=True)
+    try:
+        configure_phase5_roles(client, base_url)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        run = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={})
+        assert run.status_code == 422
+        assert run.json()["code"] == "CHAPTER_EXTRACTION_INVALID"
+        assert server.RequestHandlerClass.post_count == 3, "one writer call plus exactly two extraction attempts"
+        assert client.get(f"/api/v1/projects/{project_id}/state/entities").json() == []
+        state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        assert state["status"] == "failed"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_model_provider_call_occurs_without_holding_project_write_lock(client: TestClient, demo_project: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_id = demo_project["id"]
+    configure_phase5_roles(client, "http://127.0.0.1:9")
+    service = client.app.state.story_service
+    project = service.get_project(project_id)
+    observed = {"lockOwned": True}
+
+    async def inspect_lock(_self: object, _payload: dict) -> ModelStreamResult:
+        lock = service.db._locks[project_id]
+        observed["lockOwned"] = bool(getattr(lock, "_is_owned", lambda: False)())
+        return ModelStreamResult(text="draft body")
+
+    monkeypatch.setattr(phase5_module.OpenAICompatibleModelProvider, "complete_chat", inspect_lock)
+    text, _run_id = service.phase5._complete_role_text(project, "chinese_writer", "lock-test", [{"role": "user", "content": "write"}], response_json=False)
+    assert text == "draft body"
+    assert observed["lockOwned"] is False
+
+
+def test_deterministic_gate_blocks_forbidden_content_and_pace_overflow(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        node_id = client.get(f"/api/v1/projects/{project_id}/plan").json()["milestones"][0]["id"]
+        contract = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+            "chapterNumber": 1,
+            "planNodeId": node_id,
+            "targetWordsMin": 5,
+            "targetWordsMax": 100,
+        }).json()
+        updated = client.put(f"/api/v1/projects/{project_id}/chapter-contracts/{contract['id']}", json={
+            "expectedRevision": contract["revision"],
+            "forbiddenScope": {"forbiddenCharacters": ["Lin Mo"]},
+            "allowedScope": {**contract["allowedScope"], "paceBudget": {"maxMajorEvents": 0}},
+        })
+        assert updated.status_code == 200, updated.text
+        locked = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/{contract['id']}/lock", json={"expectedRevision": updated.json()["revision"]}).json()
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": locked["id"]}).json()
+        assert client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={}).status_code == 200
+        codes = {item["ruleCode"] for item in client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()["findings"]}
+        assert {"FORBIDDEN_CHARACTER_EARLY", "PACE_MAJOR_EVENT_OVERFLOW"}.issubset(codes)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_cancel_requested_job_settles_to_cancelled_without_becoming_failed(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    contract = derive_locked_contract(client, project_id)
+    job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+    service = client.app.state.story_service
+    project = service.get_project(project_id)
+    with service.db.project_write(project.id, project.folder_path) as session:
+        row = session.get(ChapterJob, job["id"])
+        row.status = "cancel_requested"
+    with pytest.raises(StoryError) as raised:
+        service.phase5._raise_if_cancel_requested(project, job["id"])
+    assert raised.value.code == "CHAPTER_JOB_CANCELLED"
+    state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+    assert state["status"] == "cancelled"
+    assert state["errorCode"] == "cancelled"
+
+
+def test_rewrite_supersedes_prior_source_and_keeps_one_current_fact_and_commit(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        _first_contract, first_job, first_approved = run_and_approve_job(client, project_id)
+        first_commit_response = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{first_job['id']}/commit", json={"expectedJobRevision": first_approved["revision"]})
+        assert first_commit_response.status_code == 200, first_commit_response.text
+        first_commit = first_commit_response.json()
+
+        _second_contract, second_job, second_approved = run_and_approve_job(client, project_id)
+        second_commit_response = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{second_job['id']}/commit", json={"expectedJobRevision": second_approved["revision"]})
+        assert second_commit_response.status_code == 200, second_commit_response.text
+        second_commit = second_commit_response.json()
+
+        service = client.app.state.story_service
+        project = service.get_project(project_id)
+        with service.db.project(project.id, project.folder_path) as session:
+            old_source = session.get(SourceVersion, first_commit["sourceVersionId"])
+            new_source = session.get(SourceVersion, second_commit["sourceVersionId"])
+            assert old_source.status == "superseded"
+            assert new_source.status == "official"
+            assert new_source.version_number == old_source.version_number + 1
+            current_commits = session.scalars(select(ChapterCommit).where(ChapterCommit.chapter_number == 1, ChapterCommit.is_current.is_(True))).all()
+            assert [item.id for item in current_commits] == [second_commit["id"]]
+            current_facts = session.scalars(select(StateFact).where(StateFact.is_current.is_(True))).all()
+            assert len([item for item in current_facts if item.field_path == "location"]) == 1
     finally:
         server.shutdown()
         server.server_close()

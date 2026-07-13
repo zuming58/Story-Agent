@@ -308,7 +308,9 @@ class Phase8Service:
             ("PROGRESSION", ("见雾", "识祟", "执灯", "立契", "巡界", "守夜")),
             ("UPGRADE_COST", ("升级条件", "代价")),
             ("ARTIFACTS", ("遗物", "巡器", "封物", "祟核", "巡夜灯", "镇纸钉", "潮湿账页")),
-            ("RULES", ("硬规则", "怪异", "规则")),
+            # “硬”是规则的约束属性，不应依赖模型逐字写出“硬规则”。
+            # 结构化规则数量和 constraintJson 会在下方继续执行确定性校验。
+            ("RULES", ("怪异", "规则")),
             ("KNOWLEDGE", ("知识边界", "关系")),
             ("LONG_PLAN", ("七卷边界", "第821—1000章", "最后一盏灯")),
             ("REVEAL_LOCKS", ("分层揭示窗口", "第43—60章", "第92—100章", "第370章前")),
@@ -648,10 +650,14 @@ class Phase8Service:
             current_revision = doc.revision if doc else 1
             if current_revision != row.base_revision:
                 raise StoryError(409, "CANON_REVISION_CONFLICT", "Canon 已在提案生成后发生变化。", {"currentRevision": current_revision})
-            readiness = loads(row.readiness_json) or {}
+            structured = loads(row.structured_json) or {}
+            # Readiness is derived data. Recompute it at the write boundary so
+            # a proposal cannot be accepted or rejected because a stored
+            # validator snapshot predates the current deterministic rules.
+            readiness = self._canon_checks(row.content_markdown, structured)
+            row.readiness_json = dumps(readiness)
             if not readiness.get("ready"):
                 raise StoryError(409, "CANON_PROPOSAL_INCOMPLETE", "Canon 提案未通过完整性检查。", readiness)
-            structured = loads(row.structured_json) or {}
             now = _now()
             self.service.phase4._upsert_document(session, {
                 "id": "story-core", "title": f"{project.title} Story Core", "kind": "story-core", "contentMarkdown": row.content_markdown,

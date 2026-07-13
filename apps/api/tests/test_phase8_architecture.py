@@ -101,6 +101,12 @@ def test_standard_project_story_architecture_and_plan_flow(client: TestClient, m
     assert proposal_response.status_code == 201, proposal_response.text
     proposal = proposal_response.json()
     assert proposal["readiness"]["ready"] is True
+    # Readiness is a cache, not an authority. Applying must recompute it using
+    # the current deterministic validator instead of trusting stale storage.
+    with service.db.project_write(project["id"], project["folderPath"]) as session:
+        stored = session.get(CanonGenerationProposal, proposal["id"])
+        assert stored is not None
+        stored.readiness_json = dumps({"ready": False, "checks": [{"code": "OLD_VALIDATOR"}]})
     applied = client.post(f"/api/v1/canon/generation-proposals/{proposal['id']}/apply", json={"expectedRevision": proposal["revision"]})
     assert applied.status_code == 200, applied.text
     canon = applied.json()
@@ -122,6 +128,35 @@ def test_standard_project_story_architecture_and_plan_flow(client: TestClient, m
     nodes = applied_plan.json()["milestones"]
     opening = next(node for node in nodes if node["id"] == "arc-01-opening")
     assert [beat["chapterNumber"] for beat in opening["chapterBeats"]] == [1, 2, 3, 4, 5]
+
+
+def test_canon_apply_rejects_stale_ready_snapshot_when_content_is_incomplete(client: TestClient) -> None:
+    project = client.post(
+        "/api/v1/projects",
+        json={"title": "不完整设定测试", "mode": "long-form", "totalChapters": 1000},
+    ).json()
+    service = client.app.state.story_service
+    proposal_id = "33333333-3333-4333-8333-333333333333"
+    with service.db.project_write(project["id"], project["folderPath"]) as session:
+        session.add(CanonGenerationProposal(
+            id=proposal_id,
+            project_id=project["id"],
+            base_revision=1,
+            status="pending",
+            brief_json=dumps(_brief()),
+            content_markdown="# 只有标题",
+            structured_json=dumps(service.phase8._baseline_structure()),
+            readiness_json=dumps({"ready": True, "checks": []}),
+            model_run_id=None,
+            revision=1,
+        ))
+
+    response = client.post(
+        f"/api/v1/canon/generation-proposals/{proposal_id}/apply",
+        json={"expectedRevision": 1},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "CANON_PROPOSAL_INCOMPLETE"
 
 
 def test_demo_project_cannot_start_paid_writing(client: TestClient, demo_project: dict) -> None:

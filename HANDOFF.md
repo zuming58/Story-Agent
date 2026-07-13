@@ -33,6 +33,14 @@
 
 本机 `.data` 不进入 Git。另一台电脑只克隆仓库时不会自动获得上述 proposal 和正文数据；需要续用精确检查点时，应导入本机项目备份 ZIP。若不传备份，另一台电脑需用自己的 Windows Credential Manager 配置密钥并重新生成 Canon。
 
+已生成可携带的恢复包（`isValid=true`，不包含 Credential Manager 密钥）：
+
+```text
+F:\Codex\story\.data\projects\1ffdb07d-d717-42cf-8456-30e1475b2859-story\backups\20260713-121449-7b76116e-ed8b-4de5-b7d2-3a9932f3ae0e.zip
+```
+
+备份 ID：`7b76116e-ed8b-4de5-b7d2-3a9932f3ae0e`，大小 51,388 bytes。请用 U 盘、局域网或个人云盘单独复制到另一台电脑，再通过项目恢复接口上传；不要提交 Git。恢复会创建一个新项目，不覆盖原项目。导入后仍需在另一台 Windows Credential Manager 单独配置 DeepSeek 密钥。
+
 ## 2. 已完成代码
 
 ### 2.1 演示项目与正式项目隔离

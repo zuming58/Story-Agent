@@ -1,15 +1,17 @@
-# Story Agent 第七阶段审计完成 / 第八阶段交接
+# Story Agent 第八阶段后端开发交接
 
 更新时间：2026-07-13
-当前分支：`agent/automation-foundation`
+当前分支：`agent/export-publishing-foundation`
 第七阶段基线：`86c849c`
 另一台电脑交付终点：`26b292e`
-GPT-5.6 审计修复：以当前分支最新 HEAD 为准
-当前任务：等待 GPT-5.6 合并第七阶段后，由另一台电脑实施第八阶段导出与发布准备后端
+GPT-5.6 审计修复：`e17db9a`
+第七阶段审计 PR：`#6`（已合并）
+第八阶段基线：`7a808b4`
+当前任务：由另一台电脑只实施第八阶段导出与发布准备后端
 
 ## 1. 当前完成状态
 
-第七阶段“每日自动托管与可恢复生产队列”已经完成实现、GPT-5.6 完整审计、问题修复和全量验证。
+第七阶段“每日自动托管与可恢复生产队列”已经完成实现、GPT-5.6 完整审计、问题修复、全量验证并合并到 `main`。
 
 已具备：
 
@@ -101,5 +103,5 @@ npm run test:e2e
 ## 7. 返回当前电脑时的固定回复
 
 ```text
-第八阶段已经完成并推送。分支为 agent/export-publishing-foundation，最新提交为 <commit>，请以第七阶段审计合并后的 main 为基线，读取 HANDOFF.md 和 docs/plans/PHASE-8-EXPORT-PUBLISHING.md，进行完整审计、修复并运行全量测试。未修改 apps/web/**。
+第八阶段已经完成并推送。分支为 agent/export-publishing-foundation，最新提交为 <commit>，请以 7a808b4 为基线，读取 HANDOFF.md 和 docs/plans/PHASE-8-EXPORT-PUBLISHING.md，进行完整审计、修复并运行全量测试。未修改 apps/web/**。
 ```

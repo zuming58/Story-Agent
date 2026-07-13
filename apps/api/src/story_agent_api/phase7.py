@@ -94,6 +94,7 @@ class Phase7Service:
         self._loop_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
         self._running_threads: dict[str, threading.Thread] = {}
+        self._pending_dispatches: set[str] = set()
         self._dispatch_lock = threading.Lock()
         self._execution_context: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
             "automation_execution_context",
@@ -641,6 +642,20 @@ class Phase7Service:
         with self._dispatch_lock:
             active = self._running_threads.get(key)
             if active and active.is_alive():
+                if key not in self._pending_dispatches:
+                    self._pending_dispatches.add(key)
+
+                    def delayed_dispatch(previous: threading.Thread = active) -> None:
+                        previous.join()
+                        with self._dispatch_lock:
+                            self._pending_dispatches.discard(key)
+                        self.dispatch_run(project_id, run_id)
+
+                    threading.Thread(
+                        target=delayed_dispatch,
+                        name=f"story-agent-automation-redisp-{run_id[:8]}",
+                        daemon=True,
+                    ).start()
                 return
             thread = threading.Thread(target=worker, name=f"story-agent-automation-{run_id[:8]}", daemon=True)
             self._running_threads[key] = thread

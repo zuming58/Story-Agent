@@ -4,6 +4,9 @@ import json
 
 from fastapi.testclient import TestClient
 
+from story_agent_api.models import CanonDocument, CanonGenerationProposal
+from story_agent_api.services import StoryError, dumps
+
 
 CANON_MARKDOWN = """# 《夜巡人》Story Core
 
@@ -129,3 +132,159 @@ def test_demo_project_cannot_start_paid_writing(client: TestClient, demo_project
     readiness = client.get(f"/api/v1/projects/{demo_project['id']}/trial-readiness?chapterCount=1").json()
     check = next(item for item in readiness["checks"] if item["code"] == "TRIAL_STANDARD_PROJECT_REQUIRED")
     assert check["status"] == "blocked"
+
+
+def _brief(title: str = "夜巡人") -> dict:
+    return {
+        "title": title,
+        "mode": "long-form",
+        "targetChapters": 1000,
+        "genre": "现代中式规则怪谈",
+        "premise": "沈砚在雾城调查夜雾，并追查自己被删除的童年记忆。",
+        "tone": "克制、悬疑、可视化",
+        "progressionPreset": "restrained-explicit",
+    }
+
+
+def test_canon_checkpoint_preserves_core_after_systems_timeout_and_resumes_missing_section(
+    client: TestClient, monkeypatch
+) -> None:
+    project = client.post("/api/v1/projects", json={"title": "夜巡人·正式试写", "mode": "long-form", "totalChapters": 1000}).json()
+    service = client.app.state.story_service
+    calls: list[str | None] = []
+    fail_systems = True
+
+    def fake_complete(_project, _role, _messages, _request_id, *, response_json=False, run_role=None):
+        nonlocal fail_systems
+        calls.append(run_role)
+        if run_role == "architect:story-blueprint-core":
+            return CANON_MARKDOWN, "run-core"
+        if run_role == "architect:story-blueprint-systems":
+            if fail_systems:
+                fail_systems = False
+                raise StoryError(502, "MODEL_TIMEOUT", "systems timed out")
+            return CANON_MARKDOWN, "run-systems"
+        if run_role == "architect:proposal-analysis":
+            return json.dumps({**_structured_entities(), **_structured_rules()}), "run-analysis"
+        if run_role == "architect:story-blueprint-repair":
+            return "## 自动补充\n世界、时代、地域、人物、主角、组织、知识边界、关系、升级条件、代价、硬规则与怪异规则均以权威台账为准。", "run-repair"
+        raise AssertionError(run_role)
+
+    monkeypatch.setattr(service.phase8, "_complete_role", fake_complete)
+
+    failed = client.post(f"/api/v1/projects/{project['id']}/canon/generation-proposals", json=_brief())
+    assert failed.status_code == 502
+    proposals = client.get(f"/api/v1/projects/{project['id']}/canon/generation-proposals").json()
+    assert proposals[0]["status"] == "failed"
+    assert "core" in proposals[0]["structured"]["generationSections"]
+    assert "systems" not in proposals[0]["structured"]["generationSections"]
+
+    calls.clear()
+    retried = client.post(f"/api/v1/projects/{project['id']}/canon/generation-proposals", json=_brief())
+    assert retried.status_code == 201, retried.text
+    assert "architect:story-blueprint-core" not in calls
+    assert calls.count("architect:story-blueprint-systems") == 1
+    assert calls.count("architect:proposal-analysis") >= 1
+    assert retried.json()["status"] == "pending"
+    assert retried.json()["readiness"]["ready"] is True
+
+
+def test_canon_generation_recovery_marks_generating_failed_without_losing_sections(client: TestClient) -> None:
+    project = client.post("/api/v1/projects", json={"title": "夜巡人·正式试写", "mode": "long-form", "totalChapters": 1000}).json()
+    service = client.app.state.story_service
+    proposal_id = "11111111-1111-4111-8111-111111111111"
+    with service.db.project_write(project["id"], project["folderPath"]) as session:
+        session.add(CanonGenerationProposal(
+            id=proposal_id,
+            project_id=project["id"],
+            base_revision=1,
+            status="generating",
+            brief_json=dumps(_brief()),
+            content_markdown="# checkpoint",
+            structured_json=dumps({"generationSections": {"core": "kept core"}}),
+            readiness_json=dumps({}),
+            model_run_id=None,
+            revision=1,
+        ))
+
+    service.phase8.recover_interrupted_generations()
+
+    proposals = client.get(f"/api/v1/projects/{project['id']}/canon/generation-proposals").json()
+    proposal = next(item for item in proposals if item["id"] == proposal_id)
+    assert proposal["status"] == "failed"
+    assert proposal["structured"]["generationSections"]["core"] == "kept core"
+    assert proposal["readiness"]["checks"][0]["code"] == "CANON_GENERATION_INTERRUPTED"
+
+
+def test_canon_checkpoint_is_not_reused_for_different_brief_or_revision(client: TestClient, monkeypatch) -> None:
+    project = client.post("/api/v1/projects", json={"title": "夜巡人·正式试写", "mode": "long-form", "totalChapters": 1000}).json()
+    service = client.app.state.story_service
+    with service.db.project_write(project["id"], project["folderPath"]) as session:
+        session.add(CanonGenerationProposal(
+            id="22222222-2222-4222-8222-222222222222",
+            project_id=project["id"],
+            base_revision=1,
+            status="failed",
+            brief_json=dumps(_brief("夜巡人")),
+            content_markdown="# checkpoint",
+            structured_json=dumps({"generationSections": {"core": "old core", "systems": "old systems"}}),
+            readiness_json=dumps({}),
+            model_run_id=None,
+            revision=1,
+        ))
+        document = session.get(CanonDocument, "story-core")
+        assert document is not None
+        document.content_markdown = "# existing canon"
+        document.revision = 2
+
+    calls: list[str | None] = []
+
+    def fake_complete(_project, _role, _messages, _request_id, *, response_json=False, run_role=None):
+        calls.append(run_role)
+        if run_role in {"architect:story-blueprint-core", "architect:story-blueprint-systems"}:
+            return CANON_MARKDOWN, f"run-{run_role}"
+        if run_role == "architect:proposal-analysis":
+            return json.dumps({**_structured_entities(), **_structured_rules()}), "run-analysis"
+        if run_role == "architect:story-blueprint-repair":
+            return "## 自动补充\n世界、时代、地域、人物、主角、组织、知识边界、关系、升级条件、代价、硬规则与怪异规则均以权威台账为准。", "run-repair"
+        raise AssertionError(run_role)
+
+    monkeypatch.setattr(service.phase8, "_complete_role", fake_complete)
+
+    same_brief_new_revision = client.post(f"/api/v1/projects/{project['id']}/canon/generation-proposals", json=_brief("夜巡人"))
+    assert same_brief_new_revision.status_code == 201, same_brief_new_revision.text
+    assert "architect:story-blueprint-core" in calls
+    assert same_brief_new_revision.json()["baseRevision"] == 2
+
+    calls.clear()
+    different_brief = client.post(f"/api/v1/projects/{project['id']}/canon/generation-proposals", json=_brief("夜巡人新构想"))
+    assert different_brief.status_code == 201, different_brief.text
+    assert "architect:story-blueprint-core" in calls
+
+
+def test_canon_analysis_fails_after_two_invalid_json_attempts_and_cannot_apply(client: TestClient, monkeypatch) -> None:
+    project = client.post("/api/v1/projects", json={"title": "夜巡人·正式试写", "mode": "long-form", "totalChapters": 1000}).json()
+    service = client.app.state.story_service
+
+    def fake_complete(_project, _role, _messages, _request_id, *, response_json=False, run_role=None):
+        if run_role in {"architect:story-blueprint-core", "architect:story-blueprint-systems"}:
+            return CANON_MARKDOWN, f"run-{run_role}"
+        if run_role == "architect:proposal-analysis":
+            return "{not valid json", "run-invalid"
+        raise AssertionError(run_role)
+
+    monkeypatch.setattr(service.phase8, "_complete_role", fake_complete)
+    failed = client.post(f"/api/v1/projects/{project['id']}/canon/generation-proposals", json=_brief())
+    assert failed.status_code == 422
+    assert failed.json()["code"] == "CANON_ANALYSIS_INVALID"
+    proposal = client.get(f"/api/v1/projects/{project['id']}/canon/generation-proposals").json()[0]
+    assert proposal["status"] == "failed"
+    assert set(proposal["structured"]["generationSections"]) == {"core", "systems"}
+    assert proposal["readiness"]["checks"][0]["code"] == "CANON_ANALYSIS_INVALID"
+
+    apply_response = client.post(
+        f"/api/v1/canon/generation-proposals/{proposal['id']}/apply",
+        json={"expectedRevision": proposal["revision"]},
+    )
+    assert apply_response.status_code == 409
+    assert apply_response.json()["code"] == "CANON_PROPOSAL_NOT_PENDING"

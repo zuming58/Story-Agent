@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
@@ -8,10 +9,12 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, selectinload
 
 from .models import (
     AutomationLease,
+    AutomationDailyReport,
     AutomationPolicy,
     AutomationRun,
     AutomationRunItem,
@@ -32,14 +35,12 @@ from .schemas import (
     ChapterContractDerive,
     ChapterContractLock,
     ChapterJobCreate,
-    ChapterJobRetry,
     ChapterJobRun,
     ChapterRevisionRequest,
 )
-from .services import StoryError, dumps, loads
+from .services import StoryError, dumps, loads, token_estimate
 
 
-RUNNING_STATUSES = {"queued", "running", "cancel_requested"}
 TERMINAL_STATUSES = {"completed", "partial", "blocked", "failed", "cancelled", "missed", "interrupted"}
 MODEL_ROLES_FOR_AUTOMATION = {
     "chinese_writer",
@@ -50,17 +51,7 @@ MODEL_ROLES_FOR_AUTOMATION = {
     "reviser",
 }
 LEASE_SECONDS = 300
-MIN_MODEL_CALL_COST = 0.000001
-COMMON_TIMEZONE_FALLBACKS = {
-    "Asia/Shanghai": timezone(timedelta(hours=8)),
-    "Asia/Chongqing": timezone(timedelta(hours=8)),
-    "Asia/Hong_Kong": timezone(timedelta(hours=8)),
-    "Asia/Taipei": timezone(timedelta(hours=8)),
-    "America/New_York": timezone(timedelta(hours=-5)),
-    "America/Chicago": timezone(timedelta(hours=-6)),
-    "America/Denver": timezone(timedelta(hours=-7)),
-    "America/Los_Angeles": timezone(timedelta(hours=-8)),
-}
+MODEL_FAILURE_THRESHOLD = 2
 
 
 def _now() -> datetime:
@@ -78,12 +69,7 @@ def _as_utc(value: datetime | None) -> datetime | None:
 def _zone(name: str) -> tzinfo:
     if name.upper() == "UTC":
         return timezone.utc
-    try:
-        return ZoneInfo(name)
-    except ZoneInfoNotFoundError:
-        if name in COMMON_TIMEZONE_FALLBACKS:
-            return COMMON_TIMEZONE_FALLBACKS[name]
-        raise
+    return ZoneInfo(name)
 
 
 class Phase7Service:
@@ -91,7 +77,12 @@ class Phase7Service:
         self.service = service
         self._loop_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
-        self._running_threads: set[str] = set()
+        self._running_threads: dict[str, threading.Thread] = {}
+        self._dispatch_lock = threading.Lock()
+        self._execution_context: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+            "automation_execution_context",
+            default=None,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle and scheduler
@@ -100,7 +91,13 @@ class Phase7Service:
         now = _now()
         for project in self.service.list_projects():
             with self.service.db.project_write(project.id, project.folder_path) as session:
-                for run in session.scalars(select(AutomationRun).where(AutomationRun.status.in_(["queued", "running", "cancel_requested"]))).all():
+                lease = session.get(AutomationLease, project.id)
+                active_owner = None
+                if lease and _as_utc(lease.lease_expires_at) and _as_utc(lease.lease_expires_at) > now:
+                    active_owner = lease.owner_id
+                for run in session.scalars(select(AutomationRun).where(AutomationRun.status.in_(["running", "cancel_requested"]))).all():
+                    if active_owner and active_owner.startswith(f"automation:{run.id}:"):
+                        continue
                     run.status = "interrupted" if run.status != "cancel_requested" else "cancelled"
                     run.stop_reason = "startup_recovery"
                     run.completed_at = now
@@ -110,11 +107,13 @@ class Phase7Service:
                         AutomationRunItem.automation_run_id == run.id,
                         AutomationRunItem.status.in_(["waiting", "running"]),
                     )).all():
-                        item.status = "interrupted" if run.status == "interrupted" else "cancelled"
+                        item.status = "waiting" if run.status == "interrupted" else "cancelled"
                         item.error_code = "startup_recovery"
-                        item.completed_at = now
+                        item.completed_at = None if item.status == "waiting" else now
                         item.updated_at = now
-                session.query(AutomationLease).delete()
+                for lease in session.scalars(select(AutomationLease)).all():
+                    if _as_utc(lease.lease_expires_at) and _as_utc(lease.lease_expires_at) <= now:
+                        session.delete(lease)
         self.check_due_policies(execute_due=False)
 
     def start_scheduler(self) -> None:
@@ -126,12 +125,22 @@ class Phase7Service:
             return
         self._stop_event = asyncio.Event()
         self._loop_task = asyncio.create_task(self._scheduler_loop())
+        for project in self.service.list_projects():
+            with self.service.db.project(project.id, project.folder_path) as session:
+                queued_ids = session.scalars(select(AutomationRun.id).where(AutomationRun.status == "queued")).all()
+            for run_id in queued_ids:
+                self.dispatch_run(project.id, run_id)
 
     async def stop_scheduler(self) -> None:
         if self._stop_event is not None:
             self._stop_event.set()
         if self._loop_task is not None:
             await self._loop_task
+        self.request_running_cancellation()
+        with self._dispatch_lock:
+            threads = list(self._running_threads.values())
+        for thread in threads:
+            await asyncio.to_thread(thread.join)
         self._loop_task = None
         self._stop_event = None
 
@@ -225,7 +234,7 @@ class Phase7Service:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
             rows = session.scalars(select(AutomationRun).where(AutomationRun.project_id == project.id).order_by(AutomationRun.created_at.desc())).all()
-            return [self._run_dict(session, row, include_items=False) for row in rows]
+            return [self._run_dict(session, row, include_items=True) for row in rows]
 
     def get_run(self, project_id: str, run_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -265,12 +274,19 @@ class Phase7Service:
                 raise StoryError(409, "AUTOMATION_RUN_NOT_RESUMABLE", "Automation run cannot be resumed from its current status.")
             for item in session.scalars(select(AutomationRunItem).where(
                 AutomationRunItem.automation_run_id == run.id,
-                AutomationRunItem.status.in_(["interrupted", "failed", "cancelled", "isolated"]),
             )).all():
+                resumable = item.status in {"failed", "cancelled", "isolated"}
+                resumable = resumable or (
+                    item.status == "skipped" and item.error_code != "AUTOMATION_CHAPTER_ALREADY_COMMITTED"
+                )
+                if not resumable:
+                    continue
                 item.status = "waiting"
                 item.error_code = None
                 item.diagnostic_json = None
+                item.completed_at = None
                 item.updated_at = _now()
+            self._recount_run(session, run)
             run.status = "queued"
             run.stop_reason = None
             run.completed_at = None
@@ -289,10 +305,16 @@ class Phase7Service:
             policy = self._get_or_create_policy(session, project.id)
             if policy.daily_cost_limit is not None:
                 self.assert_required_prices(project.id)
-            catch_up = self._create_run_row(session, policy, "catch_up", missed.scheduled_local_date, None, _now())
-            missed.status = "completed"
+            catch_up = self._create_run_row(
+                session,
+                policy,
+                "catch_up",
+                missed.scheduled_local_date,
+                f"catch-up:{missed.id}",
+                _now(),
+            )
             missed.stop_reason = "catch_up_created"
-            missed.completed_at = _now()
+            missed.diagnostic_json = dumps({"catchUpRunId": catch_up.id})
             missed.updated_at = _now()
             missed.revision += 1
             session.add(self.service._audit("automation_run.catch_up_queued", "automation_run", catch_up.id, {"missedRunId": missed.id, "requestId": request_id}, request_id))
@@ -305,26 +327,81 @@ class Phase7Service:
     # ------------------------------------------------------------------
     def dispatch_run(self, project_id: str, run_id: str) -> None:
         key = f"{project_id}:{run_id}"
-        if key in self._running_threads:
-            return
-
         def worker() -> None:
-            self._running_threads.add(key)
             try:
                 self.execute_run(project_id, run_id)
             finally:
-                self._running_threads.discard(key)
+                with self._dispatch_lock:
+                    self._running_threads.pop(key, None)
 
-        threading.Thread(target=worker, name=f"story-agent-automation-{run_id[:8]}", daemon=True).start()
+        with self._dispatch_lock:
+            active = self._running_threads.get(key)
+            if active and active.is_alive():
+                return
+            thread = threading.Thread(target=worker, name=f"story-agent-automation-{run_id[:8]}", daemon=True)
+            self._running_threads[key] = thread
+            thread.start()
+
+    def request_running_cancellation(self) -> None:
+        now = _now()
+        with self._dispatch_lock:
+            local_runs = [tuple(key.split(":", 1)) for key in self._running_threads]
+        for project_id, run_id in local_runs:
+            project = self.service.get_project(project_id)
+            active_job_ids: list[str] = []
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                run = session.get(AutomationRun, run_id)
+                if run and run.status == "running":
+                    run.status = "cancel_requested"
+                    run.stop_reason = "application_shutdown"
+                    run.updated_at = now
+                    run.revision += 1
+                    active_job_ids.extend(
+                        job_id for job_id in session.scalars(
+                            select(AutomationRunItem.chapter_job_id).where(
+                                AutomationRunItem.automation_run_id == run_id,
+                                AutomationRunItem.status == "running",
+                                AutomationRunItem.chapter_job_id.is_not(None),
+                            )
+                        ).all() if job_id
+                    )
+            for job_id in active_job_ids:
+                try:
+                    self.service.phase5.cancel_chapter_job(project.id, job_id, str(uuid4()))
+                except StoryError:
+                    pass
 
     def execute_run(self, project_id: str, run_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
-        owner_id = f"automation:{run_id}"
+        owner_id = f"automation:{run_id}:{uuid4()}"
         if not self._acquire_lease(project.id, project.folder_path, owner_id):
+            with self.service.db.project(project.id, project.folder_path) as session:
+                lease = session.get(AutomationLease, project.id)
+                if lease and lease.owner_id.startswith(f"automation:{run_id}:"):
+                    return self.get_run(project.id, run_id)
             self._mark_run_terminal(project.id, project.folder_path, run_id, "blocked", "AUTOMATION_LEASE_BUSY", {"ownerId": owner_id})
             return self.get_run(project.id, run_id)
+        heartbeat_stop = threading.Event()
+
+        def keep_lease_alive() -> None:
+            while not heartbeat_stop.wait(LEASE_SECONDS / 3):
+                self._heartbeat(project.id, project.folder_path, owner_id)
+
+        heartbeat_thread = threading.Thread(
+            target=keep_lease_alive,
+            name=f"story-agent-lease-{run_id[:8]}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             self._prepare_run(project.id, project.folder_path, run_id)
+            with self.service.db.project(project.id, project.folder_path) as session:
+                current = self._get_run(session, project.id, run_id)
+                if current.status == "cancel_requested":
+                    self._mark_run_terminal(project.id, project.folder_path, run_id, "cancelled", current.stop_reason or "cancel_requested", {})
+                    return self.get_run(project.id, run_id)
+                if current.status in TERMINAL_STATUSES:
+                    return self.get_run(project.id, run_id)
             if self._run_has_daily_limit(project.id, project.folder_path, run_id):
                 self.assert_required_prices(project.id)
             while True:
@@ -337,17 +414,35 @@ class Phase7Service:
                     self._cancel_waiting_items(project.id, project.folder_path, run_id)
                     self._mark_run_terminal(project.id, project.folder_path, run_id, "cancelled", "cancel_requested", {})
                     break
-                if not self._budget_allows_next_chapter(project.id, project.folder_path, run_id):
-                    self._mark_item_terminal(project.id, project.folder_path, item.id, "skipped", "AUTOMATION_COST_LIMIT_REACHED", {})
-                    self._cancel_waiting_items(project.id, project.folder_path, run_id, status="skipped", code="AUTOMATION_COST_LIMIT_REACHED")
-                    self._mark_run_terminal(project.id, project.folder_path, run_id, "blocked", "AUTOMATION_COST_LIMIT_REACHED", {})
-                    break
                 try:
                     self._execute_item(project, run_id, item.id)
                 except StoryError as exc:
-                    self._mark_item_terminal(project.id, project.folder_path, item.id, "isolated", exc.code, {"message": exc.message, "details": exc.details})
+                    if self._run_cancel_requested(project.id, project.folder_path, run_id):
+                        self._mark_item_terminal(project.id, project.folder_path, item.id, "cancelled", "cancelled", {})
+                        self._cancel_waiting_items(project.id, project.folder_path, run_id)
+                        self._mark_run_terminal(project.id, project.folder_path, run_id, "cancelled", "cancel_requested", {})
+                        break
+                    failure_count = self._consecutive_model_failures(project.id, project.folder_path, run_id)
+                    if failure_count == 1:
+                        stop_policy = self._stop_policy(project.id, project.folder_path)
+                        run_status = "blocked" if stop_policy == "stop_on_any_failure" else "failed"
+                        self._mark_item_terminal(project.id, project.folder_path, item.id, "failed", exc.code, {"message": exc.message, "details": exc.details})
+                        self._cancel_waiting_items(project.id, project.folder_path, run_id, status="skipped", code=exc.code)
+                        self._mark_run_terminal(project.id, project.folder_path, run_id, run_status, exc.code, {
+                            "message": exc.message,
+                            "details": exc.details,
+                            "consecutiveModelFailures": failure_count,
+                            "stopPolicy": stop_policy,
+                        })
+                        break
+                    final_code = "AUTOMATION_MODEL_FAILURE_THRESHOLD" if failure_count >= MODEL_FAILURE_THRESHOLD else exc.code
+                    self._mark_item_terminal(project.id, project.folder_path, item.id, "isolated", final_code, {"message": exc.message, "details": exc.details})
                     self._cancel_waiting_items(project.id, project.folder_path, run_id, status="skipped", code=exc.code)
-                    self._mark_run_terminal(project.id, project.folder_path, run_id, "blocked", exc.code, {"message": exc.message, "details": exc.details})
+                    self._mark_run_terminal(project.id, project.folder_path, run_id, "blocked", final_code, {
+                        "message": exc.message,
+                        "details": exc.details,
+                        "consecutiveModelFailures": failure_count,
+                    })
                     break
                 except Exception as exc:
                     self._mark_item_terminal(project.id, project.folder_path, item.id, "failed", "AUTOMATION_ITEM_FAILED", {"errorType": type(exc).__name__})
@@ -355,7 +450,15 @@ class Phase7Service:
                     self._mark_run_terminal(project.id, project.folder_path, run_id, "failed", "AUTOMATION_ITEM_FAILED", {"errorType": type(exc).__name__})
                     break
             return self.get_run(project.id, run_id)
+        except StoryError as exc:
+            self._mark_run_terminal(project.id, project.folder_path, run_id, "blocked", exc.code, {"message": exc.message, "details": exc.details})
+            return self.get_run(project.id, run_id)
+        except Exception as exc:
+            self._mark_run_terminal(project.id, project.folder_path, run_id, "failed", "AUTOMATION_RUN_FAILED", {"errorType": type(exc).__name__})
+            return self.get_run(project.id, run_id)
         finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join()
             self._release_lease(project.id, project.folder_path, owner_id)
 
     def _execute_item(self, project: Any, run_id: str, item_id: str) -> None:
@@ -367,11 +470,9 @@ class Phase7Service:
             item.started_at = item.started_at or _now()
             item.updated_at = _now()
             chapter_number = item.chapter_number
-        before_run_ids = self._model_run_ids(project.id, project.folder_path)
         existing_commit = self._current_commit(project.id, project.folder_path, chapter_number)
         if existing_commit:
-            self._mark_item_committed(project.id, project.folder_path, item_id, existing_commit["id"], None, None)
-            self._update_run_costs(project.id, project.folder_path, run_id, before_run_ids)
+            self._mark_item_skipped(project.id, project.folder_path, item_id, existing_commit["id"])
             return
         contract = self._ensure_locked_contract(project, chapter_number, run_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -385,19 +486,32 @@ class Phase7Service:
             if item:
                 item.chapter_job_id = job["id"]
                 item.updated_at = _now()
-        job_state = self._advance_job_to_review(project.id, job["id"])
-        job_state = self._auto_revise_until_clear(project.id, job_state)
-        approved = self.service.phase5.approve_chapter_job(project.id, job_state["id"], ChapterApproveRequest(mode="guarded_auto", expected_job_revision=job_state["revision"]), str(uuid4()))
-        commit = self.service.phase5.commit_chapter_job(project.id, approved["id"], ChapterCommitRequest(expected_job_revision=approved["revision"]), str(uuid4()))
-        self._mark_item_committed(project.id, project.folder_path, item_id, commit["id"], contract["id"], job["id"])
-        self._update_run_costs(project.id, project.folder_path, run_id, before_run_ids)
+        token = self._execution_context.set((run_id, item_id))
+        try:
+            job_state = self._advance_job_to_review(project.id, job["id"])
+            if job_state["status"] == "completed":
+                commit = self._current_commit(project.id, project.folder_path, chapter_number)
+                if not commit:
+                    raise StoryError(409, "AUTOMATION_COMMIT_NOT_FOUND", "Completed chapter job has no current commit.")
+                self._mark_item_committed(project.id, project.folder_path, item_id, commit["id"], contract["id"], job["id"])
+                return
+            job_state = self._auto_revise_until_clear(project.id, job_state)
+            if job_state["status"] == "approved":
+                approved = job_state
+            else:
+                approved = self.service.phase5.approve_chapter_job(project.id, job_state["id"], ChapterApproveRequest(mode="guarded_auto", expected_job_revision=job_state["revision"]), str(uuid4()))
+            commit = self.service.phase5.commit_chapter_job(project.id, approved["id"], ChapterCommitRequest(expected_job_revision=approved["revision"]), str(uuid4()))
+            self._mark_item_committed(project.id, project.folder_path, item_id, commit["id"], contract["id"], job["id"])
+        finally:
+            self._sync_run_costs(project.id, project.folder_path, run_id)
+            self._execution_context.reset(token)
 
     def _advance_job_to_review(self, project_id: str, job_id: str) -> dict[str, Any]:
         job = self.service.phase5.get_chapter_job(project_id, job_id)
-        if job["status"] in {"queued", "failed", "interrupted", "cancelled"}:
-            if job["status"] != "queued":
-                job = self.service.phase5.retry_chapter_job(project_id, job_id, ChapterJobRetry(reason="automation resume"), str(uuid4()))
+        if job["status"] == "queued":
             job = self.service.phase5.run_chapter_job(project_id, job_id, ChapterJobRun(), str(uuid4()))
+        elif job["status"] in {"failed", "interrupted", "cancelled"}:
+            job = self.service.phase5.resume_chapter_job(project_id, job_id, str(uuid4()))
         if job["status"] not in {"human_review", "approved", "completed"}:
             raise StoryError(409, "AUTOMATION_CHAPTER_BLOCKED", "Chapter pipeline did not reach review.", {"jobStatus": job["status"]})
         if job["status"] == "completed":
@@ -442,17 +556,26 @@ class Phase7Service:
         *,
         status: str = "queued",
     ) -> AutomationRun:
-        run = AutomationRun(
-            id=str(uuid4()),
-            project_id=policy.project_id,
-            policy_id=policy.project_id,
-            scheduled_local_date=scheduled_date,
-            trigger=trigger,
-            status=status,
-            idempotency_key=idempotency_key,
-            created_at=now,
-            updated_at=now,
-        )
+        run_id = str(uuid4())
+        values = {
+            "id": run_id,
+            "project_id": policy.project_id,
+            "policy_id": policy.project_id,
+            "scheduled_local_date": scheduled_date,
+            "trigger": trigger,
+            "status": status,
+            "idempotency_key": idempotency_key,
+            "planned_count": 0,
+            "succeeded_count": 0,
+            "isolated_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost": 0.0,
+            "revision": 1,
+            "created_at": now,
+            "updated_at": now,
+        }
         if trigger == "scheduled":
             existing = session.scalar(select(AutomationRun).where(
                 AutomationRun.project_id == policy.project_id,
@@ -468,6 +591,23 @@ class Phase7Service:
             ))
             if existing:
                 return existing
+        if trigger == "scheduled" or idempotency_key:
+            result = session.execute(sqlite_insert(AutomationRun).values(**values).on_conflict_do_nothing())
+            if result.rowcount == 0:
+                query = select(AutomationRun).where(AutomationRun.project_id == policy.project_id)
+                if trigger == "scheduled":
+                    query = query.where(
+                        AutomationRun.scheduled_local_date == scheduled_date,
+                        AutomationRun.trigger == "scheduled",
+                    )
+                else:
+                    query = query.where(AutomationRun.idempotency_key == idempotency_key)
+                existing = session.scalar(query)
+                if existing:
+                    return existing
+                raise StoryError(409, "AUTOMATION_RUN_CONFLICT", "Automation run uniqueness conflict.")
+            return session.get(AutomationRun, run_id) or AutomationRun(**values)
+        run = AutomationRun(**values)
         session.add(run)
         session.flush()
         return run
@@ -529,8 +669,8 @@ class Phase7Service:
                 item.completed_at = _now()
                 item.updated_at = _now()
             run = session.get(AutomationRun, item.automation_run_id) if item else None
-            if run and status in {"blocked", "failed", "isolated"}:
-                run.isolated_count += 1
+            if run:
+                self._recount_run(session, run)
 
     def _mark_item_committed(self, project_id: str, folder_path: str, item_id: str, commit_id: str, contract_id: str | None, job_id: str | None) -> None:
         with self.service.db.project_write(project_id, folder_path) as session:
@@ -545,13 +685,28 @@ class Phase7Service:
             item.updated_at = _now()
             run = session.get(AutomationRun, item.automation_run_id)
             if run:
-                run.succeeded_count += 1
+                self._recount_run(session, run)
                 run.updated_at = _now()
+
+    def _mark_item_skipped(self, project_id: str, folder_path: str, item_id: str, commit_id: str) -> None:
+        with self.service.db.project_write(project_id, folder_path) as session:
+            item = session.get(AutomationRunItem, item_id)
+            if not item:
+                return
+            item.status = "skipped"
+            item.chapter_commit_id = commit_id
+            item.error_code = "AUTOMATION_CHAPTER_ALREADY_COMMITTED"
+            item.completed_at = _now()
+            item.updated_at = _now()
+            run = session.get(AutomationRun, item.automation_run_id)
+            if run:
+                self._recount_run(session, run)
 
     def _finish_run_from_items(self, project_id: str, folder_path: str, run_id: str) -> None:
         with self.service.db.project_write(project_id, folder_path) as session:
             run = self._get_run(session, project_id, run_id)
             items = session.scalars(select(AutomationRunItem).where(AutomationRunItem.automation_run_id == run.id)).all()
+            self._recount_run(session, run, items)
             if any(item.status in {"blocked", "failed", "isolated"} for item in items):
                 run.status = "partial" if any(item.status == "committed" for item in items) else "blocked"
             else:
@@ -559,6 +714,7 @@ class Phase7Service:
             run.completed_at = _now()
             run.updated_at = _now()
             run.revision += 1
+        self._refresh_daily_report(project_id, folder_path, run_id)
 
     def _mark_run_terminal(self, project_id: str, folder_path: str, run_id: str, status: str, reason: str, diagnostic: dict[str, Any]) -> None:
         with self.service.db.project_write(project_id, folder_path) as session:
@@ -569,6 +725,7 @@ class Phase7Service:
             run.completed_at = _now()
             run.updated_at = _now()
             run.revision += 1
+        self._refresh_daily_report(project_id, folder_path, run_id)
 
     def _cancel_waiting_items(self, project_id: str, folder_path: str, run_id: str, *, status: str = "cancelled", code: str = "cancelled") -> None:
         with self.service.db.project_write(project_id, folder_path) as session:
@@ -618,6 +775,18 @@ class Phase7Service:
         return self.service.phase5.lock_chapter_contract(project.id, derived["id"], ChapterContractLock(expected_revision=derived["revision"]), str(uuid4()))
 
     def _ensure_job(self, project: Any, contract_id: str, run_id: str, chapter_number: int) -> dict[str, Any]:
+        with self.service.db.project(project.id, project.folder_path) as session:
+            existing = session.scalar(
+                select(ChapterJob)
+                .where(
+                    ChapterJob.project_id == project.id,
+                    ChapterJob.chapter_contract_id == contract_id,
+                    ChapterJob.status != "completed",
+                )
+                .order_by(ChapterJob.updated_at.desc())
+            )
+            if existing:
+                return self.service.phase5._job_dict(existing, session.get(ChapterContract, existing.chapter_contract_id))
         key = f"automation:{run_id}:chapter:{chapter_number}"
         created = self.service.phase5.create_chapter_job(project.id, ChapterJobCreate(chapter_contract_id=contract_id, idempotency_key=key), str(uuid4()))
         return created
@@ -627,70 +796,184 @@ class Phase7Service:
     # ------------------------------------------------------------------
     def assert_required_prices(self, project_id: str) -> None:
         missing: list[str] = []
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            policy = session.get(AutomationPolicy, project.id)
+            required_roles = set(MODEL_ROLES_FOR_AUTOMATION)
+            if policy and policy.max_revision_rounds == 0:
+                required_roles.discard("reviser")
         with self.service.db.catalog() as session:
             bindings = session.scalars(
                 select(ModelRoleBinding)
-                .where(ModelRoleBinding.role.in_(MODEL_ROLES_FOR_AUTOMATION))
+                .where(ModelRoleBinding.role.in_(required_roles))
                 .options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider))
             ).all()
             by_role = {binding.role: binding for binding in bindings}
-            for role in sorted(MODEL_ROLES_FOR_AUTOMATION):
+            for role in sorted(required_roles):
                 model = by_role.get(role).model if by_role.get(role) else None
                 if model is None or model.input_price_per_million is None or model.output_price_per_million is None:
                     missing.append(role)
         if missing:
             raise StoryError(409, "AUTOMATION_MODEL_PRICE_REQUIRED", "Automation requires input/output prices for every required model role.", {"roles": missing})
 
-    def _budget_allows_next_chapter(self, project_id: str, folder_path: str, run_id: str) -> bool:
-        with self.service.db.project(project_id, folder_path) as session:
-            policy = session.get(AutomationPolicy, project_id)
-            run = session.get(AutomationRun, run_id)
-            if not policy or policy.daily_cost_limit is None or not run:
-                return True
-            return run.estimated_cost + MIN_MODEL_CALL_COST <= policy.daily_cost_limit
+    def current_execution_context(self) -> tuple[str, str] | None:
+        return self._execution_context.get()
+
+    def before_model_call(self, project_id: str, role: str, messages: list[dict[str, str]], model_id: str) -> None:
+        context = self.current_execution_context()
+        if context is None:
+            return
+        run_id, item_id = context
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            policy = session.get(AutomationPolicy, project.id)
+            run = self._get_run(session, project.id, run_id)
+            item = session.get(AutomationRunItem, item_id)
+            if run.status == "cancel_requested":
+                raise StoryError(409, "AUTOMATION_RUN_CANCELLED", "Automation run cancellation was requested.")
+            failures = session.scalars(
+                select(ModelRun.status).where(ModelRun.automation_run_id == run.id).order_by(ModelRun.started_at.desc())
+            ).all()
+            consecutive_failures = 0
+            for status in failures:
+                if status == "failed":
+                    consecutive_failures += 1
+                elif status == "succeeded":
+                    break
+            if consecutive_failures >= MODEL_FAILURE_THRESHOLD:
+                raise StoryError(409, "AUTOMATION_MODEL_FAILURE_THRESHOLD", "Consecutive model failure threshold reached.", {
+                    "consecutiveFailures": consecutive_failures,
+                    "threshold": MODEL_FAILURE_THRESHOLD,
+                })
+            if not policy or policy.daily_cost_limit is None:
+                return
+            if not item or item.automation_run_id != run.id:
+                raise StoryError(409, "AUTOMATION_RUN_ITEM_NOT_FOUND", "Automation run item not found.")
+            daily_spend = sum(
+                session.scalars(
+                    select(ModelRun.estimated_cost).where(
+                        ModelRun.automation_run_id.in_(
+                            select(AutomationRun.id).where(
+                                AutomationRun.project_id == project.id,
+                                AutomationRun.scheduled_local_date == run.scheduled_local_date,
+                            )
+                        )
+                    )
+                ).all()
+            )
+        with self.service.db.catalog() as session:
+            model = session.get(ModelConfig, model_id)
+            if not model or model.input_price_per_million is None or model.output_price_per_million is None:
+                raise StoryError(409, "AUTOMATION_MODEL_PRICE_REQUIRED", "Automation model pricing is required.", {"role": role})
+            prompt_text = dumps(messages)
+            predicted_prompt_tokens = max(token_estimate(prompt_text), len(prompt_text.encode("utf-8")))
+            predicted = (
+                predicted_prompt_tokens * model.input_price_per_million
+                + model.max_output_tokens * model.output_price_per_million
+            ) / 1_000_000
+        if daily_spend + predicted > policy.daily_cost_limit:
+            raise StoryError(409, "AUTOMATION_COST_LIMIT_REACHED", "Daily automation cost limit would be exceeded.", {
+                "dailyCost": daily_spend,
+                "predictedCallCost": predicted,
+                "dailyCostLimit": policy.daily_cost_limit,
+                "role": role,
+            })
 
     def _run_has_daily_limit(self, project_id: str, folder_path: str, run_id: str) -> bool:
         with self.service.db.project(project_id, folder_path) as session:
             policy = session.get(AutomationPolicy, project_id)
             return bool(policy and policy.daily_cost_limit is not None)
 
-    def _model_run_ids(self, project_id: str, folder_path: str) -> set[str]:
+    def _stop_policy(self, project_id: str, folder_path: str) -> str:
         with self.service.db.project(project_id, folder_path) as session:
-            return set(session.scalars(select(ModelRun.id)).all())
+            policy = session.get(AutomationPolicy, project_id)
+            return policy.stop_policy if policy else "stop_on_blocking"
 
-    def _update_run_costs(self, project_id: str, folder_path: str, run_id: str, before_ids: set[str]) -> None:
-        prices: dict[str, tuple[float, float]] = {}
-        with self.service.db.catalog() as session:
-            rows = session.scalars(select(ModelConfig)).all()
-            prices = {
-                row.id: (row.input_price_per_million or 0.0, row.output_price_per_million or 0.0)
-                for row in rows
-            }
+    def _sync_run_costs(self, project_id: str, folder_path: str, run_id: str) -> None:
         with self.service.db.project_write(project_id, folder_path) as session:
-            new_runs = session.scalars(select(ModelRun).where(ModelRun.id.not_in(before_ids))).all()
-            prompt = sum(item.prompt_tokens or 0 for item in new_runs)
-            completion = sum(item.completion_tokens or 0 for item in new_runs)
-            total = sum(item.total_tokens or 0 for item in new_runs)
-            cost = 0.0
-            for item in new_runs:
-                input_price, output_price = prices.get(item.model_config_id or "", (0.0, 0.0))
-                cost += ((item.prompt_tokens or 0) * input_price + (item.completion_tokens or 0) * output_price) / 1_000_000
             run = session.get(AutomationRun, run_id)
-            if run:
-                run.prompt_tokens += prompt
-                run.completion_tokens += completion
-                run.total_tokens += total
-                run.estimated_cost += cost
-                run.updated_at = _now()
-            current_item = session.scalar(select(AutomationRunItem).where(
-                AutomationRunItem.automation_run_id == run_id,
-                AutomationRunItem.status == "committed",
-            ).order_by(AutomationRunItem.completed_at.desc()))
-            if current_item:
-                current_item.prompt_tokens += prompt
-                current_item.completion_tokens += completion
-                current_item.total_tokens += total
-                current_item.estimated_cost += cost
+            if not run:
+                return
+            model_runs = session.scalars(select(ModelRun).where(ModelRun.automation_run_id == run_id)).all()
+            run.prompt_tokens = sum(item.prompt_tokens or 0 for item in model_runs)
+            run.completion_tokens = sum(item.completion_tokens or 0 for item in model_runs)
+            run.total_tokens = sum(item.total_tokens or 0 for item in model_runs)
+            run.estimated_cost = sum(item.estimated_cost or 0.0 for item in model_runs)
+            run.updated_at = _now()
+            for item in session.scalars(select(AutomationRunItem).where(AutomationRunItem.automation_run_id == run_id)).all():
+                item_runs = [model_run for model_run in model_runs if model_run.automation_run_item_id == item.id]
+                item.prompt_tokens = sum(model_run.prompt_tokens or 0 for model_run in item_runs)
+                item.completion_tokens = sum(model_run.completion_tokens or 0 for model_run in item_runs)
+                item.total_tokens = sum(model_run.total_tokens or 0 for model_run in item_runs)
+                item.estimated_cost = sum(model_run.estimated_cost or 0.0 for model_run in item_runs)
+                item.updated_at = _now()
+
+    def _consecutive_model_failures(self, project_id: str, folder_path: str, run_id: str) -> int:
+        with self.service.db.project(project_id, folder_path) as session:
+            statuses = session.scalars(
+                select(ModelRun.status).where(ModelRun.automation_run_id == run_id).order_by(ModelRun.started_at.desc())
+            ).all()
+            count = 0
+            for status in statuses:
+                if status == "failed":
+                    count += 1
+                elif status == "succeeded":
+                    break
+            return count
+
+    def _recount_run(self, session: Session, run: AutomationRun, items: list[AutomationRunItem] | None = None) -> None:
+        rows = items if items is not None else list(session.scalars(
+            select(AutomationRunItem).where(AutomationRunItem.automation_run_id == run.id)
+        ).all())
+        run.succeeded_count = sum(1 for item in rows if item.status == "committed")
+        run.isolated_count = sum(1 for item in rows if item.status in {"isolated", "blocked", "failed"})
+
+    def get_daily_reports(self, project_id: str) -> list[dict[str, Any]]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            reports = session.scalars(
+                select(AutomationDailyReport).where(AutomationDailyReport.project_id == project.id).order_by(AutomationDailyReport.local_date.desc())
+            ).all()
+            return [self._daily_report_dict(report) for report in reports]
+
+    def _refresh_daily_report(self, project_id: str, folder_path: str, run_id: str) -> None:
+        self._sync_run_costs(project_id, folder_path, run_id)
+        with self.service.db.project_write(project_id, folder_path) as session:
+            run = self._get_run(session, project_id, run_id)
+            policy = session.get(AutomationPolicy, project_id)
+            runs = session.scalars(select(AutomationRun).where(
+                AutomationRun.project_id == project_id,
+                AutomationRun.scheduled_local_date == run.scheduled_local_date,
+            )).all()
+            report = session.scalar(select(AutomationDailyReport).where(
+                AutomationDailyReport.project_id == project_id,
+                AutomationDailyReport.local_date == run.scheduled_local_date,
+            ))
+            now = _now()
+            if report is None:
+                report = AutomationDailyReport(
+                    id=str(uuid4()),
+                    project_id=project_id,
+                    local_date=run.scheduled_local_date,
+                    timezone=policy.timezone if policy else "UTC",
+                    generated_at=now,
+                    updated_at=now,
+                )
+                session.add(report)
+            summary: dict[str, int] = {}
+            for daily_run in runs:
+                summary[daily_run.status] = summary.get(daily_run.status, 0) + 1
+            report.run_count = len(runs)
+            report.planned_count = sum(daily_run.planned_count for daily_run in runs)
+            report.succeeded_count = sum(daily_run.succeeded_count for daily_run in runs)
+            report.isolated_count = sum(daily_run.isolated_count for daily_run in runs)
+            report.prompt_tokens = sum(daily_run.prompt_tokens for daily_run in runs)
+            report.completion_tokens = sum(daily_run.completion_tokens for daily_run in runs)
+            report.total_tokens = sum(daily_run.total_tokens for daily_run in runs)
+            report.estimated_cost = sum(daily_run.estimated_cost for daily_run in runs)
+            report.status_summary_json = dumps(summary)
+            report.generated_at = now
+            report.updated_at = now
 
     # ------------------------------------------------------------------
     # Lease and time helpers
@@ -774,6 +1057,14 @@ class Phase7Service:
         if include_items:
             rows = session.scalars(select(AutomationRunItem).where(AutomationRunItem.automation_run_id == item.id).order_by(AutomationRunItem.sequence_number.asc())).all()
             items = [self._item_dict(row) for row in rows]
+        policy = session.get(AutomationPolicy, item.project_id)
+        actions: list[str] = []
+        if item.status not in TERMINAL_STATUSES:
+            actions.append("cancel")
+        if item.status in {"interrupted", "partial", "blocked", "failed", "cancelled"}:
+            actions.append("resume")
+        if item.status == "missed":
+            actions.append("catch_up")
         return {
             "id": item.id,
             "projectId": item.project_id,
@@ -799,6 +1090,27 @@ class Phase7Service:
             "completedAt": item.completed_at,
             "updatedAt": item.updated_at,
             "items": items,
+            "availableActions": actions,
+            "nextRunAt": policy.next_run_at if policy else None,
+        }
+
+    def _daily_report_dict(self, item: AutomationDailyReport) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "projectId": item.project_id,
+            "localDate": item.local_date,
+            "timezone": item.timezone,
+            "runCount": item.run_count,
+            "plannedCount": item.planned_count,
+            "succeededCount": item.succeeded_count,
+            "isolatedCount": item.isolated_count,
+            "promptTokens": item.prompt_tokens,
+            "completionTokens": item.completion_tokens,
+            "totalTokens": item.total_tokens,
+            "estimatedCost": item.estimated_cost,
+            "statusSummary": loads(item.status_summary_json),
+            "generatedAt": item.generated_at,
+            "updatedAt": item.updated_at,
         }
 
     def _item_dict(self, item: AutomationRunItem) -> dict[str, Any]:

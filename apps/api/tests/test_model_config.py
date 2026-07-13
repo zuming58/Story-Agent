@@ -137,6 +137,26 @@ def test_models_and_role_bindings_protect_provider_delete(client: TestClient) ->
     assert {item["role"] for item in roles} >= {"architect", "planner", "chinese_writer", "embedding"}
 
 
+def test_model_price_database_guards_reject_negative_values(client: TestClient, data_dir: Path) -> None:
+    provider = client.post("/api/v1/model-providers", json={
+        "name": "Priced Provider",
+        "baseUrl": "https://api.example.test",
+    }).json()
+    model = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={
+        "modelId": "priced-model",
+        "displayName": "Priced Model",
+        "inputPricePerMillion": 1.0,
+        "outputPricePerMillion": 2.0,
+    }).json()
+    with sqlite3.connect(data_dir / "catalog.db") as db:
+        try:
+            db.execute("update model_configs set input_price_per_million = -1 where id = ?", (model["id"],))
+        except sqlite3.IntegrityError as exc:
+            assert "non-negative" in str(exc)
+        else:
+            raise AssertionError("negative model pricing bypassed the database guard")
+
+
 def test_deleting_unused_provider_clears_secret_reference(client: TestClient, data_dir: Path) -> None:
     created = client.post("/api/v1/model-providers", json={
         "name": "临时 Provider",

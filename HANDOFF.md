@@ -1,3 +1,50 @@
+# Story Agent 第七阶段 GPT-5.6 自审修复
+
+更新时间：2026-07-13
+分支：`agent/automation-foundation`
+审计基线：`86c849c`
+原实现提交：`78f60d6`
+原交接提交：`fc87f54`
+审计修复提交：待本轮提交后以分支 HEAD 为准
+
+## 自审发现并修复
+
+- 修复未完成 Phase 5 job 未被复用的问题。自动化现在优先复用同一锁定契约下的未完成 job；已有候选稿时从 extraction/quality 阶段恢复，不重复调用 writer。
+- 修复 commit 失败或应用中断后恢复会重复付费的问题。Phase 5 新增持久候选稿恢复入口，并复用已完成的 extraction 和 reviewer 结果。
+- 修复费用串账问题。`ModelRun` 现在持久关联 `automation_run_id` 和 `automation_run_item_id`，run/item 费用由关联记录精确汇总。
+- 修复每日费用上限只检查当前 run 的问题。预算改为同一作品、同一本地日期的全部 run 累计，并在每次模型调用前按 prompt 估算和最大输出 token 做保守预测。
+- 修复模型失败未进入费用/故障统计的问题。模型调用记录持久化 `estimated_cost`，连续模型故障阈值为 2；第一次失败可恢复，第二次阻断。
+- 修复 `stopPolicy` 只存储不生效的问题。`stop_on_blocking` 与 `stop_on_any_failure` 现在会产生不同的首次失败状态。
+- 修复重复 dispatch 的并发窗口和 scheduled/idempotency 并发冲突。进程内 dispatch 使用锁，数据库使用 SQLite `ON CONFLICT DO NOTHING` 和唯一索引原子去重。
+- 修复租约恢复问题。启动时只清理已过期租约，不再删除仍有效的其他进程租约；同一 run 的重复执行也使用唯一 owner 防止并发。
+- 修复应用关闭时仅停 scheduler、不停正在运行任务的问题。shutdown 会请求 run 和当前 ChapterJob 取消，并等待模型边界安全收敛后再关闭数据库。
+- 修复 queued run 重启后不恢复的问题。scheduler 启动时重新分发持久化 queued run；running run 收敛为 interrupted，item 返回 waiting，等待明确 resume。
+- 修复已有正式章节被计为 committed/succeeded 的问题。现在标记 `skipped`，并保留 current commit 引用。
+- 新增 `automation_daily_reports` 日报表和 `GET /api/v1/projects/{project_id}/automation/reports`，汇总每日 run、章节、token、费用和状态。
+- Run API 新增 `availableActions` 与 `nextRunAt`，供后续 UI 判断 cancel/resume/catch-up。
+- 新增 catalog 迁移 `0004_model_pricing_guards`，使用 SQLite trigger 强制模型价格非负。
+- 新增 project 迁移 `0009_automation_audit_fixes`，加入 ModelRun 自动化关联、估算费用和日报表。
+- 新增 `tzdata` 依赖，Windows 使用真实 IANA timezone/DST 数据，不再使用固定偏移近似。
+- 备份恢复 remap 已覆盖 `automation_daily_reports`；ModelRun 的 run/item 关联保留在同一项目数据库中。
+
+## 审计测试覆盖
+
+- Phase 7 专项从 6 项扩展为 13 项：策略 revision、手动幂等、guarded commit、模型缺价、missed/catch-up、startup recovery、备份恢复、候选稿复用、每日累计费用、首章失败隔离、租约与重复 dispatch、两章串行新快照、跨作品隔离、连续模型故障阈值。
+- Model config 新增数据库层负价格防绕过测试。
+- 自动化测试继续只使用内存 SecretStore 和本地假 OpenAI 服务，不调用真实付费模型。
+
+最终验证：
+
+- `npm run build`：通过；仅保留既有 Vite chunk-size warning。
+- `npm run test`：通过；API `90 passed`，Web `3 files / 9 tests passed`；最终后端复验 `91 passed`。
+- `npm run test:e2e`：Playwright `10 passed`。
+
+## 未完成与边界
+
+- 未修改 `apps/web/**`，自动托管 UI 仍不属于本分支。
+- 应用关闭后不提供 Windows 后台服务；下次启动按 missed/queued/interrupted 规则恢复。
+- 未开发第八阶段、短篇策略、短剧、外部发布或 Windows 打包。
+
 # Story Agent 第七阶段交接
 
 更新时间：2026-07-13
@@ -80,7 +127,7 @@ Run item status：
 - `failed`
 - `cancelled`
 - `skipped`
-- `interrupted`
+- `isolated`
 
 ## 测试结果
 

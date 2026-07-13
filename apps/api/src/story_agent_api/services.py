@@ -294,6 +294,8 @@ class CatalogModelSnapshot:
         self.max_output_tokens = model.max_output_tokens
         self.supports_reasoning = model.supports_reasoning
         self.is_enabled = model.is_enabled
+        self.input_price_per_million = model.input_price_per_million
+        self.output_price_per_million = model.output_price_per_million
 
 
 class StoryService:
@@ -1172,6 +1174,7 @@ class StoryService:
                         "automation_runs",
                         "automation_run_items",
                         "automation_leases",
+                        "automation_daily_reports",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
@@ -1697,6 +1700,18 @@ class StoryService:
     def _complete_model_run_success(self, project_id: str, folder_path: str, session_id: str, run_id: str, content: str, result: Any, started: float, *, create_message: bool = True, diagnostic: dict[str, Any] | None = None) -> dict[str, Any]:
         now = utc_now()
         duration = int((time.perf_counter() - started) * 1000)
+        with self.db.project(project_id, folder_path) as read_session:
+            current_run = read_session.get(ModelRun, run_id)
+            model_config_id = current_run.model_config_id if current_run else None
+        estimated_cost = 0.0
+        if model_config_id:
+            with self.db.catalog() as catalog_session:
+                model_config = catalog_session.get(ModelConfig, model_config_id)
+                if model_config:
+                    estimated_cost = (
+                        ((result.prompt_tokens or 0) * (model_config.input_price_per_million or 0.0))
+                        + ((result.completion_tokens or 0) * (model_config.output_price_per_million or 0.0))
+                    ) / 1_000_000
         with self.db.project_write(project_id, folder_path) as session:
             run = session.get(ModelRun, run_id)
             if not run:
@@ -1709,6 +1724,7 @@ class StoryService:
             run.prompt_tokens = result.prompt_tokens
             run.completion_tokens = result.completion_tokens
             run.total_tokens = result.total_tokens
+            run.estimated_cost = estimated_cost
             run.retry_count = getattr(result, "retry_count", run.retry_count)
             run.duration_ms = duration
             if result.actual_model:
@@ -1866,10 +1882,13 @@ class StoryService:
             "providerName": item.provider_name,
             "modelConfigId": item.model_config_id,
             "modelId": item.model_id,
+            "automationRunId": item.automation_run_id,
+            "automationRunItemId": item.automation_run_item_id,
             "status": item.status,
             "promptTokens": item.prompt_tokens,
             "completionTokens": item.completion_tokens,
             "totalTokens": item.total_tokens,
+            "estimatedCost": item.estimated_cost,
             "durationMs": item.duration_ms,
             "errorCode": item.error_code,
             "diagnostic": loads(item.diagnostic_json) if item.diagnostic_json else None,

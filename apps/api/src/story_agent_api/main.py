@@ -20,6 +20,7 @@ from .schemas import (
     AuditEventOut,
     AutomationPolicyOut,
     AutomationPolicyUpdate,
+    AutomationDailyReportOut,
     AutomationRunCreate,
     AutomationRunOut,
     CanonAnalyzeRequest,
@@ -385,6 +386,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/automation/runs", response_model=list[AutomationRunOut])
     def list_automation_runs(project_id: str) -> object:
         return service.phase7.list_runs(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/automation/reports", response_model=list[AutomationDailyReportOut])
+    def list_automation_reports(project_id: str) -> object:
+        return service.phase7.get_daily_reports(project_id)
 
     @app.get("/api/v1/projects/{project_id}/automation/runs/{run_id}", response_model=AutomationRunOut)
     def get_automation_run(project_id: str, run_id: str) -> object:

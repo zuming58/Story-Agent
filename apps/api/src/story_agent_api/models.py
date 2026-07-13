@@ -180,10 +180,13 @@ class ModelRun(ProjectBase):
     provider_name: Mapped[str] = mapped_column(String(160), default="")
     model_config_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     model_id: Mapped[str] = mapped_column(String(200), default="")
+    automation_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    automation_run_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default="running", index=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -795,3 +798,26 @@ class AutomationLease(ProjectBase):
     lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class AutomationDailyReport(ProjectBase):
+    __tablename__ = "automation_daily_reports"
+    __table_args__ = (
+        Index("uq_automation_daily_reports_date", "project_id", "local_date", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    local_date: Mapped[str] = mapped_column(String(10), index=True)
+    timezone: Mapped[str] = mapped_column(String(80), default="UTC")
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    planned_count: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded_count: Mapped[int] = mapped_column(Integer, default=0)
+    isolated_count: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    status_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

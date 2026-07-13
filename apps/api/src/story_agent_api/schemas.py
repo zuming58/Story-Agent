@@ -157,10 +157,13 @@ class ModelRunOut(ApiModel):
     provider_name: str
     model_config_id: str | None
     model_id: str
+    automation_run_id: str | None = None
+    automation_run_item_id: str | None = None
     status: str
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    estimated_cost: float = 0.0
     duration_ms: int | None
     error_code: str | None
     diagnostic: dict[str, Any] | None = None
@@ -882,3 +885,23 @@ class AutomationRunOut(ApiModel):
     completed_at: datetime | None = None
     updated_at: datetime
     items: list[AutomationRunItemOut] = Field(default_factory=list)
+    available_actions: list[str] = Field(default_factory=list)
+    next_run_at: datetime | None = None
+
+
+class AutomationDailyReportOut(ApiModel):
+    id: str
+    project_id: str
+    local_date: str
+    timezone: str
+    run_count: int
+    planned_count: int
+    succeeded_count: int
+    isolated_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost: float
+    status_summary: dict[str, int]
+    generated_at: datetime
+    updated_at: datetime

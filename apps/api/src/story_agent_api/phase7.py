@@ -589,7 +589,7 @@ class Phase7Service:
             run.revision += 1
             run.updated_at = _now()
             session.add(self.service._audit("automation_run.resumed", "automation_run", run.id, {"requestId": request_id}, request_id))
-        self.dispatch_run(project.id, run_id)
+        self.dispatch_run(project.id, run_id, redispatch_if_active=True)
         return self.get_run(project.id, run_id)
 
     def catch_up_run(self, project_id: str, run_id: str, request_id: str) -> dict[str, Any]:
@@ -630,7 +630,7 @@ class Phase7Service:
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
-    def dispatch_run(self, project_id: str, run_id: str) -> None:
+    def dispatch_run(self, project_id: str, run_id: str, *, redispatch_if_active: bool = False) -> None:
         key = f"{project_id}:{run_id}"
         def worker() -> None:
             try:
@@ -642,6 +642,8 @@ class Phase7Service:
         with self._dispatch_lock:
             active = self._running_threads.get(key)
             if active and active.is_alive():
+                if not redispatch_if_active:
+                    return
                 if key not in self._pending_dispatches:
                     self._pending_dispatches.add(key)
 
@@ -649,7 +651,12 @@ class Phase7Service:
                         previous.join()
                         with self._dispatch_lock:
                             self._pending_dispatches.discard(key)
-                        self.dispatch_run(project_id, run_id)
+                        try:
+                            current = self.get_run(project_id, run_id)
+                        except Exception:
+                            return
+                        if current["status"] == "queued":
+                            self.dispatch_run(project_id, run_id)
 
                     threading.Thread(
                         target=delayed_dispatch,

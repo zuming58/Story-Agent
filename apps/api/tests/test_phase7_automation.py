@@ -775,3 +775,50 @@ def test_manual_resume_starts_a_new_model_failure_window(client: TestClient, dem
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_resume_during_worker_cleanup_redispatches_once(client: TestClient, monkeypatch) -> None:
+    service = client.app.state.story_service
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    call_lock = threading.Lock()
+    calls = 0
+
+    def fake_execute(_project_id: str, _run_id: str) -> dict:
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_finished.set()
+        return {"status": "queued"}
+
+    monkeypatch.setattr(service.phase7, "execute_run", fake_execute)
+    monkeypatch.setattr(service.phase7, "get_run", lambda _project_id, _run_id: {"status": "queued"})
+
+    service.phase7.dispatch_run("project-race", "run-race")
+    assert first_started.wait(timeout=5)
+
+    # Ordinary scheduler duplicates are ignored; two explicit resume requests
+    # still create only one delayed redispatch.
+    service.phase7.dispatch_run("project-race", "run-race")
+    service.phase7.dispatch_run("project-race", "run-race", redispatch_if_active=True)
+    service.phase7.dispatch_run("project-race", "run-race", redispatch_if_active=True)
+    release_first.set()
+
+    assert second_finished.wait(timeout=5)
+    for _ in range(100):
+        with service.phase7._dispatch_lock:
+            active = service.phase7._running_threads.get("project-race:run-race")
+            pending = "project-race:run-race" in service.phase7._pending_dispatches
+        if not pending and (active is None or not active.is_alive()):
+            break
+        import time
+
+        time.sleep(0.01)
+    assert calls == 2
+    assert pending is False

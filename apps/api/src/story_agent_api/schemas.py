@@ -261,6 +261,8 @@ class ModelProviderOut(ApiModel):
     is_enabled: bool
     has_api_key: bool
     api_key_preview: str | None = None
+    last_test_status: str | None = None
+    last_tested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -836,6 +838,7 @@ class AutomationPolicyOut(ApiModel):
 
 class AutomationRunCreate(ApiModel):
     idempotency_key: str | None = Field(default=None, max_length=120)
+    chapter_count: Literal[1, 3, 5] | None = None
 
 
 class AutomationRunItemOut(ApiModel):
@@ -868,6 +871,7 @@ class AutomationRunOut(ApiModel):
     trigger: str
     status: str
     idempotency_key: str | None = None
+    requested_chapter_count: int | None = None
     start_chapter: int | None = None
     end_chapter: int | None = None
     planned_count: int
@@ -905,3 +909,22 @@ class AutomationDailyReportOut(ApiModel):
     status_summary: dict[str, int]
     generated_at: datetime
     updated_at: datetime
+
+
+class TrialReadinessCheckOut(ApiModel):
+    code: str
+    status: Literal["ready", "warning", "blocked"]
+    title: str
+    detail: str
+    action_path: str | None = None
+    chapter_number: int | None = None
+
+
+class TrialReadinessOut(ApiModel):
+    project_id: str
+    chapter_count: Literal[1, 3, 5]
+    start_chapter: int
+    end_chapter: int
+    ready: bool
+    max_safe_chapter_count: int
+    checks: list[TrialReadinessCheckOut]

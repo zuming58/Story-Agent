@@ -4,8 +4,13 @@ import type {
   AgentStreamEvent,
   ApiErrorShape,
   AuditEvent,
+  AutomationDailyReport,
+  AutomationPolicy,
+  AutomationRun,
   BackupRecord,
   BackupManifest,
+  CanonChangeRequest,
+  CanonWorkspace,
   ChapterCommit,
   ChapterContract,
   ChapterDraft,
@@ -23,6 +28,8 @@ import type {
   QualityFinding,
   QualityReport,
   StoryPlan,
+  TrialReadiness,
+  TrialRunSize,
 } from "../types";
 
 export class ApiClientError extends Error {
@@ -163,6 +170,8 @@ export const api = {
     maxOutputTokens: number;
     supportsReasoning: boolean;
     isEnabled: boolean;
+    inputPricePerMillion?: number | null;
+    outputPricePerMillion?: number | null;
   }) => request<ModelConfig>(`/model-providers/${providerId}/models`, { method: "POST", body: JSON.stringify(payload) }),
   updateModel: (modelId: string, payload: Partial<{
     modelId: string;
@@ -171,11 +180,52 @@ export const api = {
     maxOutputTokens: number;
     supportsReasoning: boolean;
     isEnabled: boolean;
+    inputPricePerMillion: number | null;
+    outputPricePerMillion: number | null;
   }>) => request<ModelConfig>(`/models/${modelId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteModel: (modelId: string) => request<void>(`/models/${modelId}`, { method: "DELETE" }),
   roleBindings: () => request<ModelRoleBinding[]>("/model-role-bindings"),
   updateRoleBinding: (role: string, payload: { modelId: string | null; dailyCostLimit?: number | null }) =>
     request<ModelRoleBinding>(`/model-role-bindings/${role}`, { method: "PUT", body: JSON.stringify(payload) }),
+  canon: (projectId: string) => request<CanonWorkspace>(`/projects/${projectId}/canon`),
+  updateCanonDraft: (projectId: string, payload: {
+    documents?: Array<Record<string, unknown>>;
+    entityTypes?: Array<Record<string, unknown>>;
+    entities?: Array<Record<string, unknown>>;
+    relations?: Array<Record<string, unknown>>;
+    rules?: Array<Record<string, unknown>>;
+  }) => request<CanonWorkspace>(`/projects/${projectId}/canon/draft`, { method: "PUT", body: JSON.stringify(payload) }),
+  analyzeCanon: (projectId: string, sourceText: string, title?: string) =>
+    request<CanonWorkspace>(`/projects/${projectId}/canon/analyze`, { method: "POST", body: JSON.stringify({ projectId, sourceText, title }) }),
+  lockCanon: (projectId: string, expectedRevision: number) =>
+    request<CanonWorkspace>(`/projects/${projectId}/canon/lock`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  createCanonChangeRequest: (projectId: string, payload: {
+    targetKind: CanonChangeRequest["targetKind"];
+    targetId: string;
+    reason: string;
+    impactSummary: string;
+    afterJson: Record<string, unknown>;
+  }) => request<CanonChangeRequest>(`/projects/${projectId}/canon/change-requests`, { method: "POST", body: JSON.stringify({ projectId, ...payload }) }),
+  applyCanonChangeRequest: (projectId: string, requestId: string, expectedRevision: number) =>
+    request<CanonChangeRequest>(`/canon/change-requests/${requestId}/apply`, { method: "POST", body: JSON.stringify({ projectId, expectedRevision }) }),
+  rejectCanonChangeRequest: (projectId: string, requestId: string, expectedRevision: number) =>
+    request<CanonChangeRequest>(`/canon/change-requests/${requestId}/reject`, { method: "POST", body: JSON.stringify({ projectId, expectedRevision }) }),
+  trialReadiness: (projectId: string, chapterCount: TrialRunSize) =>
+    request<TrialReadiness>(`/projects/${projectId}/trial-readiness?chapterCount=${chapterCount}`),
+  automationPolicy: (projectId: string) => request<AutomationPolicy>(`/projects/${projectId}/automation/policy`),
+  updateAutomationPolicy: (projectId: string, payload: Omit<AutomationPolicy, "projectId" | "nextRunAt" | "lastScheduledLocalDate" | "revision" | "createdAt" | "updatedAt"> & { expectedRevision: number }) =>
+    request<AutomationPolicy>(`/projects/${projectId}/automation/policy`, { method: "PUT", body: JSON.stringify(payload) }),
+  automationRuns: (projectId: string) => request<AutomationRun[]>(`/projects/${projectId}/automation/runs`),
+  automationRun: (projectId: string, runId: string) => request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}`),
+  createAutomationRun: (projectId: string, chapterCount: TrialRunSize, idempotencyKey: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs`, { method: "POST", body: JSON.stringify({ chapterCount, idempotencyKey }) }),
+  cancelAutomationRun: (projectId: string, runId: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}/cancel`, { method: "POST" }),
+  resumeAutomationRun: (projectId: string, runId: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}/resume`, { method: "POST" }),
+  catchUpAutomationRun: (projectId: string, runId: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}/catch-up`, { method: "POST" }),
+  automationReports: (projectId: string) => request<AutomationDailyReport[]>(`/projects/${projectId}/automation/reports`),
   chapterContracts: (projectId: string) => request<ChapterContract[]>(`/projects/${projectId}/chapter-contracts`),
   deriveChapterContract: (projectId: string, payload: {
     chapterNumber: number; planNodeId?: string | null; title?: string; authorNote?: string;

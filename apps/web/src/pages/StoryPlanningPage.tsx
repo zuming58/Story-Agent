@@ -1,6 +1,4 @@
 import { FloppyDisk, GitBranch, List, PencilSimple, SlidersHorizontal } from "@phosphor-icons/react";
-import { useEffect } from "react";
-import { useStoryStore } from "../store/useStoryStore";
 import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 import { MilestoneEditor } from "../components/MilestoneEditor";
 import { MilestoneTable } from "../components/MilestoneTable";
@@ -8,14 +6,6 @@ import { Timeline } from "../components/Timeline";
 
 export function StoryPlanningPage() {
   const { plan, isLoading, isDisconnected, errorMessage, retry } = useStoryWorkspace();
-  const notice = useStoryStore((state) => state.notice);
-  const setNotice = useStoryStore((state) => state.setNotice);
-
-  useEffect(() => {
-    if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(null), 2800);
-    return () => window.clearTimeout(timer);
-  }, [notice, setNotice]);
 
   if (isDisconnected) return <div className="connection-state"><strong>无法连接本地数据服务</strong><p>{errorMessage ?? "请确认 FastAPI 已启动。"}</p><button onClick={retry}>重新连接</button></div>;
   if (isLoading || !plan) return <div className="connection-state"><strong>正在加载作品数据库…</strong><p>正在读取规划、对话和审计记录。</p></div>;
@@ -31,7 +21,6 @@ export function StoryPlanningPage() {
       <MilestoneEditor />
       <MilestoneTable />
       <div className="planning-actions"><button><span>重新分析节奏</span></button><button className="primary"><FloppyDisk size={18} />保存规划</button></div>
-      {notice && <div className="toast-notice" role="status">{notice}</div>}
     </div>
   );
 }

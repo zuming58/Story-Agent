@@ -408,6 +408,9 @@ class StoryService:
             if payload.api_key:
                 key_ref = provider.api_key_ref or f"model-provider:{provider.id}"
                 self._store_provider_secret(provider, key_ref, payload.api_key)
+            if changes or payload.clear_api_key or payload.api_key:
+                provider.last_test_status = None
+                provider.last_tested_at = None
             provider.updated_at = utc_now()
             session.commit()
             session.refresh(provider)
@@ -434,12 +437,22 @@ class StoryService:
                 ModelProvider.base_url == "https://api.deepseek.com",
             ))
             if existing:
-                has_current_model = session.scalar(select(ModelConfig.id).where(
+                current_model = session.scalar(select(ModelConfig).where(
                     ModelConfig.provider_id == existing.id,
                     ModelConfig.model_id == "deepseek-v4-pro",
                 ))
                 existing_id = existing.id
-                if has_current_model:
+                if current_model:
+                    changed = False
+                    if current_model.input_price_per_million is None:
+                        current_model.input_price_per_million = 0.435
+                        changed = True
+                    if current_model.output_price_per_million is None:
+                        current_model.output_price_per_million = 0.87
+                        changed = True
+                    if changed:
+                        current_model.updated_at = utc_now()
+                        session.commit()
                     return self._provider_dict(existing)
             else:
                 existing_id = None
@@ -451,6 +464,8 @@ class StoryService:
                 max_output_tokens=4096,
                 supports_reasoning=True,
                 is_enabled=True,
+                input_price_per_million=0.435,
+                output_price_per_million=0.87,
             ))
             return self.get_model_provider(existing_id)
         payload = ModelProviderCreate(name="DeepSeek 官方", base_url="https://api.deepseek.com", timeout_seconds=60, max_retries=1)
@@ -462,6 +477,8 @@ class StoryService:
             max_output_tokens=4096,
             supports_reasoning=True,
             is_enabled=True,
+            input_price_per_million=0.435,
+            output_price_per_million=0.87,
         ))
         return self.get_model_provider(provider["id"])
 
@@ -558,35 +575,45 @@ class StoryService:
             key_ref = provider.api_key_ref
             base_url = provider.base_url.rstrip("/")
             timeout_seconds = min(max(provider.timeout_seconds, 1), 5)
+
+        def finish(ok: bool, status: str, model: str | None, message: str) -> dict[str, Any]:
+            with self.db.catalog() as session:
+                current = session.get(ModelProvider, provider_id)
+                if current:
+                    current.last_test_status = status
+                    current.last_tested_at = utc_now()
+                    session.commit()
+            return self._connection_result(provider_data, ok, status, model, message)
+
         if not key_ref:
-            return self._connection_result(provider_data, False, "missing_api_key", None, "尚未保存 API Key。")
+            return finish(False, "missing_api_key", None, "尚未保存 API Key。")
         try:
             api_key = self.secret_store.get_secret(key_ref)
         except SecretStoreUnavailable:
-            return self._connection_result(provider_data, False, "credential_unavailable", None, "Credential Manager 不可用。")
+            return finish(False, "credential_unavailable", None, "Credential Manager 不可用。")
         if not api_key:
-            return self._connection_result(provider_data, False, "missing_api_key", None, "Credential Manager 中未找到密钥。")
+            return finish(False, "missing_api_key", None, "Credential Manager 中未找到密钥。")
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
                 response = client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
         except httpx.TimeoutException:
-            return self._connection_result(provider_data, False, "timeout", None, "连接测试超时。")
+            return finish(False, "timeout", None, "连接测试超时。")
         except httpx.RequestError:
-            return self._connection_result(provider_data, False, "network_error", None, "无法连接模型服务。")
+            return finish(False, "network_error", None, "无法连接模型服务。")
         if response.status_code in {401, 403}:
-            return self._connection_result(provider_data, False, "auth_failed", None, "模型服务拒绝鉴权。")
+            return finish(False, "auth_failed", None, "模型服务拒绝鉴权。")
         if response.status_code >= 400:
-            return self._connection_result(provider_data, False, "network_error", None, f"模型服务返回 HTTP {response.status_code}。")
+            return finish(False, "network_error", None, f"模型服务返回 HTTP {response.status_code}。")
         try:
             data = response.json()
         except ValueError:
-            return self._connection_result(provider_data, False, "invalid_response", None, "模型服务返回了非 JSON 响应。")
+            return finish(False, "invalid_response", None, "模型服务返回了非 JSON 响应。")
         models = data.get("data") if isinstance(data, dict) else None
         actual_model = None
         if isinstance(models, list) and models:
             first = models[0]
             actual_model = first.get("id") if isinstance(first, dict) else str(first)
-        return self._connection_result(provider_data, True, "success", actual_model, "连接测试成功。")
+        return finish(True, "success", actual_model, "连接测试成功。")
 
     def get_project(self, project_id: str, *, touch: bool = False) -> CatalogProject:
         with self.db.catalog() as session:
@@ -1855,6 +1882,8 @@ class StoryService:
             "isEnabled": item.is_enabled,
             "hasApiKey": bool(item.api_key_ref),
             "apiKeyPreview": item.api_key_preview,
+            "lastTestStatus": item.last_test_status,
+            "lastTestedAt": item.last_tested_at,
             "createdAt": item.created_at,
             "updatedAt": item.updated_at,
         }

@@ -231,6 +231,8 @@ export interface ModelProvider {
   isEnabled: boolean;
   hasApiKey: boolean;
   apiKeyPreview?: string | null;
+  lastTestStatus?: ProviderConnectionTest["status"] | null;
+  lastTestedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -245,6 +247,8 @@ export interface ModelConfig {
   maxOutputTokens: number;
   supportsReasoning: boolean;
   isEnabled: boolean;
+  inputPricePerMillion: number | null;
+  outputPricePerMillion: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -478,4 +482,198 @@ export interface ContextPackage {
   items: ContextTraceItem[];
   payload: Record<string, unknown>;
   checksum: string;
+}
+
+export interface CanonDocument {
+  id: string;
+  title: string;
+  kind: string;
+  contentMarkdown: string;
+  status: "draft" | "locked";
+  revision: number;
+  lockedAt: string | null;
+}
+
+export interface CanonEntityType {
+  id: string;
+  name: string;
+  displayName: string;
+  schemaJson: Record<string, unknown>;
+  isSystem: boolean;
+  status: "draft" | "locked";
+  revision: number;
+  sourceDocumentId: string | null;
+  lockedAt: string | null;
+}
+
+export interface CanonEntity {
+  id: string;
+  entityTypeId: string;
+  canonicalName: string;
+  aliases: string[];
+  attributes: Record<string, unknown>;
+  status: "draft" | "locked";
+  revision: number;
+  sourceDocumentId: string | null;
+  lockedAt: string | null;
+}
+
+export interface CanonRelation {
+  id: string;
+  subjectEntityId: string;
+  predicate: string;
+  objectEntityId: string | null;
+  objectValue: unknown;
+  status: "draft" | "locked";
+  revision: number;
+}
+
+export interface CanonRule {
+  id: string;
+  ruleCode: string;
+  category: string;
+  statement: string;
+  severity: string;
+  constraintJson: Record<string, unknown>;
+  status: "draft" | "locked";
+  revision: number;
+  sourceDocumentId: string | null;
+  lockedAt: string | null;
+}
+
+export interface CanonChangeRequest {
+  id: string;
+  projectId: string;
+  targetKind: "document" | "entity_type" | "entity" | "relation" | "rule";
+  targetId: string;
+  reason: string;
+  impactSummary: string;
+  beforeJson: Record<string, unknown> | null;
+  afterJson: Record<string, unknown> | null;
+  status: "pending" | "accepted" | "rejected";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CanonWorkspace {
+  projectId: string;
+  locked: boolean;
+  documents: CanonDocument[];
+  entityTypes: CanonEntityType[];
+  entities: CanonEntity[];
+  relations: CanonRelation[];
+  rules: CanonRule[];
+  changeRequests: CanonChangeRequest[];
+}
+
+export type TrialReadinessStatus = "ready" | "warning" | "blocked";
+export type TrialRunSize = 1 | 3 | 5;
+
+export interface TrialReadinessCheck {
+  code: string;
+  status: TrialReadinessStatus;
+  title: string;
+  detail: string;
+  actionPath: string | null;
+  chapterNumber: number | null;
+}
+
+export interface TrialReadiness {
+  projectId: string;
+  chapterCount: TrialRunSize;
+  startChapter: number;
+  endChapter: number;
+  ready: boolean;
+  maxSafeChapterCount: number;
+  checks: TrialReadinessCheck[];
+}
+
+export interface AutomationPolicy {
+  projectId: string;
+  enabled: boolean;
+  timeOfDay: string;
+  timezone: string;
+  chaptersPerRun: number;
+  targetWordsMin: number;
+  targetWordsMax: number;
+  maxRevisionRounds: number;
+  dailyCostLimit: number | null;
+  stopPolicy: "stop_on_blocking" | "stop_on_any_failure";
+  approvalMode: "guarded_auto";
+  nextRunAt: string | null;
+  lastScheduledLocalDate: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationRunItem {
+  id: string;
+  projectId: string;
+  automationRunId: string;
+  chapterNumber: number;
+  sequenceNumber: number;
+  chapterContractId: string | null;
+  chapterJobId: string | null;
+  chapterCommitId: string | null;
+  status: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  errorCode: string | null;
+  diagnostic: Record<string, unknown> | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}
+
+export interface AutomationRun {
+  id: string;
+  projectId: string;
+  policyId: string;
+  scheduledLocalDate: string;
+  trigger: string;
+  status: string;
+  idempotencyKey: string | null;
+  requestedChapterCount: number | null;
+  startChapter: number | null;
+  endChapter: number | null;
+  plannedCount: number;
+  succeededCount: number;
+  isolatedCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  stopReason: string | null;
+  diagnostic: Record<string, unknown> | null;
+  revision: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+  items: AutomationRunItem[];
+  availableActions: Array<"cancel" | "resume" | "catch_up">;
+  nextRunAt: string | null;
+}
+
+export interface AutomationDailyReport {
+  id: string;
+  projectId: string;
+  localDate: string;
+  timezone: string;
+  runCount: number;
+  plannedCount: number;
+  succeededCount: number;
+  isolatedCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  statusSummary: Record<string, number>;
+  generatedAt: string;
+  updatedAt: string;
 }

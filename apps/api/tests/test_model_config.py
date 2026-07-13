@@ -104,6 +104,8 @@ def test_deepseek_preset_is_idempotent_and_uses_current_model_identifier(client:
     assert [item["id"] for item in providers].count(first.json()["id"]) == 1
     models = client.get(f"/api/v1/model-providers/{first.json()['id']}/models").json()
     assert [item["modelId"] for item in models] == ["deepseek-v4-pro"]
+    assert models[0]["inputPricePerMillion"] == 0.435
+    assert models[0]["outputPricePerMillion"] == 0.87
 
 
 def test_models_and_role_bindings_protect_provider_delete(client: TestClient) -> None:

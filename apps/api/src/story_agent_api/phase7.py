@@ -22,9 +22,13 @@ from .models import (
     ChapterContract,
     ChapterDraft,
     ChapterJob,
+    CanonDocument,
     ModelConfig,
+    ModelProvider,
     ModelRoleBinding,
     ModelRun,
+    Plan,
+    PlanNode,
     ProjectMeta,
     utc_now,
 )
@@ -279,13 +283,169 @@ class Phase7Service:
             if existing:
                 run = existing
             else:
-                run = self._create_run_row(session, policy, "manual", today, payload.idempotency_key, _now())
-                session.add(self.service._audit("automation_run.queued", "automation_run", run.id, {"trigger": "manual", "requestId": request_id}, request_id))
+                run = self._create_run_row(
+                    session,
+                    policy,
+                    "manual",
+                    today,
+                    payload.idempotency_key,
+                    _now(),
+                    requested_chapter_count=payload.chapter_count,
+                )
+                session.add(self.service._audit("automation_run.queued", "automation_run", run.id, {
+                    "trigger": "manual",
+                    "chapterCount": payload.chapter_count or policy.chapters_per_run,
+                    "requestId": request_id,
+                }, request_id))
             run_id = run.id
             should_dispatch = run.status == "queued"
         if should_dispatch:
             self.dispatch_run(project.id, run_id)
         return self.get_run(project.id, run_id)
+
+    def get_trial_readiness(self, project_id: str, chapter_count: int) -> dict[str, Any]:
+        if chapter_count not in {1, 3, 5}:
+            raise StoryError(422, "TRIAL_CHAPTER_COUNT_INVALID", "chapterCount must be 1, 3, or 5.")
+        project = self.service.get_project(project_id)
+        checks: list[dict[str, Any]] = []
+
+        def add(
+            code: str,
+            status: str,
+            title: str,
+            detail: str,
+            action_path: str | None = None,
+            chapter_number: int | None = None,
+        ) -> None:
+            checks.append({
+                "code": code,
+                "status": status,
+                "title": title,
+                "detail": detail,
+                "actionPath": action_path,
+                "chapterNumber": chapter_number,
+            })
+
+        with self.service.db.project(project.id, project.folder_path) as session:
+            meta = session.get(ProjectMeta, project.id)
+            start = (meta.current_chapter if meta else project.current_chapter) + 1
+            end = start + chapter_count - 1
+            total = meta.total_chapters if meta else project.total_chapters
+            policy = session.get(AutomationPolicy, project.id)
+            canon_locked = session.scalar(select(CanonDocument.id).where(
+                CanonDocument.id == "story-core", CanonDocument.status == "locked"
+            )) is not None
+            plan = session.scalar(select(Plan))
+            nodes = session.scalars(select(PlanNode)).all()
+            current_commits = set(session.scalars(select(ChapterCommit.chapter_number).where(
+                ChapterCommit.is_current.is_(True),
+                ChapterCommit.chapter_number >= start,
+                ChapterCommit.chapter_number <= min(end, total),
+            )).all())
+            conflicting_jobs = session.execute(select(ChapterJob, ChapterContract.chapter_number).join(
+                ChapterContract, ChapterContract.id == ChapterJob.chapter_contract_id
+            ).where(
+                ChapterContract.chapter_number >= start,
+                ChapterContract.chapter_number <= min(end, total),
+                ChapterJob.status != "completed",
+            )).all()
+            active_run = session.scalar(select(AutomationRun.id).where(
+                AutomationRun.status.in_(["queued", "running", "cancel_requested"])
+            ).limit(1))
+            max_revision_rounds = policy.max_revision_rounds if policy else 2
+            daily_cost_limit = policy.daily_cost_limit if policy else None
+
+        required_roles = set(MODEL_ROLES_FOR_AUTOMATION)
+        if max_revision_rounds == 0:
+            required_roles.discard("reviser")
+        missing_roles: list[str] = []
+        unavailable_roles: list[str] = []
+        untested_providers: set[str] = set()
+        stale_providers: set[str] = set()
+        missing_prices: list[str] = []
+        now = _now()
+        with self.service.db.catalog() as session:
+            bindings = session.scalars(select(ModelRoleBinding).where(
+                ModelRoleBinding.role.in_(required_roles)
+            ).options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider))).all()
+            by_role = {binding.role: binding for binding in bindings}
+            for role in sorted(required_roles):
+                binding = by_role.get(role)
+                model = binding.model if binding else None
+                provider: ModelProvider | None = model.provider if model else None
+                if not model:
+                    missing_roles.append(role)
+                    continue
+                if daily_cost_limit is not None and (
+                    model.input_price_per_million is None or model.output_price_per_million is None
+                ):
+                    missing_prices.append(role)
+                if not model.is_enabled or not provider or not provider.is_enabled or not provider.api_key_ref:
+                    unavailable_roles.append(role)
+                    continue
+                if provider.last_test_status != "success":
+                    untested_providers.add(provider.name)
+                elif provider.last_tested_at and (_as_utc(provider.last_tested_at) or now) < now - timedelta(days=7):
+                    stale_providers.add(provider.name)
+
+        if missing_roles:
+            add("TRIAL_MODEL_ROLE_MISSING", "blocked", "模型角色尚未绑定", "缺少：" + "、".join(missing_roles), "/settings")
+        elif unavailable_roles:
+            add("TRIAL_MODEL_UNAVAILABLE", "blocked", "模型或密钥不可用", "受影响角色：" + "、".join(unavailable_roles), "/settings")
+        elif untested_providers:
+            add("TRIAL_PROVIDER_NOT_TESTED", "blocked", "模型连接尚未验证", "请测试：" + "、".join(sorted(untested_providers)), "/settings")
+        else:
+            add("TRIAL_MODELS_READY", "ready", "写作模型已就绪", "写作、抽取、审稿和修订角色均可用。", "/settings")
+        if stale_providers:
+            add("TRIAL_PROVIDER_TEST_STALE", "warning", "模型连接测试已超过 7 天", "建议重新测试：" + "、".join(sorted(stale_providers)), "/settings")
+        if missing_prices:
+            add("TRIAL_MODEL_PRICE_MISSING", "blocked", "费用上限缺少模型价格", "缺少：" + "、".join(missing_prices), "/settings")
+
+        if canon_locked:
+            add("TRIAL_CANON_READY", "ready", "Canon 已锁定", "章节契约将使用当前正式设定。", "/canon")
+        else:
+            add("TRIAL_CANON_NOT_LOCKED", "blocked", "Canon 尚未锁定", "请完成故事核心、实体与规则检查后锁定。", "/canon")
+
+        if end > total:
+            add("TRIAL_PROJECT_RANGE_EXCEEDED", "blocked", "试写范围超过作品章节数", f"作品共 {total} 章，本批次将到第 {end} 章。", "/overview", total + 1)
+        uncovered = [] if not plan else [
+            chapter for chapter in range(start, min(end, total) + 1)
+            if not any(node.range_min <= chapter <= node.range_max for node in nodes)
+        ]
+        if not plan or uncovered:
+            detail = "作品规划不存在。" if not plan else "未覆盖章节：" + "、".join(map(str, uncovered))
+            add("TRIAL_PLAN_GAP", "blocked", "故事规划存在缺口", detail, "/planning", uncovered[0] if uncovered else start)
+        else:
+            add("TRIAL_PLAN_READY", "ready", "规划覆盖试写范围", f"第 {start}—{min(end, total)} 章均有规划窗口。", "/planning")
+
+        if current_commits:
+            add("TRIAL_CHAPTER_ALREADY_COMMITTED", "blocked", "试写范围已有正式正文", "已有章节：" + "、".join(map(str, sorted(current_commits))), "/writing", min(current_commits))
+        if conflicting_jobs:
+            chapter = min(row[1] for row in conflicting_jobs)
+            add("TRIAL_CHAPTER_JOB_CONFLICT", "blocked", "试写范围存在未收口任务", "请先处理失败、取消或待复核的章节任务。", "/writing", chapter)
+        if active_run:
+            add("TRIAL_AUTOMATION_ACTIVE", "blocked", "已有自动托管任务运行中", "同一作品一次只能运行一个托管批次。", "/automation")
+        if not current_commits and not conflicting_jobs and not active_run:
+            add("TRIAL_PIPELINE_CLEAR", "ready", "章节流水线可用", "没有冲突的正式正文、任务或托管批次。", "/writing")
+
+        blocked = any(item["status"] == "blocked" for item in checks)
+        structural_max = 0
+        for size in (1, 3, 5):
+            candidate_end = start + size - 1
+            if candidate_end <= total and plan and all(
+                any(node.range_min <= chapter <= node.range_max for node in nodes)
+                for chapter in range(start, candidate_end + 1)
+            ):
+                structural_max = size
+        return {
+            "projectId": project.id,
+            "chapterCount": chapter_count,
+            "startChapter": start,
+            "endChapter": end,
+            "ready": not blocked,
+            "maxSafeChapterCount": 0 if blocked else structural_max,
+            "checks": checks,
+        }
 
     def list_runs(self, project_id: str) -> list[dict[str, Any]]:
         project = self.service.get_project(project_id)
@@ -667,6 +827,7 @@ class Phase7Service:
         now: datetime,
         *,
         status: str = "queued",
+        requested_chapter_count: int | None = None,
     ) -> AutomationRun:
         run_id = str(uuid4())
         values = {
@@ -677,6 +838,7 @@ class Phase7Service:
             "trigger": trigger,
             "status": status,
             "idempotency_key": idempotency_key,
+            "requested_chapter_count": requested_chapter_count,
             "planned_count": 0,
             "succeeded_count": 0,
             "isolated_count": 0,
@@ -733,7 +895,8 @@ class Phase7Service:
             meta = session.get(ProjectMeta, project_id)
             start = run.start_chapter or ((meta.current_chapter if meta else 0) + 1)
             total = meta.total_chapters if meta else start
-            end = min(total, start + policy.chapters_per_run - 1)
+            chapter_count = run.requested_chapter_count or policy.chapters_per_run
+            end = min(total, start + chapter_count - 1)
             run.status = "running"
             run.started_at = run.started_at or _now()
             run.start_chapter = start
@@ -1237,6 +1400,7 @@ class Phase7Service:
             "trigger": item.trigger,
             "status": item.status,
             "idempotencyKey": item.idempotency_key,
+            "requestedChapterCount": item.requested_chapter_count,
             "startChapter": item.start_chapter,
             "endChapter": item.end_chapter,
             "plannedCount": item.planned_count,

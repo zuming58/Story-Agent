@@ -90,6 +90,7 @@ from .schemas import (
     StoryEntityOut,
     StoryEventOut,
     StoryPlanOut,
+    TrialReadinessOut,
 )
 from .secrets import SecretStore
 from .services import StoryError, StoryService
@@ -374,6 +375,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/automation/policy", response_model=AutomationPolicyOut)
     def get_automation_policy(project_id: str) -> object:
         return service.phase7.get_policy(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/trial-readiness", response_model=TrialReadinessOut)
+    def get_trial_readiness(project_id: str, chapter_count: int = Query(default=1, alias="chapterCount")) -> object:
+        return service.phase7.get_trial_readiness(project_id, chapter_count)
 
     @app.put("/api/v1/projects/{project_id}/automation/policy", response_model=AutomationPolicyOut)
     def update_automation_policy(project_id: str, payload: AutomationPolicyUpdate) -> object:

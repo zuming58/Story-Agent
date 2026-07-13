@@ -1,108 +1,73 @@
-# Story Agent 第八阶段后端开发交接
+# Story Agent 第八阶段验收交接
 
 更新时间：2026-07-13
-当前分支：`agent/export-publishing-foundation`
-第七阶段基线：`86c849c`
-另一台电脑交付终点：`26b292e`
-GPT-5.6 审计修复：`e17db9a`
-第七阶段审计 PR：`#6`（已合并）
-第八阶段基线：`7a808b4`
-第八阶段草稿 PR：`#7`
-当前任务：由另一台电脑只实施第八阶段导出与发布准备后端
+当前分支：`agent/trial-ready-workbench`
+开发基线：`7a808b4`
+状态：当前电脑实施与自审计完成，等待用户 UI 和单章流程确认；未合并 `main`
 
-## 1. 当前完成状态
+## 1. 本阶段已完成
 
-第七阶段“每日自动托管与可恢复生产队列”已经完成实现、GPT-5.6 完整审计、问题修复、全量验证并合并到 `main`。
+- Canon 设定库正式页面：Markdown 核心、AI 结构化、实体/别名/属性/关系/规则、缺口诊断、二次锁定和差异变更申请。
+- 统一试写就绪检查：模型角色、密钥、连接测试、价格、Canon、规划范围、章节和托管冲突。
+- 自动托管正式页面：默认关闭的每日策略、1/3/5 章手动试写、运行队列、Token/费用、诊断、取消、恢复、补跑和日报。
+- 作品首页六步试写引导；Canon 和自动托管页继续使用固定 AI 控制台。
+- Provider 连接测试状态持久化；手动 run 冻结 1/3/5 章范围，保持幂等和原 Phase 5/7 事务边界。
 
-已具备：
+详细实施与验收节奏见 [PHASE-8-TRIAL-READY-WORKBENCH.md](docs/plans/PHASE-8-TRIAL-READY-WORKBENCH.md)，审计修复见 [PHASE-8-AUDIT.md](docs/plans/PHASE-8-AUDIT.md)。
 
-- 每作品自动托管策略、IANA 时区、每日到期检查、missed/catch-up。
-- 手动运行、幂等重试、多章节严格串行、取消、恢复和中断收敛。
-- Phase 5 契约、候选稿、事实抽取、多角色质量门、最多两轮修订、guarded approval 和原子正式提交复用。
-- 项目级 SQLite 租约、心跳、租约过期收敛与 commit-time fencing。
-- 模型 token、估算费用、真实执行日预算、连续模型失败阈值与日报。
-- 自动化 policy/run/item/lease/report 的备份恢复和跨作品隔离。
-- run/item/ModelRun 的精确关联、available actions 与诊断信息。
+## 2. 迁移、公共类型与 API
 
-完整审计记录见 [docs/plans/PHASE-7-AUDIT.md](docs/plans/PHASE-7-AUDIT.md)。
+- Catalog migration：`0005_provider_connection_status`
+- Project migration：`0010_trial_ready_workbench`
+- 新类型：`TrialReadiness`、`TrialReadinessCheck`、`TrialReadinessStatus`、`TrialRunSize`
+- `GET /api/v1/projects/{project_id}/trial-readiness?chapterCount=1|3|5`
+- `POST /api/v1/projects/{project_id}/automation/runs` 可选 `chapterCount: 1|3|5`
+- 现有 Canon/automation/model API 被 UI 正式接入，业务内容不依赖 `localStorage`。
 
-## 2. GPT-5.6 本轮修复
+## 3. 不可破坏的权威关系
 
-- 恢复作品同时 remap `automation_runs.policy_id`。
-- 恢复克隆清除原进程运行时租约，active run/job 收敛为 `interrupted`。
-- 租约过期、被替换或取消后，旧执行器不能继续模型调用、批准或正式 commit。
-- 第二个进程启动时不再错误中断另一个有效租约持有者的 ChapterJob。
-- 调度器周期性回收过期租约；queued run 在同作品前序运行完成后串行分发。
-- queued run 可立即取消；手动 run 与 catch-up 幂等重试不重复审计或生成。
-- 当天费用按 ModelRun 真实执行时间与策略时区统计，旧日期补跑不能绕过预算。
-- missed/interrupted 会进入日报；崩溃后会补同步 token 与费用。
-- 正式 commit 已成功但 item acknowledgement 未落库时，恢复会认领同一 job 的 commit，不误记 skipped、不重复付费。
-- Playwright 每次使用独立数据目录；冷启动迁移等待提高到 45 秒，避免测试超时杀死 Alembic。
+- Catalog SQLite 是作品目录、Provider、模型与角色绑定权威；API Key 只在 Windows Credential Manager。
+- 每个作品的 `story.db` 是 Canon、规划、候选稿、质量、正式提交和自动化运行权威。
+- `ChapterCommit.is_current = true` 才是正式正文；候选稿不能直接修改正式 Canon 或故事状态。
+- 模型调用期间不得持有 SQLite 长写事务；自动化正式提交仍必须通过租约 fencing、质量门和 Phase 5 原子 commit。
 
-## 3. 数据权威与禁止绕过的规则
+## 4. 当前验收任务
 
-- Catalog SQLite：作品目录、模型 Provider、模型配置和角色绑定。
-- 每部作品独立 `story.db`：Canon、状态、检索、章节契约、候选稿、质量、正式提交和自动化运行。
-- `ChapterCommit.is_current = true` 才是正式正文；候选稿不能直接进入 Canon/current state。
-- 自动化只能通过 Phase 5 的 guarded approval 和原子 commit，不能直接写正式状态。
-- 模型调用与文件渲染期间不得持有 SQLite 写事务。
-- 同作品只有有效租约持有者可进行自动化正式提交；租约校验必须在 commit 事务内再次执行。
-- GitHub 是两台电脑唯一代码权威；`.data` 和本地 E2E 数据不通过 Git 同步。
+1. 在本地页面检查 `/canon`、`/overview` 和 `/automation` 的质感、信息层级和 1280/1440 操作性。
+2. 在“模型与费用设置”配置真实 Provider、API Key、价格和六个自动写作角色，点击连接测试。
+3. 新建独立试验作品，完成 Canon 并锁定，确认规划覆盖第 1 章。
+4. 先写 1 章，核对契约、候选正文、质量报告和正式提交；再扩展 3—5 章。
+5. 用户确认 UI 与单章流程后才合并 `main`。
 
-## 4. 最终验证
+## 5. 已知限制
 
-- Phase 7 专项：`18 passed`
-- `npm run test`：API `95 passed`；Web `3 files / 9 tests passed`
-- `npm run build`：通过，仅保留既有 Vite chunk-size warning
-- `npm run test:e2e`：Playwright `10 passed`，覆盖 1440×1024 与 1280×800
-- Python compileall：通过
-- `git diff --check`：通过，仅有 Windows LF/CRLF 提示
-- 未修改页面组件、CSS、设计令牌或视觉风格；只调整 Playwright 数据隔离与冷迁移等待
+- 真实模型单章冒烟不在自动测试中运行；需用户本地密钥配置完成后手动触发，不提交密钥、数据库或正文。
+- 构建仅保留既有 Vite chunk-size warning。
+- 第九阶段导出方案已顺延到 [PHASE-9-EXPORT-PUBLISHING.md](docs/plans/PHASE-9-EXPORT-PUBLISHING.md)。
+- 本阶段未实施外部发布、短篇、短剧或 EXE。
 
-## 5. 下一台电脑唯一任务
+## 6. 最终验证结果
 
-只实施 [docs/plans/PHASE-8-EXPORT-PUBLISHING.md](docs/plans/PHASE-8-EXPORT-PUBLISHING.md) 定义的第八阶段“作品导出与发布准备后端”。
+- `npm run test`：API `101 passed`；Web `3 files / 11 tests passed`。
+- `npm run build`：通过，仅保留既有 Vite chunk-size warning。
+- `npm run test:e2e`：Playwright `14 passed`，覆盖 1440×1024 与 1280×800。
+- Phase 8 专项：`6 passed`，覆盖就绪阻断、Provider 状态、1/3/5 章、幂等、DB 约束与跨作品隔离。
+- Python `compileall`：通过。
+- 自动测试未调用真实 DeepSeek API，未消耗用户额度。
 
-工作分支：
-
-```text
-agent/export-publishing-foundation
-```
-
-开始前依次完整阅读：
-
-1. `HANDOFF.md`
-2. `docs/plans/PHASE-8-EXPORT-PUBLISHING.md`
-3. `docs/plans/PHASE-7-AUTOMATION.md`
-4. `docs/plans/PHASE-5-CHAPTER-PIPELINE.md`
-5. `docs/prd/PRD-001.md`
-6. `docs/ui/UI-DESIGN-BASELINE.md`
-
-禁止事项：
-
-- 不得修改 `apps/web/**`、CSS、设计令牌、UI 文案和 Playwright；UI 继续由当前电脑独占维护。
-- 不得开发自动托管 UI、导出 UI、短篇策略、短剧改编、外部平台登录发布或 Windows 打包。
-- 不得把 candidate draft 当作正式导出正文。
-- 不得在渲染 DOCX/EPUB/TXT/Markdown 时持有 SQLite 写事务。
-- 不得提交 API Key、`.data`、SQLite、导出成品、日志、备份 ZIP 和临时文件。
-- 不得修改或提交 `Story agent/` 与 `openclaw skill/` 参考目录。
-
-完成后必须运行 API 全量测试，更新本文件，提交并推送功能分支，不合并 `main`，停止等待 GPT-5.6 审计。
-
-## 6. 常用命令
+## 7. 开发与测试命令
 
 ```powershell
 npm --prefix apps/web install
 uv sync --project apps/api --dev
+npm run dev
 npm run build
 npm run test
 npm run test:e2e
 ```
 
-另一台电脑本轮只改后端，通常只需运行 API 专项与 API 全量测试；交回当前电脑后，由 GPT-5.6 再运行包含 UI 的全量验证。
+## 8. Git 与敏感数据
 
-## 7. 返回当前电脑时的固定回复
-
-```text
-第八阶段已经完成并推送。分支为 agent/export-publishing-foundation，最新提交为 <commit>，请以 7a808b4 为基线，读取 HANDOFF.md 和 docs/plans/PHASE-8-EXPORT-PUBLISHING.md，进行完整审计、修复并运行全量测试。未修改 apps/web/**。
-```
+- GitHub 是代码权威；`.data`、`.e2e-data`、API Key、SQLite、日志、备份 ZIP 和生成正文不进入 Git。
+- 不修改或提交 `Story agent/` 与 `openclaw skill/` 两个参考目录。
+- 本分支只在用户确认后合并 `main`；没有交给另一台电脑的开发任务。

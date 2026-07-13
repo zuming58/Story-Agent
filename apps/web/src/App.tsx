@@ -14,7 +14,7 @@ export function App() {
   return (
     <StoryWorkspaceProvider><Routes>
       <Route element={<AppShell />}>
-        <Route index element={<Navigate to="/planning" replace />} />
+        <Route index element={<Navigate to="/overview" replace />} />
         <Route path="overview" element={<ProjectOverviewPage />} />
         <Route path="canon" element={<CanonPage />} />
         <Route path="planning" element={<StoryPlanningPage />} />
@@ -25,7 +25,7 @@ export function App() {
         <Route path="settings" element={<SettingsHubPage />} />
         <Route path="drama" element={<PlaceholderPage page="drama" />} />
       </Route>
-      <Route path="*" element={<Navigate to="/planning" replace />} />
+      <Route path="*" element={<Navigate to="/overview" replace />} />
     </Routes></StoryWorkspaceProvider>
   );
 }

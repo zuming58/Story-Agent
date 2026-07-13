@@ -19,6 +19,8 @@ const roleLabels: Record<ModelRole, string> = {
   chinese_writer: "中文写手",
   fact_extractor: "事实抽取",
   logic_reviewer: "逻辑审稿",
+  continuity_reviewer: "连续性审稿",
+  story_editor: "故事编辑",
   style_reviewer: "文风审稿",
   reviser: "修订器",
   embedding: "Embedding",

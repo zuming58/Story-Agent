@@ -59,10 +59,40 @@ test("direct edits are validated and persist after reload", async ({ page }, tes
 
 test("safety audit workspace exposes backup and diagnostics without covering Agent", async ({ page }, testInfo) => {
   await createProject(page, testInfo, "safety");
-  await page.getByRole("link", { name: /质量中心/ }).click();
+  await page.getByRole("link", { name: /模型设置/ }).click();
+  await page.getByRole("button", { name: /安全审计/ }).click();
   await expect(page.getByRole("heading", { name: "备份恢复与调用诊断" })).toBeVisible();
   await expect(page.getByRole("article", { name: "备份管理" })).toBeVisible();
   await expect(page.getByRole("article", { name: "审计时间线" })).toBeVisible();
   await expect(page.getByRole("article", { name: "模型调用记录" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+});
+
+test("chapter workbench persists a locked contract and queued job", async ({ page }, testInfo) => {
+  const project = await createProject(page, testInfo, "writing");
+  const canon = await (await page.request.get(`/api/v1/projects/${project.id}/canon`)).json();
+  const locked = await page.request.post(`/api/v1/projects/${project.id}/canon/lock`, { data: { expectedRevision: canon.documents[0].revision } });
+  expect(locked.ok()).toBe(true);
+  await page.getByRole("link", { name: /章节写作/ }).click();
+  await expect(page.getByRole("heading", { name: "章节写作工作台" })).toBeVisible();
+  await page.getByRole("button", { name: /生成章节契约/ }).click();
+  await expect(page.getByText("DRAFT", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /校验并锁定/ }).click();
+  await expect(page.getByText("LOCKED", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /创建写作任务/ }).first().click();
+  await expect(page.getByRole("button", { name: /开始生成本章/ })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("LOCKED", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /开始生成本章/ })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+});
+
+test("quality center remains usable at both desktop baselines", async ({ page }, testInfo) => {
+  await createProject(page, testInfo, "quality");
+  await page.getByRole("link", { name: /质量中心/ }).click();
+  await expect(page.getByRole("heading", { name: "章节质量中心" })).toBeVisible();
+  await expect(page.getByText("综合质量门")).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
 });

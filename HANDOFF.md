@@ -1,151 +1,84 @@
-# Story Agent 第五阶段交接与 GPT-5.6 审计结果
+# Story Agent 第六阶段交接
 
 更新时间：2026-07-13
-分支：`agent/chapter-pipeline-foundation`
-第五阶段基线：`565d7b3`
-另一台电脑交付端点：`5b1ef1d`
-草稿 PR：https://github.com/zuming58/Story-Agent/pull/4
-GPT-5.6 审计修复提交：`c380317`
-当前状态：第五阶段实现、深度审计、修复、全量验证和远端推送均已完成；PR #4 已具备合并条件。
+分支：`agent/chapter-workbench`
+阶段基线：`bbc366d`（PR #4 合并提交）
+第六阶段实现提交：`452d744`
+第七阶段交接文档提交：`f7b3b4b`
+草稿 PR：https://github.com/zuming58/Story-Agent/pull/5
+当前状态：第六阶段代码、视觉验收、全量验证、远端推送和草稿 PR 均已完成；等待 GPT-5.6 合并 PR #5 后创建第七阶段分支。
 
-## 1. 阶段目标与数据权威
+## 1. 本阶段完成内容
 
-第五阶段完成单章生产闭环：
+第六阶段把第五阶段章节流水线接入正式桌面 UI：
 
-```text
-章节契约
-  -> 固定上下文
-  -> 候选正文
-  -> 候选事实抽取
-  -> 确定性质量门
-  -> continuity / story_editor / style 三角色评审
-  -> 最多两轮修订
-  -> 人工或 guarded_auto 批准
-  -> 正文、来源版本、状态、快照、索引和审计原子提交
-```
+- `/writing`：章节状态轨道、契约生成/编辑/锁定、任务创建/运行/取消/恢复、上下文追踪、候选正文编辑、版本历史与差异。
+- `/quality`：确定性规则、连续性审稿、故事编辑、文风审稿、问题证据、风险接受、自动修订、人工批准与 guarded_auto 正式提交。
+- `/settings`：增加“模型配置 / 安全审计”分栏，原备份与调用诊断页面不再占用质量中心路由。
+- 右侧故事 Agent 在写作/质量页面显示章节、契约、正文版本和选区作用域；AI 选区建议必须由用户应用到编辑缓冲区并保存为新候选版本。
+- 页面使用真实第五阶段 API，不依赖静态业务模拟。
 
-- SQLite 是契约、候选稿、质量结果、正式正文与状态的唯一权威。
-- `manuscripts/chapter-XXXX.md` 是可重建镜像，写入失败不会伪装成数据库提交失败。
-- 模型生成、抽取和评审期间不持有项目数据库长事务。
-- 候选正文与候选事实在正式提交前不会污染 Canon、current state 或正式正文。
-- `apps/web/**` 页面组件、CSS、设计令牌和 UI 风格没有被修改；仅将 Playwright 测试端口由被占用的 4173 调整为 4174。
+UI 仍沿用“墨曜指挥舱”：深墨蓝、暖金操作、紧凑章节轨道和固定右侧 Agent。1440×1024 与 1280×800 均无横向溢出；1280 下生产流水线自动下沉，不压缩正文编辑区。
 
-## 2. 已实现的数据与 API
+## 2. 数据库与后端扩展
 
-项目迁移：`0006_chapter_pipeline`
+新增项目迁移：
 
-新增表：
+- `0007_chapter_draft_current`
 
-- `chapter_contracts`
-- `chapter_jobs`
-- `chapter_drafts`
-- `chapter_extractions`
-- `quality_runs`
-- `quality_findings`
-- `chapter_commits`
+`chapter_drafts` 新增 `is_current`：
 
-主要 API：
+- 每个 chapter job 只允许一份当前候选稿；
+- 迁移时将每个任务版本号最高的旧稿标记为 current；
+- 新生成、自动修订和人工编辑均创建新版本，不覆盖旧稿；
+- 用户可恢复历史候选版本；正式正文和 current state 不受候选版本切换影响。
 
-- `POST /api/v1/projects/{project_id}/chapter-contracts/derive`
-- `GET /api/v1/projects/{project_id}/chapter-contracts`
-- `GET|PUT /api/v1/projects/{project_id}/chapter-contracts/{contract_id}`
-- `POST /api/v1/projects/{project_id}/chapter-contracts/{contract_id}/lock`
-- `POST /api/v1/projects/{project_id}/chapter-jobs`
-- `GET /api/v1/projects/{project_id}/chapter-jobs`
-- `GET /api/v1/projects/{project_id}/chapter-jobs/{job_id}`
-- `POST /api/v1/projects/{project_id}/chapter-jobs/{job_id}/run|cancel|retry|revise|approve|commit`
-- `GET /api/v1/projects/{project_id}/chapters/{chapter_number}/drafts`
-- `GET /api/v1/projects/{project_id}/chapter-drafts/{draft_id}`
-- `GET /api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality`
-- `POST /api/v1/projects/{project_id}/quality-findings/{finding_id}/accept-risk`
+新增接口：
 
-## 3. GPT-5.6 审计发现及已完成修复
+- `GET /api/v1/projects/{project_id}/chapters/{chapter_number}/commits`
+- `POST /api/v1/projects/{project_id}/chapter-jobs/{job_id}/manual-revisions`
+- `POST /api/v1/projects/{project_id}/chapter-jobs/{job_id}/drafts/{draft_id}/activate`
 
-### P0/P1 边界修复
+人工正文保存要求 parent draft revision 与 job revision；保存后重新运行事实抽取和完整质量门。外部模型调用仍位于短事务之外。
 
-1. **防止提前消费后续剧情**
-   - 原实现会把第 8 章里程碑作为第 1 章的 `mustAdvance`，会直接制造“100 章内容 10—20 章写完”的问题。
-   - 现在里程碑到达允许窗口前只能做最小铺垫，并进入 `mustNotComplete`；完成条件只在允许窗口内启用。
-   - 增加全书章节范围、后续节点、禁提前人物/能力/道具、重大事件预算和伏笔窗口校验。
+## 3. 前端数据权威
 
-2. **契约上下文防漂移**
-   - 锁定、运行和正式提交前均校验 plan node revision、最新 official state snapshot 及完整 locked Canon digest。
-   - Canon 文档、实体类型、实体、关系或规则发生变化后，旧契约不能继续运行或提交。
+- React Query：章节契约、任务、候选稿、抽取、质量报告、上下文追踪和提交历史。
+- Zustand：当前章节、当前任务、Agent 面板和选区等 UI 状态。
+- 业务正文、质量报告和提交状态不写入 `localStorage`。
+- 刷新页面后从 SQLite 恢复契约、任务、当前候选版本、质量结果和正式提交。
+- 409 revision 冲突会刷新服务端最新数据，不覆盖其他操作。
 
-3. **任务状态机与取消恢复**
-   - 补齐 queued/run、failed/interrupted/retry、cancel_requested/cancelled 的合法转换和 revision 递增。
-   - 在上下文、生成、抽取、校验和各 reviewer 边界检查取消请求。
-   - 服务启动可收敛遗留运行任务；已完成任务不能被取消。
+## 4. 验证结果
 
-4. **修订失败不破坏既有证据**
-   - 原实现会在修订模型成功前提前 supersede 质量问题，模型失败后丢失审计证据并卡住任务。
-   - 现在仅在新稿、抽取和质量流程成功后 supersede 旧 findings；失败时回到 `human_review`，保留旧 findings 和修订轮次。
+- 第五/六阶段专项 API：`23 passed`
+- `npm run test`：API `76 passed`；Web `3 files / 9 tests passed`
+- `npm run build`：通过，仅保留既有 Vite chunk-size warning
+- `npm run test:e2e`：Playwright `10 passed`；覆盖契约锁定、任务刷新恢复、质量中心与两个桌面分辨率
+- 浏览器人工视觉检查：1440×1024、1280×800 无横向溢出，Agent 不遮挡编辑区
+- Python compileall 与敏感文件检查：推送前最终执行
 
-5. **guarded_auto 与风险接受**
-   - guarded_auto 必须有成功的确定性质量门、三个成功 reviewer、validated extraction，且无 open/accepted-risk 的 error 或 blocker。
-   - 风险接受只能作用于 open finding；接受严重问题不能绕过自动批准。
+## 5. 已知限制
 
-6. **正式提交原子性与失败收敛**
-   - 正文、SourceVersion、状态变化、快照、索引、ChapterCommit 和审计在同一项目事务内提交。
-   - revision/context 漂移、状态冲突和注入式异常均回滚正式数据，并把任务持久化收敛到 `human_review`。
-   - Catalog `currentChapter` 改为项目事务成功后的 best-effort 同步，失败会审计但不会谎报项目事务失败。
-   - 重复 commit 幂等返回现有正式提交。
+- 本阶段没有实现后台定时器、每日多章队列、费用日限额和自动日报；这些属于第七阶段。
+- 当前章节 run/revise 接口是同步请求驱动，但状态写入采用可恢复阶段机，模型调用期间不持有项目写事务。
+- Playwright 不调用真实付费模型；模型生成、抽取、三 reviewer 和 reviser 由 API 测试中的本地 OpenAI 兼容假服务覆盖。
+- 当前构建单 chunk 仍大于 500 kB，后续前端阶段可做路由级 lazy loading。
 
-7. **正式章节重写**
-   - 已发布章节可创建新契约；锁定新契约时旧 locked contract 原子转为 `superseded`。
-   - 未发布章节仍严格禁止两个 locked contract。
-   - 新正文提交后旧 SourceVersion、旧 current fact 和旧 current ChapterCommit 被正确取代，历史版本保留。
+## 6. 下一台电脑当前任务
 
-8. **模型与抽取安全**
-   - 密钥存储/Provider 异常统一为脱敏错误，`model_runs` 正确收敛为 failed。
-   - 非法抽取 JSON 只允许一次修复重试；失败不会生成 official state。
-   - 增加 `expectedCurrentValue` 的提交前冲突检查。
+只实施 [docs/plans/PHASE-7-AUTOMATION.md](docs/plans/PHASE-7-AUTOMATION.md) 中定义的第七阶段自动托管后端。
 
-## 4. 新增审计测试覆盖
+禁止事项：
 
-第五阶段专项测试从 5 条扩展为 20 条，新增覆盖：
+- 不修改 `apps/web/**`、CSS、设计令牌、Playwright 视觉与 UI 文案；UI 仍由当前电脑独占维护。
+- 不提前开发短篇策略、短剧改编、外部平台自动发布或 Windows 打包。
+- 不提交 API Key、`.data`、SQLite、日志、备份 ZIP、测试临时文件、`Story agent/` 和 `openclaw skill/`。
+- 不绕过 Phase 5 的契约、revision、质量门、候选状态和原子提交规则。
 
-- 早期章节契约防抢跑、章节越界和非法空值更新；
-- plan、Canon、snapshot/revision 漂移；
-- expectedCurrentValue 状态冲突；
-- guarded_auto reviewer 完整性及严重风险不可绕过；
-- 修订失败保留 findings 与轮次；
-- 启动恢复、重试时间字段和取消收敛；
-- 跨作品隔离；
-- 提交异常全事务回滚；
-- 非法抽取只重试一次；
-- 模型调用期间不持有项目写锁；
-- 禁提前内容、节奏预算；
-- 正式章节重写及历史版本替换；
-- 备份/恢复包含第五阶段数据和正文镜像。
+完成第七阶段后必须运行 API 全量测试、更新本文件、提交并推送指定分支，然后停止等待 GPT-5.6 审计。
 
-## 5. 最终验证结果
-
-- 第五阶段专项：`20 passed`
-- `npm run test`：API `74 passed`；Web `3 files / 8 tests passed`
-- `npm run build`：通过；仅保留既有 Vite chunk-size warning
-- `npm run test:e2e`：`6 passed`，覆盖 1440×1024 与 1280×800
-- `git diff --check`：通过，仅有 Windows LF/CRLF 提示
-- UI 视觉代码：未修改
-
-第一次并行运行 build/test/e2e 时，端到端测试与迁移争用同一个隔离测试库并超时；已删除且仅删除 `apps/web/.e2e-data` 测试残留，改用空闲端口 4174 后独立复跑 6/6 通过。正式 `.data` 未被读取、修改或删除。
-
-## 6. 已知限制
-
-- 第五阶段只交付后端生产闭环和测试，尚未开发章节工作台 UI；UI 仍由当前 GPT-5.6 电脑独占维护。
-- 当前 runner 由同步 HTTP 请求驱动，但所有外部模型调用前后使用短事务；后续可换后台队列而不改变状态机语义。
-- SQLite 的 Python 3.13 datetime adapter 及 Starlette TestClient 有上游弃用警告，不影响当前功能。
-- Web 构建仍有既有单 chunk 大于 500 kB 的警告，可在后续前端阶段做路由级拆包。
-
-## 7. 下一步与协作边界
-
-1. 确认 PR #4 远端差异后合并到 `main`（当前没有配置 GitHub Actions 检查，验收结果以本文件记录的本地全量测试为准）。
-2. 合并后再制定第六阶段计划；不要让另一台电脑在本分支继续扩大范围。
-3. 下一阶段若包含 UI，仍由当前电脑实现；另一台电脑只负责明确划定的后端、数据库和自动化测试。
-
-禁止提交：API Key、`.data`、SQLite 文件、日志、备份 ZIP、临时文件、`Story agent/` 和 `openclaw skill/`。
-
-## 8. 常用命令
+## 7. 常用命令
 
 ```powershell
 npm --prefix apps/web install

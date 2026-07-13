@@ -7,6 +7,7 @@ import "@fontsource-variable/noto-sans-sc/index.css";
 import "@fontsource/noto-serif-sc/600.css";
 import { App } from "./App";
 import "./styles.css";
+import "./workbench.css";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },

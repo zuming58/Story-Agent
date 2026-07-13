@@ -683,6 +683,7 @@ class ChapterDraftOut(ApiModel):
     model_run_id: str | None = None
     context_trace_id: str | None = None
     status: str
+    is_current: bool
     revision: int
     created_at: datetime
     updated_at: datetime
@@ -750,6 +751,19 @@ class QualityFindingAcceptRisk(ApiModel):
 
 class ChapterRevisionRequest(ApiModel):
     reason: str = ""
+
+
+class ChapterManualRevisionRequest(ApiModel):
+    content_markdown: str = Field(min_length=1, max_length=1000000)
+    reason: str = Field(default="", max_length=2000)
+    parent_draft_id: str
+    expected_parent_revision: int = Field(ge=1)
+    expected_job_revision: int = Field(ge=1)
+
+
+class ChapterDraftActivateRequest(ApiModel):
+    expected_draft_revision: int = Field(ge=1)
+    expected_job_revision: int = Field(ge=1)
 
 
 class ChapterApproveRequest(ApiModel):

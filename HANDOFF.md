@@ -3,6 +3,8 @@
 更新时间：2026-07-13
 当前分支：`agent/trial-ready-workbench`
 开发基线：`7a808b4`
+功能提交：`69cf759`
+草稿 PR：[#8](https://github.com/zuming58/Story-Agent/pull/8)
 状态：当前电脑实施与自审计完成，等待用户 UI 和单章流程确认；未合并 `main`
 
 ## 1. 本阶段已完成

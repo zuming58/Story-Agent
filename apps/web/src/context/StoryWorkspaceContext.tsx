@@ -32,6 +32,7 @@ interface StoryWorkspaceValue {
   errorMessage: string | null;
   selectProject: (id: string) => void;
   createProject: (payload: ProjectCreateRequest) => Promise<ProjectSummary>;
+  createMilestone: (payload: Omit<PlanNode, "id" | "revision">) => Promise<PlanNode>;
   updateMilestone: (id: string, changes: Partial<PlanNode>) => Promise<void>;
   sendMessage: (content: string, action?: string, selectedNodeId?: string | null) => Promise<void>;
   cancelRun: () => Promise<void>;
@@ -64,7 +65,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (projects.length && (!activeProjectId || !projects.some((item) => item.id === activeProjectId))) {
-      setActiveProjectId(projects[0].id);
+      setActiveProjectId((projects.find((item) => item.projectKind === "standard") ?? projects[0]).id);
     }
   }, [projects, activeProjectId, setActiveProjectId]);
 
@@ -101,6 +102,12 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
   };
 
   const createMutation = useMutation({ mutationFn: api.createProject });
+  const createNodeMutation = useMutation({
+    mutationFn: (payload: Omit<PlanNode, "id" | "revision">) => {
+      if (!project) throw new Error("作品尚未加载");
+      return api.createNode(project.id, payload);
+    },
+  });
   const updateMutation = useMutation({
     mutationFn: ({ id, changes }: { id: string; changes: Partial<PlanNode> }) => {
       if (!project || !plan) throw new Error("作品尚未加载");
@@ -184,6 +191,15 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
         await client.invalidateQueries({ queryKey: ["projects"] });
         setActiveProjectId(created.id);
         setNotice(`已创建作品“${created.title}”。`);
+        return created;
+      } catch (error) { handleError(error); throw error; }
+    },
+    createMilestone: async (payload) => {
+      try {
+        const created = await createNodeMutation.mutateAsync(payload);
+        await invalidateWorkspace();
+        selectMilestone(created.id);
+        setNotice("规划窗口已创建并写入作品数据库。");
         return created;
       } catch (error) { handleError(error); throw error; }
     },

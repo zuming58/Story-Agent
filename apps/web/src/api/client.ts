@@ -10,6 +10,8 @@ import type {
   BackupRecord,
   BackupManifest,
   CanonChangeRequest,
+  CanonGenerationProposal,
+  CanonReadiness,
   CanonWorkspace,
   ChapterCommit,
   ChapterContract,
@@ -28,6 +30,8 @@ import type {
   QualityFinding,
   QualityReport,
   StoryPlan,
+  StoryBrief,
+  PlanGenerationProposal,
   TrialReadiness,
   TrialRunSize,
 } from "../types";
@@ -60,6 +64,8 @@ export const api = {
   plan: (projectId: string) => request<StoryPlan>(`/projects/${projectId}/plan`),
   updateNode: (projectId: string, nodeId: string, payload: Partial<PlanNode> & { expectedRevision: number }) =>
     request<PlanNode>(`/projects/${projectId}/plan/nodes/${nodeId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  createNode: (projectId: string, payload: Omit<PlanNode, "id" | "revision">) =>
+    request<PlanNode>(`/projects/${projectId}/plan/nodes`, { method: "POST", body: JSON.stringify(payload) }),
   sessions: (projectId: string) => request<AgentSession[]>(`/projects/${projectId}/agent/sessions`),
   createSession: (projectId: string, scope: string[]) => request<AgentSession>(`/projects/${projectId}/agent/sessions`, { method: "POST", body: JSON.stringify({ scope }) }),
   sendMessage: (sessionId: string, payload: { projectId: string; content: string; selectedNodeId?: string }) =>
@@ -210,6 +216,22 @@ export const api = {
     request<CanonChangeRequest>(`/canon/change-requests/${requestId}/apply`, { method: "POST", body: JSON.stringify({ projectId, expectedRevision }) }),
   rejectCanonChangeRequest: (projectId: string, requestId: string, expectedRevision: number) =>
     request<CanonChangeRequest>(`/canon/change-requests/${requestId}/reject`, { method: "POST", body: JSON.stringify({ projectId, expectedRevision }) }),
+  canonGenerationProposals: (projectId: string) =>
+    request<CanonGenerationProposal[]>(`/projects/${projectId}/canon/generation-proposals`),
+  createCanonGenerationProposal: (projectId: string, payload: StoryBrief) =>
+    request<CanonGenerationProposal>(`/projects/${projectId}/canon/generation-proposals`, { method: "POST", body: JSON.stringify(payload) }),
+  applyCanonGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<CanonWorkspace>(`/canon/generation-proposals/${proposalId}/apply`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  rejectCanonGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<CanonGenerationProposal>(`/canon/generation-proposals/${proposalId}/reject`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  canonReadiness: (projectId: string) => request<CanonReadiness>(`/projects/${projectId}/canon/readiness`),
+  planGenerationProposals: (projectId: string) => request<PlanGenerationProposal[]>(`/projects/${projectId}/plan/generation-proposals`),
+  createPlanGenerationProposal: (projectId: string, expectedPlanRevision: number) =>
+    request<PlanGenerationProposal>(`/projects/${projectId}/plan/generation-proposals`, { method: "POST", body: JSON.stringify({ expectedPlanRevision, preciseChapterCount: 5 }) }),
+  applyPlanGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<StoryPlan>(`/plan/generation-proposals/${proposalId}/apply`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  rejectPlanGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<PlanGenerationProposal>(`/plan/generation-proposals/${proposalId}/reject`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
   trialReadiness: (projectId: string, chapterCount: TrialRunSize) =>
     request<TrialReadiness>(`/projects/${projectId}/trial-readiness?chapterCount=${chapterCount}`),
   automationPolicy: (projectId: string) => request<AutomationPolicy>(`/projects/${projectId}/automation/policy`),

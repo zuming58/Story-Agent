@@ -81,6 +81,7 @@ from .schemas import (
     ModelProviderCreate,
     ModelProviderUpdate,
     ModelRoleBindingUpdate,
+    PlanNodeCreate,
     RetrievalHit,
     RetrievalQuery,
     RetrievalStatus,
@@ -307,9 +308,11 @@ class StoryService:
         self.phase4 = Phase4Service(self)
         from .phase5 import Phase5Service
         from .phase7 import Phase7Service
+        from .phase8 import Phase8Service
 
         self.phase5 = Phase5Service(self)
         self.phase7 = Phase7Service(self)
+        self.phase8 = Phase8Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -317,9 +320,10 @@ class StoryService:
     def initialize(self) -> None:
         self._ensure_model_role_bindings()
         if self.settings.seed_demo and not self.list_projects():
-            self.create_project(ProjectCreate(title="夜巡人", mode="long-form", total_chapters=1000), seed_demo=True)
+            self.create_project(ProjectCreate(title="夜巡人·演示（从第36章开始）", mode="long-form", total_chapters=1000), seed_demo=True)
         self._recover_interrupted_model_runs()
         self.phase4.ensure_existing_projects()
+        self.phase8.recover_interrupted_generations()
         self.phase5.recover_interrupted_jobs()
         self.phase7.recover_interrupted_automation()
 
@@ -645,6 +649,7 @@ class StoryService:
             folder_path=str(folder),
             current_chapter=36 if seed_demo else 0,
             total_chapters=payload.total_chapters,
+            project_kind="demo" if seed_demo else "standard",
             created_at=now,
             updated_at=now,
             last_opened_at=now,
@@ -699,6 +704,7 @@ class StoryService:
             "mode": project.mode,
             "currentChapter": project.current_chapter,
             "totalChapters": project.total_chapters,
+            "projectKind": project.project_kind,
             "schemaVersion": project.schema_version,
         }
         (folder / "project.json").write_text(json.dumps(project_json, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -716,6 +722,7 @@ class StoryService:
             session.add(ProjectMeta(
                 id=project.id, title=project.title, mode=project.mode,
                 current_chapter=project.current_chapter, total_chapters=project.total_chapters,
+                project_kind=project.project_kind,
             ))
             session.add(Plan(
                 id=plan_id,
@@ -803,12 +810,53 @@ class StoryService:
                 raise StoryError(409, "REVISION_CONFLICT", "规划已被其他操作修改。", {"expectedRevision": payload.expected_revision, "currentRevision": node.revision})
             before = self._node_dict(node)
             changes = payload.model_dump(exclude_none=True, exclude={"expected_revision"})
-            json_fields = {"prerequisites": "prerequisites_json", "completion_conditions": "completion_conditions_json", "foreshadows": "foreshadows_json", "contracts": "contracts_json"}
+            json_fields = {
+                "prerequisites": "prerequisites_json",
+                "completion_conditions": "completion_conditions_json",
+                "foreshadows": "foreshadows_json",
+                "contracts": "contracts_json",
+                "chapter_beats": "chapter_beats_json",
+            }
             for key, value in changes.items():
+                if key == "chapter_beats":
+                    value = [beat.model_dump(by_alias=True) for beat in (payload.chapter_beats or [])]
                 setattr(node, json_fields.get(key, key), dumps(value) if key in json_fields else value)
             self._validate_node(node)
             node.revision += 1
             session.add(self._audit("plan_node.updated", "plan_node", node.id, {"before": before, "after": self._node_dict(node), "reversible": True}, request_id))
+            session.flush()
+            return self._node_dict(node)
+
+    def create_plan_node(self, project_id: str, payload: PlanNodeCreate, request_id: str) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        with self.db.project_write(project_id, project.folder_path) as session:
+            plan = session.scalar(select(Plan))
+            if not plan:
+                raise StoryError(404, "PLAN_NOT_FOUND", "作品规划不存在。")
+            node = PlanNode(
+                id=str(uuid4()),
+                plan_id=plan.id,
+                title=payload.title,
+                type=payload.type,
+                target_chapter=payload.target_chapter,
+                range_min=payload.range_min,
+                range_max=payload.range_max,
+                importance=payload.importance,
+                note=payload.note,
+                prerequisites_json=dumps(payload.prerequisites),
+                completion_conditions_json=dumps(payload.completion_conditions),
+                foreshadows_json=dumps(payload.foreshadows),
+                contracts_json=dumps(payload.contracts),
+                chapter_beats_json=dumps([beat.model_dump(by_alias=True) for beat in payload.chapter_beats]),
+                pace=payload.pace,
+                revision=1,
+            )
+            self._validate_node(node)
+            session.add(node)
+            session.add(self._audit("plan_node.created", "plan_node", node.id, {
+                "after": self._node_dict(node),
+                "reversible": False,
+            }, request_id))
             session.flush()
             return self._node_dict(node)
 
@@ -1809,6 +1857,19 @@ class StoryService:
             raise StoryError(422, "TARGET_OUTSIDE_RANGE", "目标章节必须位于允许范围内。", {"targetChapter": node.target_chapter, "rangeMin": node.range_min, "rangeMax": node.range_max})
         if not loads(node.prerequisites_json) or not loads(node.completion_conditions_json):
             raise StoryError(422, "INCOMPLETE_MILESTONE_CONTRACT", "里程碑必须包含前置条件和完成条件。")
+        beats = loads(node.chapter_beats_json)
+        if not isinstance(beats, list):
+            raise StoryError(422, "INVALID_CHAPTER_BEATS", "章节节拍必须是列表。")
+        seen: set[int] = set()
+        for beat in beats:
+            if not isinstance(beat, dict):
+                raise StoryError(422, "INVALID_CHAPTER_BEATS", "章节节拍结构无效。")
+            chapter_number = beat.get("chapterNumber", beat.get("chapter_number"))
+            if not isinstance(chapter_number, int) or chapter_number < node.range_min or chapter_number > node.range_max:
+                raise StoryError(422, "CHAPTER_BEAT_OUTSIDE_RANGE", "章节节拍必须位于规划窗口内。", {"chapterNumber": chapter_number})
+            if chapter_number in seen:
+                raise StoryError(422, "DUPLICATE_CHAPTER_BEAT", "同一规划窗口不能包含重复章节节拍。", {"chapterNumber": chapter_number})
+            seen.add(chapter_number)
 
     def _apply_proposal_operation(self, node: PlanNode, operation: ChangeOperation) -> None:
         if operation.field not in PROPOSAL_FIELD_MAP:
@@ -1831,12 +1892,29 @@ class StoryService:
         node.completion_conditions_json = dumps(data.get("completionConditions", []))
         node.foreshadows_json = dumps(data.get("foreshadows", []))
         node.contracts_json = dumps(data.get("contracts", []))
+        node.chapter_beats_json = dumps(data.get("chapterBeats", []))
 
     def _audit(self, event_type: str, entity_type: str, entity_id: str, payload: dict[str, Any], request_id: str) -> AuditEvent:
         return AuditEvent(id=str(uuid4()), event_type=event_type, entity_type=entity_type, entity_id=entity_id, payload_json=dumps(payload), request_id=request_id)
 
     def _node_dict(self, node: PlanNode) -> dict[str, Any]:
-        return {"id": node.id, "title": node.title, "type": node.type, "targetChapter": node.target_chapter, "rangeMin": node.range_min, "rangeMax": node.range_max, "importance": node.importance, "note": node.note, "prerequisites": loads(node.prerequisites_json), "completionConditions": loads(node.completion_conditions_json), "foreshadows": loads(node.foreshadows_json), "contracts": loads(node.contracts_json), "pace": node.pace, "revision": node.revision}
+        return {
+            "id": node.id,
+            "title": node.title,
+            "type": node.type,
+            "targetChapter": node.target_chapter,
+            "rangeMin": node.range_min,
+            "rangeMax": node.range_max,
+            "importance": node.importance,
+            "note": node.note,
+            "prerequisites": loads(node.prerequisites_json),
+            "completionConditions": loads(node.completion_conditions_json),
+            "foreshadows": loads(node.foreshadows_json),
+            "contracts": loads(node.contracts_json),
+            "chapterBeats": loads(node.chapter_beats_json),
+            "pace": node.pace,
+            "revision": node.revision,
+        }
 
     def _plan_dict(self, plan: Plan) -> dict[str, Any]:
         return {"id": plan.id, "bookTitle": plan.book_title, "volumeTitle": plan.volume_title, "arcTitle": plan.arc_title, "chapterStart": plan.chapter_start, "chapterEnd": plan.chapter_end, "revision": plan.revision, "milestones": [self._node_dict(node) for node in sorted(plan.nodes, key=lambda item: item.target_chapter)], "markers": [{"id": marker.id, "kind": marker.kind, "chapter": marker.chapter, "label": marker.label} for marker in sorted(plan.markers, key=lambda item: item.chapter)]}

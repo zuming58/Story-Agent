@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -426,6 +427,69 @@ def test_canon_analysis_invalid_json_retries_once_without_writing_or_echoing_raw
     assert calls == 2
     assert "RAW_MODEL_SECRET" not in response.text
     assert client.get(f"/api/v1/projects/{demo_project['id']}/canon").json() == before
+
+
+def test_canon_analysis_preserves_story_core_and_resolves_relations_by_canonical_name(
+    client: TestClient,
+    demo_project: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = client.post("/api/v1/model-providers", json={
+        "name": "Architect Structured Test",
+        "baseUrl": "https://architect-structured.example.test",
+        "apiKey": "architect-structured-secret",
+    }).json()
+    model = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={
+        "modelId": "architect-structured-json",
+        "displayName": "Architect Structured JSON",
+    }).json()
+    assert client.put("/api/v1/model-role-bindings/architect", json={"modelId": model["id"]}).status_code == 200
+
+    async def structured_json(_self: object, _payload: dict) -> ModelStreamResult:
+        return ModelStreamResult(text=json.dumps({
+            "documents": [{
+                "id": "story-core",
+                "title": "MODEL MUST NOT OVERWRITE",
+                "contentMarkdown": "MODEL MUST NOT OVERWRITE",
+            }],
+            "entityTypes": [{
+                "name": "person",
+                "displayName": "人物",
+                "schemaJson": {"type": "object", "properties": {"unexpected": {"type": "string"}}},
+            }],
+            "entities": [
+                {"canonicalName": "沈砚", "entityTypeName": "person", "aliasesJson": [], "attributesJson": {"name": "沈砚"}},
+                {"canonicalName": "巡夜灯", "entityTypeName": "item", "aliasesJson": [], "attributesJson": {"name": "巡夜灯"}},
+            ],
+            "relations": [{
+                "subjectCanonicalName": "沈砚",
+                "predicate": "持有",
+                "objectCanonicalName": "巡夜灯",
+            }],
+            "rules": [{
+                "ruleCode": "NIGHT-LAMP-COST",
+                "category": "ability_cost",
+                "statement": "每次强行照祟都会模糊一段温暖记忆。",
+                "severity": "high",
+                "constraintJson": {"requiresCost": True},
+            }],
+        }, ensure_ascii=False))
+
+    monkeypatch.setattr(phase4_module.OpenAICompatibleModelProvider, "complete_chat", structured_json)
+    before = client.get(f"/api/v1/projects/{demo_project['id']}/canon").json()
+    response = client.post(f"/api/v1/projects/{demo_project['id']}/canon/analyze", json={
+        "projectId": demo_project["id"],
+        "sourceText": "沈砚持有巡夜灯，使用会失去记忆。",
+    })
+    assert response.status_code == 200, response.text
+    canon = response.json()
+    assert canon["documents"][0]["contentMarkdown"] == before["documents"][0]["contentMarkdown"]
+    assert {item["canonicalName"] for item in canon["entities"]} >= {"沈砚", "巡夜灯"}
+    by_id = {item["id"]: item["canonicalName"] for item in canon["entities"]}
+    relation = canon["relations"][0]
+    assert by_id[relation["subjectEntityId"]] == "沈砚"
+    assert by_id[relation["objectEntityId"]] == "巡夜灯"
+    assert canon["rules"][0]["ruleCode"] == "NIGHT-LAMP-COST"
 
 
 def test_custom_canon_schema_rejects_wrong_attribute_type_and_extra_fields(client: TestClient, demo_project: dict) -> None:

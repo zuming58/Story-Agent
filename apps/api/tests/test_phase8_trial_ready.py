@@ -112,6 +112,49 @@ def test_active_chapter_job_blocks_only_its_own_project(client: TestClient) -> N
     assert "TRIAL_CHAPTER_JOB_CONFLICT" not in second_codes
 
 
+def test_readiness_requires_per_chapter_beats_and_ignores_cancelled_jobs(client: TestClient) -> None:
+    project = _create_trial_project(client, "Beat Guards")
+    project_id = project["id"]
+    window = client.post(f"/api/v1/projects/{project_id}/plan/nodes", json={
+        "title": "Five chapter window",
+        "type": "章节窗口",
+        "targetChapter": 1,
+        "rangeMin": 1,
+        "rangeMax": 5,
+        "importance": 5,
+        "prerequisites": ["Story begins"],
+        "completionConditions": ["Window is complete"],
+        "chapterBeats": [{
+            "chapterNumber": 1,
+            "title": "First beat",
+            "objective": "Advance only the first local goal",
+        }],
+    })
+    assert window.status_code == 201, window.text
+    readiness = client.get(f"/api/v1/projects/{project_id}/trial-readiness?chapterCount=3").json()
+    missing = next(item for item in readiness["checks"] if item["code"] == "TRIAL_CHAPTER_BEAT_MISSING")
+    assert missing["status"] == "blocked"
+    assert missing["chapterNumber"] == 2
+
+    lock_canon(client, project_id)
+    contract = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+        "chapterNumber": 1,
+        "planNodeId": window.json()["id"],
+    }).json()
+    locked = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/{contract['id']}/lock", json={
+        "expectedRevision": contract["revision"],
+    }).json()
+    job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={
+        "chapterContractId": locked["id"],
+    }).json()
+    cancelled = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/cancel")
+    assert cancelled.status_code == 200
+    codes = {item["code"] for item in client.get(
+        f"/api/v1/projects/{project_id}/trial-readiness?chapterCount=1"
+    ).json()["checks"]}
+    assert "TRIAL_CHAPTER_JOB_CONFLICT" not in codes
+
+
 def test_manual_trial_sizes_one_and_five_are_validated_and_frozen(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

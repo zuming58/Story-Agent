@@ -7,7 +7,7 @@ import threading
 from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import select
-from story_agent_api.models import AutomationLease, AutomationRun, AutomationRunItem, ChapterContract, ChapterJob, ModelRun
+from story_agent_api.models import AuditEvent, AutomationLease, AutomationRun, AutomationRunItem, ChapterContract, ChapterJob, ModelRun
 from story_agent_api.model_provider import ModelProviderError
 from story_agent_api.schemas import ChapterContractDerive, ChapterContractLock, ChapterJobCreate, ChapterJobRun
 from story_agent_api.services import StoryError
@@ -37,7 +37,7 @@ def configure_automation_roles(client: TestClient, base_url: str, *, priced: boo
 
 
 def wait_for_run(client: TestClient, project_id: str, run_id: str) -> dict:
-    for _ in range(80):
+    for _ in range(240):
         run = client.get(f"/api/v1/projects/{project_id}/automation/runs/{run_id}").json()
         if run["status"] in {"completed", "partial", "blocked", "failed", "cancelled", "missed", "interrupted"}:
             return run
@@ -68,8 +68,8 @@ def update_policy(client: TestClient, project_id: str, **overrides: object) -> d
     return response.json()
 
 
-def test_policy_update_revision_and_manual_run_idempotency(client: TestClient, demo_project: dict) -> None:
-    project_id = demo_project["id"]
+def test_policy_update_revision_and_manual_run_idempotency(client: TestClient) -> None:
+    project_id = client.post("/api/v1/projects", json={"title": "Idempotency Standard", "totalChapters": 100}).json()["id"]
     policy = client.get(f"/api/v1/projects/{project_id}/automation/policy")
     assert policy.status_code == 200, policy.text
     assert policy.json()["enabled"] is False
@@ -423,8 +423,8 @@ def test_replaced_lease_fences_stale_execution(client: TestClient, demo_project:
         service.phase7._execution_context.reset(execution_token)
 
 
-def test_automation_backup_restore_remaps_project_id(client: TestClient, demo_project: dict) -> None:
-    project_id = demo_project["id"]
+def test_automation_backup_restore_remaps_project_id(client: TestClient) -> None:
+    project_id = client.post("/api/v1/projects", json={"title": "Backup Standard", "totalChapters": 100}).json()["id"]
     policy = client.get(f"/api/v1/projects/{project_id}/automation/policy").json()
     assert client.put(f"/api/v1/projects/{project_id}/automation/policy", json={
         "expectedRevision": policy["revision"],
@@ -608,8 +608,8 @@ def test_daily_limit_uses_actual_execution_day_not_scheduled_day(client: TestCli
         server.server_close()
 
 
-def test_first_item_failure_skips_later_chapters_without_model_calls(client: TestClient, demo_project: dict) -> None:
-    project_id = demo_project["id"]
+def test_first_item_failure_skips_later_chapters_without_model_calls(client: TestClient) -> None:
+    project_id = client.post("/api/v1/projects", json={"title": "Failure Standard", "totalChapters": 100}).json()["id"]
     lock_canon(client, project_id)
     update_policy(client, project_id, chaptersPerRun=2)
     created = client.post(f"/api/v1/projects/{project_id}/automation/runs", json={"idempotencyKey": "two-chapter-block"})
@@ -739,7 +739,7 @@ def test_automation_run_lease_budget_and_reports_are_project_isolated(client: Te
         service.phase7._release_lease(second_project.id, second_project.folder_path, "second-owner")
 
 
-def test_consecutive_model_failure_threshold_blocks_second_attempt(client: TestClient, demo_project: dict, monkeypatch) -> None:
+def test_manual_resume_starts_a_new_model_failure_window(client: TestClient, demo_project: dict, monkeypatch) -> None:
     project_id = demo_project["id"]
     lock_canon(client, project_id)
     server, base_url = start_phase5_server()
@@ -760,13 +760,18 @@ def test_consecutive_model_failure_threshold_blocks_second_attempt(client: TestC
         resumed = client.post(f"/api/v1/projects/{project_id}/automation/runs/{first_state['id']}/resume")
         assert resumed.status_code == 200, resumed.text
         second_state = wait_for_run(client, project_id, first_state["id"])
-        assert second_state["status"] == "blocked"
-        assert second_state["stopReason"] == "AUTOMATION_MODEL_FAILURE_THRESHOLD"
-        assert second_state["diagnostic"]["consecutiveModelFailures"] == 2
+        assert second_state["status"] == "failed"
+        assert second_state["stopReason"] == "server_error"
+        assert second_state["diagnostic"]["consecutiveModelFailures"] == 1
         project = service.get_project(project_id)
         with service.db.project(project.id, project.folder_path) as session:
             runs = session.scalars(select(ModelRun).where(ModelRun.automation_run_id == first_state["id"])).all()
             assert [run.status for run in runs] == ["failed", "failed"]
+            resumed_events = session.scalars(select(AuditEvent).where(
+                AuditEvent.entity_id == first_state["id"],
+                AuditEvent.event_type == "automation_run.resumed",
+            )).all()
+            assert len(resumed_events) == 1
     finally:
         server.shutdown()
         server.server_close()

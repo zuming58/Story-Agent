@@ -6,6 +6,7 @@ export interface ProjectSummary {
   mode: StoryMode;
   currentChapter: number;
   totalChapters: number;
+  projectKind?: "demo" | "standard";
   model?: string;
   modelOnline?: boolean;
   automationSchedule?: string;
@@ -15,8 +16,19 @@ export interface ProjectSummary {
   lastOpenedAt: string;
 }
 
-export type MilestoneType = "事件" | "关键事件" | "转折点" | "高潮点";
+export type MilestoneType = "事件" | "关键事件" | "转折点" | "高潮点" | "章节窗口";
 export type PaceStatus = "smooth" | "fast" | "slow";
+
+export interface ChapterBeat {
+  chapterNumber: number;
+  title: string;
+  objective: string;
+  completionConditions: string[];
+  hooks: string[];
+  foreshadows: string[];
+  requiredCharacters: string[];
+  forbidden: string[];
+}
 
 export interface PlanNode {
   id: string;
@@ -31,6 +43,7 @@ export interface PlanNode {
   completionConditions: string[];
   foreshadows: string[];
   contracts: string[];
+  chapterBeats: ChapterBeat[];
   pace: PaceStatus;
   revision: number;
 }
@@ -565,6 +578,62 @@ export interface CanonWorkspace {
   relations: CanonRelation[];
   rules: CanonRule[];
   changeRequests: CanonChangeRequest[];
+}
+
+export interface StoryBrief {
+  title: string;
+  mode: StoryMode;
+  targetChapters: number;
+  genre: string;
+  premise: string;
+  tone: string;
+  worldPreferences: string[];
+  progressionPreset: "restrained-explicit" | "strong-numeric" | "rule-first";
+  romance: string;
+  forbiddenContent: string[];
+  referenceTraits: string[];
+}
+
+export interface ArchitectureCheck {
+  code: string;
+  status: "ready" | "warning" | "blocked";
+  detail: string;
+}
+
+export interface CanonGenerationProposal {
+  id: string;
+  projectId: string;
+  baseRevision: number;
+  status: "pending" | "applied" | "rejected";
+  brief: StoryBrief;
+  contentMarkdown: string;
+  structured: { entities: Array<Record<string, unknown>>; relations: Array<Record<string, unknown>>; rules: Array<Record<string, unknown>> };
+  readiness: { ready: boolean; checks: ArchitectureCheck[] };
+  modelRunId: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  appliedAt: string | null;
+}
+
+export interface CanonReadiness {
+  ready: boolean;
+  revision: number;
+  checks: ArchitectureCheck[];
+}
+
+export interface PlanGenerationProposal {
+  id: string;
+  projectId: string;
+  baseRevision: number;
+  status: "pending" | "applied" | "rejected";
+  plan: Record<string, unknown> & { nodes?: PlanNode[] };
+  validation: { valid: boolean; errors: Array<{ code: string; message: string }> };
+  modelRunId: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  appliedAt: string | null;
 }
 
 export type TrialReadinessStatus = "ready" | "warning" | "blocked";

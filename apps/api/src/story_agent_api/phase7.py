@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import contextvars
@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, selectinload
 
 from .models import (
+    AuditEvent,
     AutomationLease,
     AutomationDailyReport,
     AutomationPolicy,
@@ -268,6 +269,14 @@ class Phase7Service:
 
     def create_manual_run(self, project_id: str, payload: AutomationRunCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
+        if project.project_kind != "standard":
+            resolved = [self.service._resolve_role_model(role) for role in MODEL_ROLES_FOR_AUTOMATION]
+            local_test_only = bool(resolved) and all(
+                item and (item["provider"].base_url.startswith("http://127.0.0.1") or item["provider"].base_url.startswith("http://localhost"))
+                for item in resolved
+            )
+            if not local_test_only:
+                raise StoryError(409, "DEMO_PROJECT_WRITE_BLOCKED", "示例项目不能启动真实付费写作，请新建正式作品。")
         today = self._today_for_project(project.id, project.folder_path)
         should_dispatch = False
         with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -326,6 +335,14 @@ class Phase7Service:
                 "chapterNumber": chapter_number,
             })
 
+        add(
+            "TRIAL_STANDARD_PROJECT_REQUIRED",
+            "ready" if project.project_kind == "standard" else "blocked",
+            "正式作品",
+            "正式作品可以从第 1 章开始试写。" if project.project_kind == "standard" else "当前是演示项目，禁止真实付费写作。",
+            "/overview" if project.project_kind != "standard" else None,
+        )
+
         with self.service.db.project(project.id, project.folder_path) as session:
             meta = session.get(ProjectMeta, project.id)
             start = (meta.current_chapter if meta else project.current_chapter) + 1
@@ -347,7 +364,10 @@ class Phase7Service:
             ).where(
                 ChapterContract.chapter_number >= start,
                 ChapterContract.chapter_number <= min(end, total),
-                ChapterJob.status != "completed",
+                ChapterJob.status.in_([
+                    "queued", "compiling_context", "drafting", "extracting", "validating",
+                    "reviewing", "human_review", "revising", "approved", "cancel_requested",
+                ]),
             )).all()
             active_run = session.scalar(select(AutomationRun.id).where(
                 AutomationRun.status.in_(["queued", "running", "cancel_requested"])
@@ -408,15 +428,48 @@ class Phase7Service:
 
         if end > total:
             add("TRIAL_PROJECT_RANGE_EXCEEDED", "blocked", "试写范围超过作品章节数", f"作品共 {total} 章，本批次将到第 {end} 章。", "/overview", total + 1)
-        uncovered = [] if not plan else [
-            chapter for chapter in range(start, min(end, total) + 1)
-            if not any(node.range_min <= chapter <= node.range_max for node in nodes)
+        def node_for_chapter(chapter: int) -> PlanNode | None:
+            exact = sorted(
+                (node for node in nodes if node.target_chapter == chapter),
+                key=lambda node: (-node.importance, node.id),
+            )
+            if exact:
+                return exact[0]
+            covering = sorted(
+                (node for node in nodes if node.range_min <= chapter <= node.range_max),
+                key=lambda node: (-node.importance, node.target_chapter, node.id),
+            )
+            return covering[0] if covering else None
+
+        planned_nodes = {
+            chapter: node_for_chapter(chapter)
+            for chapter in range(start, min(end, total) + 1)
+        } if plan else {}
+        uncovered = [chapter for chapter, node in planned_nodes.items() if node is None]
+        missing_beats = [
+            chapter for chapter, node in planned_nodes.items()
+            if node is not None
+            and node.type == "章节窗口"
+            and not any(
+                isinstance(beat, dict)
+                and beat.get("chapterNumber", beat.get("chapter_number")) == chapter
+                for beat in loads(node.chapter_beats_json)
+            )
         ]
         if not plan or uncovered:
             detail = "作品规划不存在。" if not plan else "未覆盖章节：" + "、".join(map(str, uncovered))
             add("TRIAL_PLAN_GAP", "blocked", "故事规划存在缺口", detail, "/planning", uncovered[0] if uncovered else start)
         else:
             add("TRIAL_PLAN_READY", "ready", "规划覆盖试写范围", f"第 {start}—{min(end, total)} 章均有规划窗口。", "/planning")
+        if missing_beats:
+            add(
+                "TRIAL_CHAPTER_BEAT_MISSING",
+                "blocked",
+                "规划窗口缺少单章节拍",
+                "未拆分章节：" + "、".join(map(str, missing_beats)),
+                "/planning",
+                missing_beats[0],
+            )
 
         if current_commits:
             add("TRIAL_CHAPTER_ALREADY_COMMITTED", "blocked", "试写范围已有正式正文", "已有章节：" + "、".join(map(str, sorted(current_commits))), "/writing", min(current_commits))
@@ -433,7 +486,15 @@ class Phase7Service:
         for size in (1, 3, 5):
             candidate_end = start + size - 1
             if candidate_end <= total and plan and all(
-                any(node.range_min <= chapter <= node.range_max for node in nodes)
+                (node_for_chapter(chapter) is not None)
+                and (
+                    node_for_chapter(chapter).type != "章节窗口"
+                    or any(
+                        isinstance(beat, dict)
+                        and beat.get("chapterNumber", beat.get("chapter_number")) == chapter
+                        for beat in loads(node_for_chapter(chapter).chapter_beats_json)
+                    )
+                )
                 for chapter in range(start, candidate_end + 1)
             ):
                 structural_max = size
@@ -784,6 +845,8 @@ class Phase7Service:
             job = self.service.phase5.run_chapter_job(project_id, job_id, ChapterJobRun(), str(uuid4()))
         elif job["status"] in {"failed", "interrupted", "cancelled"}:
             job = self.service.phase5.resume_chapter_job(project_id, job_id, str(uuid4()))
+        elif job["status"] == "human_review" and job.get("errorCode"):
+            job = self.service.phase5.resume_chapter_job(project_id, job_id, str(uuid4()))
         if job["status"] not in {"human_review", "approved", "completed"}:
             raise StoryError(409, "AUTOMATION_CHAPTER_BLOCKED", "Chapter pipeline did not reach review.", {"jobStatus": job["status"]})
         if job["status"] == "completed":
@@ -1047,7 +1110,13 @@ class Phase7Service:
                 ChapterContract.status == "locked",
             ))
             if existing:
-                return self.service.phase5._contract_dict(existing)
+                try:
+                    self.service.phase5._assert_contract_fresh(session, project.id, existing)
+                except StoryError as exc:
+                    if exc.code != "CHAPTER_CONTEXT_STALE":
+                        raise
+                else:
+                    return self.service.phase5._contract_dict(existing)
             policy = session.get(AutomationPolicy, project.id)
             target_words_min = policy.target_words_min if policy else 1500
             target_words_max = policy.target_words_max if policy else 3000
@@ -1059,19 +1128,54 @@ class Phase7Service:
         return self.service.phase5.lock_chapter_contract(project.id, derived["id"], ChapterContractLock(expected_revision=derived["revision"]), str(uuid4()))
 
     def _ensure_job(self, project: Any, contract_id: str, run_id: str, chapter_number: int) -> dict[str, Any]:
+        key = f"automation:{run_id}:chapter:{chapter_number}"
         with self.service.db.project(project.id, project.folder_path) as session:
             existing = session.scalar(
                 select(ChapterJob)
                 .where(
                     ChapterJob.project_id == project.id,
                     ChapterJob.chapter_contract_id == contract_id,
-                    ChapterJob.status != "completed",
+                    ChapterJob.idempotency_key == key,
                 )
                 .order_by(ChapterJob.updated_at.desc())
             )
             if existing:
                 return self.service.phase5._job_dict(existing, session.get(ChapterContract, existing.chapter_contract_id))
-        key = f"automation:{run_id}:chapter:{chapter_number}"
+
+            # A process restart can leave a fully persisted candidate draft on an
+            # interrupted job which predates the automation run. Reuse that work
+            # instead of paying for a second writer call. Cancelled/failed jobs are
+            # deliberately excluded: cancellation is user intent, and failed jobs
+            # may belong to an obsolete contract or model configuration.
+            interrupted_jobs = session.scalars(
+                select(ChapterJob)
+                .where(
+                    ChapterJob.project_id == project.id,
+                    ChapterJob.chapter_contract_id == contract_id,
+                    ChapterJob.status == "interrupted",
+                )
+                .order_by(ChapterJob.updated_at.desc())
+            ).all()
+            for interrupted in interrupted_jobs:
+                has_candidate = session.scalar(
+                    select(ChapterDraft.id).where(
+                        ChapterDraft.project_id == project.id,
+                        ChapterDraft.chapter_job_id == interrupted.id,
+                        ChapterDraft.is_current.is_(True),
+                    )
+                )
+                linked_active_item = session.scalar(
+                    select(AutomationRunItem.id).where(
+                        AutomationRunItem.project_id == project.id,
+                        AutomationRunItem.chapter_job_id == interrupted.id,
+                        AutomationRunItem.status.in_({"waiting", "running"}),
+                    )
+                )
+                if has_candidate and not linked_active_item:
+                    return self.service.phase5._job_dict(
+                        interrupted,
+                        session.get(ChapterContract, interrupted.chapter_contract_id),
+                    )
         created = self.service.phase5.create_chapter_job(project.id, ChapterJobCreate(chapter_contract_id=contract_id, idempotency_key=key), str(uuid4()))
         return created
 
@@ -1151,9 +1255,11 @@ class Phase7Service:
             item = session.get(AutomationRunItem, item_id)
             if run.status == "cancel_requested":
                 raise StoryError(409, "AUTOMATION_RUN_CANCELLED", "Automation run cancellation was requested.")
-            failures = session.scalars(
-                select(ModelRun.status).where(ModelRun.automation_run_id == run.id).order_by(ModelRun.started_at.desc())
-            ).all()
+            failure_query = select(ModelRun.status).where(ModelRun.automation_run_id == run.id)
+            failure_window = self._failure_window_start(session, run.id)
+            if failure_window is not None:
+                failure_query = failure_query.where(ModelRun.started_at >= failure_window)
+            failures = session.scalars(failure_query.order_by(ModelRun.started_at.desc())).all()
             consecutive_failures = 0
             for status in failures:
                 if status == "failed":
@@ -1233,9 +1339,11 @@ class Phase7Service:
 
     def _consecutive_model_failures(self, project_id: str, folder_path: str, run_id: str) -> int:
         with self.service.db.project(project_id, folder_path) as session:
-            statuses = session.scalars(
-                select(ModelRun.status).where(ModelRun.automation_run_id == run_id).order_by(ModelRun.started_at.desc())
-            ).all()
+            query = select(ModelRun.status).where(ModelRun.automation_run_id == run_id)
+            failure_window = self._failure_window_start(session, run_id)
+            if failure_window is not None:
+                query = query.where(ModelRun.started_at >= failure_window)
+            statuses = session.scalars(query.order_by(ModelRun.started_at.desc())).all()
             count = 0
             for status in statuses:
                 if status == "failed":
@@ -1243,6 +1351,18 @@ class Phase7Service:
                 elif status == "succeeded":
                     break
             return count
+
+    def _failure_window_start(self, session: Session, run_id: str) -> datetime | None:
+        return session.scalar(
+            select(AuditEvent.created_at)
+            .where(
+                AuditEvent.event_type == "automation_run.resumed",
+                AuditEvent.entity_type == "automation_run",
+                AuditEvent.entity_id == run_id,
+            )
+            .order_by(AuditEvent.created_at.desc())
+            .limit(1)
+        )
 
     def _recount_run(self, session: Session, run: AutomationRun, items: list[AutomationRunItem] | None = None) -> None:
         rows = items if items is not None else list(session.scalars(

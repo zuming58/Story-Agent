@@ -191,6 +191,98 @@ def test_chapter_contract_lock_blocks_in_place_edits(client: TestClient, demo_pr
     assert listed[0]["status"] == "locked"
 
 
+def test_chapter_window_derives_only_the_current_chapter_beat(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    window = client.post(f"/api/v1/projects/{project_id}/plan/nodes", json={
+        "title": "Investigation window",
+        "type": "章节窗口",
+        "targetChapter": 37,
+        "rangeMin": 37,
+        "rangeMax": 41,
+        "importance": 5,
+        "prerequisites": ["Chapter 36 is official"],
+        "completionConditions": ["The five-chapter window is complete"],
+        "contracts": ["Advance only one local objective per chapter"],
+        "chapterBeats": [
+            {
+                "chapterNumber": 37,
+                "title": "Footprints in the map cabinet",
+                "objective": "Follow the wet footprints and recover the clipped map.",
+                "completionConditions": ["Recover the clipped map"],
+                "hooks": ["A fourth bell rings"],
+                "foreshadows": ["Mother's former surname"],
+                "requiredCharacters": ["Shen Yan"],
+                "forbidden": ["Identify the bell manipulator"],
+            },
+            {
+                "chapterNumber": 38,
+                "title": "The impossible fourth bell",
+                "objective": "Prove the fourth bell was a human lure.",
+                "completionConditions": ["Find evidence of a human lure"],
+                "hooks": ["A duty log page is missing"],
+                "requiredCharacters": ["Shen Yan", "Old Zhou"],
+            },
+        ],
+    })
+    assert window.status_code == 201, window.text
+
+    chapter_37 = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+        "chapterNumber": 37,
+        "planNodeId": window.json()["id"],
+    })
+    assert chapter_37.status_code == 200, chapter_37.text
+    first = chapter_37.json()
+    assert first["title"] == "Footprints in the map cabinet"
+    assert first["objective"]["mustAdvance"]["objective"] == "Follow the wet footprints and recover the clipped map."
+    assert first["completionConditions"] == ["Recover the clipped map"]
+    assert first["requiredCharacters"] == ["Shen Yan"]
+    assert first["requiredHooks"] == ["A fourth bell rings"]
+    assert "The five-chapter window is complete" not in first["completionConditions"]
+
+    chapter_38 = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+        "chapterNumber": 38,
+        "planNodeId": window.json()["id"],
+    })
+    assert chapter_38.status_code == 200, chapter_38.text
+    second = chapter_38.json()
+    assert second["title"] == "The impossible fourth bell"
+    assert second["completionConditions"] == ["Find evidence of a human lure"]
+    assert second["requiredCharacters"] == ["Shen Yan", "Old Zhou"]
+
+    missing = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+        "chapterNumber": 39,
+        "planNodeId": window.json()["id"],
+    })
+    assert missing.status_code == 409
+    assert missing.json()["code"] == "CHAPTER_BEAT_MISSING"
+
+
+def test_cancelled_job_allows_replacing_its_locked_contract(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    previous = derive_locked_contract(client, project_id)
+    job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={
+        "chapterContractId": previous["id"],
+        "idempotencyKey": "abandoned-contract",
+    }).json()
+    cancelled = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+    replacement = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/derive", json={
+        "chapterNumber": 1,
+        "planNodeId": previous["planNodeId"],
+    }).json()
+    locked = client.post(f"/api/v1/projects/{project_id}/chapter-contracts/{replacement['id']}/lock", json={
+        "expectedRevision": replacement["revision"],
+    })
+    assert locked.status_code == 200, locked.text
+    contracts = client.get(f"/api/v1/projects/{project_id}/chapter-contracts").json()
+    prior = next(item for item in contracts if item["id"] == previous["id"])
+    assert prior["status"] == "superseded"
+
+
 def test_chapter_job_idempotency_and_candidate_pipeline_do_not_commit_state(client: TestClient, demo_project: dict) -> None:
     project_id = demo_project["id"]
     lock_canon(client, project_id)
@@ -576,6 +668,40 @@ def test_invalid_extraction_repairs_once_and_never_touches_official_state(client
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_extraction_normalizes_common_model_shape_without_promoting_narrative_boundaries(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    service = client.app.state.story_service
+    project = service.get_project(project_id)
+    payload = service.phase5._normalize_extraction_payload({"chapterNumber": 1, "title": "Test"}, {
+        "entities": [
+            {"id": "e1", "type": "character", "name": "Lin Mo", "description": "protagonist"},
+            {"id": "e2", "type": "artifact", "name": "Night Lamp"},
+        ],
+        "facts": [
+            {"subject": "Lin Mo", "predicate": "location", "object": "archive", "expectedCurrentValue": True, "stateChanging": True},
+            {"description": "ambient observation", "stateChanging": False},
+        ],
+        "events": [{"sequence": 1, "description": "Lin Mo enters the archive."}],
+        "foreshadows": [{"id": "f1", "description": "A fourth bell rings."}],
+        "boundaries": [{"type": "narrative_restriction", "description": "Do not reveal the culprit."}],
+    })
+    assert payload["entities"][0]["canonicalName"] == "Lin Mo"
+    assert payload["entities"][0]["entityTypeName"] == "person"
+    assert payload["entities"][1]["entityTypeName"] == "item"
+    assert payload["facts"] == [{
+        "entity": "Lin Mo",
+        "fieldPath": "location",
+        "value": "archive",
+        "confidence": 1.0,
+    }]
+    assert payload["events"][0]["eventOrder"] == 1
+    assert payload["foreshadows"][0]["code"] == "f1"
+    assert payload["boundaries"] == []
+    with service.db.project(project.id, project.folder_path) as session:
+        service.phase4._validate_state_payload(session, project.id, payload)
 
 
 def test_model_provider_call_occurs_without_holding_project_write_lock(client: TestClient, demo_project: dict, monkeypatch: pytest.MonkeyPatch) -> None:

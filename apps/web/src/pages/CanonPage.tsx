@@ -39,9 +39,19 @@ export function CanonPage() {
   const [relationForm, setRelationForm] = useState({ subjectEntityId: "", predicate: "", objectEntityId: "", objectValue: "", reason: "" });
   const [lockOpen, setLockOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [brief, setBrief] = useState({
+    title: project?.title?.replace(/·正式试写$/, "") ?? "夜巡人",
+    genre: "现代中式规则怪谈、悬疑调查、克制成长",
+    premise: "沈砚在雾城调查夜雾与夜巡司，同时追查自己被删除的童年记忆。",
+    tone: "克制、悬疑、具体、可视化",
+    forbidden: "十几章内完成整卷升级\n无代价连续使用能力\n提前揭示无脸纸童与童年真相",
+  });
 
   const canonQuery = useQuery({ queryKey: ["canon", project?.id], queryFn: () => api.canon(project!.id), enabled: Boolean(project) });
+  const architectureQuery = useQuery({ queryKey: ["canon-generation-proposals", project?.id], queryFn: () => api.canonGenerationProposals(project!.id), enabled: Boolean(project) });
   const canon = canonQuery.data;
+  const architectureProposals = Array.isArray(architectureQuery.data) ? architectureQuery.data : [];
+  const pendingArchitecture = architectureProposals.find((item) => item.status === "pending") ?? null;
   const root = canon?.documents.find((item) => item.id === "story-core") ?? canon?.documents[0];
   const selectedEntity = canon?.entities.find((item) => item.id === selectedEntityId) ?? null;
   const selectedRule = canon?.rules.find((item) => item.id === selectedRuleId) ?? null;
@@ -90,12 +100,42 @@ export function CanonPage() {
     if (!project) return;
     await Promise.all([
       client.invalidateQueries({ queryKey: ["canon", project.id] }),
+      client.invalidateQueries({ queryKey: ["canon-generation-proposals", project.id] }),
       client.invalidateQueries({ queryKey: ["trial-readiness", project.id] }),
       client.invalidateQueries({ queryKey: ["audits", project.id] }),
     ]);
   };
   const mutation = useMutation({ mutationFn: async (action: () => Promise<unknown>) => action(), onSuccess: async () => { setError(null); await refresh(); }, onError: (cause) => setError(displayError(cause)) });
   const run = (label: string, action: () => Promise<unknown>) => mutation.mutateAsync(action).then(() => setNotice(label));
+
+  const generateArchitecture = async () => {
+    if (!project || project.projectKind === "demo") return;
+    await run("故事架构提案已生成，请检查完整性后应用。", async () => {
+      await api.createCanonGenerationProposal(project.id, {
+        title: brief.title,
+        mode: "long-form",
+        targetChapters: 1000,
+        genre: brief.genre,
+        premise: brief.premise,
+        tone: brief.tone,
+        worldPreferences: ["现代雾城", "局部夜雾", "怪异必须依靠规则与代价处理"],
+        progressionPreset: "restrained-explicit",
+        romance: "弱感情线，不喧宾夺主",
+        forbiddenContent: lines(brief.forbidden),
+        referenceTraits: ["信息差恐怖", "规则可验证", "能力存在明确代价"],
+      });
+      await architectureQuery.refetch();
+    });
+  };
+
+  const decideArchitecture = async (apply: boolean) => {
+    if (!pendingArchitecture) return;
+    await run(apply ? "Canon 架构提案已应用到正式草稿。" : "Canon 架构提案已拒绝。", async () => {
+      if (apply) await api.applyCanonGenerationProposal(pendingArchitecture.id, pendingArchitecture.revision);
+      else await api.rejectCanonGenerationProposal(pendingArchitecture.id, pendingArchitecture.revision);
+      await architectureQuery.refetch();
+    });
+  };
 
   const saveCore = async () => {
     if (!project || !root) return;
@@ -169,6 +209,26 @@ export function CanonPage() {
       <div><span className="workbench-kicker"><TreeStructure /> CANON VAULT</span><h1>Canon 设定库</h1><p>把作者设定转成可锁定、可检查、可变更追踪的故事权威。</p></div>
       <div className="canon-heading-actions"><span className={canon.locked ? "canon-locked" : "canon-draft"}>{canon.locked ? <LockKey /> : <Sparkle />}{canon.locked ? "正式 Canon 已锁定" : "草稿可编辑"}</span>{!canon.locked && <button className="gold-action" onClick={() => setLockOpen(true)}><LockKey />锁定 Canon</button>}</div>
     </header>
+
+    {!canon.locked && <section className="story-architect-panel">
+      <header><div><MagicWand /><strong>故事架构器</strong><span>从一句创意生成完整 Canon 候选，不会直接锁定正式设定</span></div><em>ARCHITECT</em></header>
+      {project.projectKind === "demo" ? <div className="architect-demo-warning"><WarningCircle />当前是示例项目，禁止真实付费生成。请切换到“夜巡人·正式试写”。</div> : <>
+        <div className="story-brief-grid">
+          <label><span>作品名</span><input value={brief.title} onChange={(event) => setBrief({ ...brief, title: event.target.value })} /></label>
+          <label><span>类型方向</span><input value={brief.genre} onChange={(event) => setBrief({ ...brief, genre: event.target.value })} /></label>
+          <label className="wide"><span>一句话故事内核</span><textarea value={brief.premise} onChange={(event) => setBrief({ ...brief, premise: event.target.value })} /></label>
+          <label><span>叙事基调</span><input value={brief.tone} onChange={(event) => setBrief({ ...brief, tone: event.target.value })} /></label>
+          <label><span>禁止事项（每行一条）</span><textarea value={brief.forbidden} onChange={(event) => setBrief({ ...brief, forbidden: event.target.value })} /></label>
+        </div>
+        {!pendingArchitecture && <footer><p>固定采用 1000 章七卷、夜巡六阶、四级法器和克制升级预算。</p><button className="gold-action" disabled={mutation.isPending || brief.premise.length < 20} onClick={() => void generateArchitecture()}><Sparkle />{mutation.isPending ? "正在生成并自动检查…" : "生成完整故事架构"}</button></footer>}
+        {pendingArchitecture && <div className="architecture-proposal-card">
+          <div className="architecture-proposal-summary"><div><strong>Canon 候选提案</strong><span>REV {pendingArchitecture.revision}</span></div><b className={pendingArchitecture.readiness.ready ? "is-ready" : "is-blocked"}>{pendingArchitecture.readiness.ready ? "完整性通过" : "存在阻断项"}</b></div>
+          <div className="architecture-check-grid">{pendingArchitecture.readiness.checks.map((check) => <span key={check.code} className={check.status === "ready" ? "is-ready" : "is-blocked"}>{check.status === "ready" ? <CheckCircle /> : <WarningCircle />}{check.detail}</span>)}</div>
+          <details><summary>预览完整 Canon Markdown</summary><pre>{pendingArchitecture.contentMarkdown}</pre></details>
+          <footer><button disabled={mutation.isPending} onClick={() => void decideArchitecture(false)}><X />拒绝</button><button className="gold-action" disabled={!pendingArchitecture.readiness.ready || mutation.isPending} onClick={() => void decideArchitecture(true)}><Check />应用到 Canon 草稿</button></footer>
+        </div>}
+      </>}
+    </section>}
 
     <nav className="canon-tabs">{([
       ["core", "故事核心", BookOpenText], ["entities", `实体 ${canon.entities.length}`, CirclesThreePlus], ["rules", `规则 ${canon.rules.length}`, ShieldCheck], ["relations", `关系 ${canon.relations.length}`, TreeStructure], ["changes", `变更 ${canon.changeRequests.filter((item) => item.status === "pending").length}`, GitDiff],

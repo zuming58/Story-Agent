@@ -69,6 +69,8 @@ class ModelConfig(CatalogBase):
     max_output_tokens: Mapped[int] = mapped_column(Integer, default=2048)
     supports_reasoning: Mapped[bool] = mapped_column(Boolean, default=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    input_price_per_million: Mapped[float | None] = mapped_column(Float, nullable=True)
+    output_price_per_million: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     provider: Mapped[ModelProvider] = relationship(back_populates="models")
@@ -178,10 +180,13 @@ class ModelRun(ProjectBase):
     provider_name: Mapped[str] = mapped_column(String(160), default="")
     model_config_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     model_id: Mapped[str] = mapped_column(String(200), default="")
+    automation_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    automation_run_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default="running", index=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -691,3 +696,128 @@ class ChapterCommit(ProjectBase):
     revision: Mapped[int] = mapped_column(Integer, default=1)
     committed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AutomationPolicy(ProjectBase):
+    __tablename__ = "automation_policies"
+
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    time_of_day: Mapped[str] = mapped_column(String(5), default="03:00")
+    timezone: Mapped[str] = mapped_column(String(80), default="UTC")
+    chapters_per_run: Mapped[int] = mapped_column(Integer, default=1)
+    target_words_min: Mapped[int] = mapped_column(Integer, default=1500)
+    target_words_max: Mapped[int] = mapped_column(Integer, default=3000)
+    max_revision_rounds: Mapped[int] = mapped_column(Integer, default=2)
+    daily_cost_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_policy: Mapped[str] = mapped_column(String(40), default="stop_on_blocking")
+    approval_mode: Mapped[str] = mapped_column(String(40), default="guarded_auto")
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_scheduled_local_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AutomationRun(ProjectBase):
+    __tablename__ = "automation_runs"
+    __table_args__ = (
+        Index(
+            "uq_automation_runs_scheduled_date",
+            "project_id",
+            "scheduled_local_date",
+            unique=True,
+            sqlite_where=text("trigger = 'scheduled'"),
+        ),
+        Index(
+            "uq_automation_runs_idempotency",
+            "project_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    policy_id: Mapped[str] = mapped_column(String(36), index=True)
+    scheduled_local_date: Mapped[str] = mapped_column(String(10), index=True)
+    trigger: Mapped[str] = mapped_column(String(20), default="manual", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    start_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    planned_count: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded_count: Mapped[int] = mapped_column(Integer, default=0)
+    isolated_count: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    stop_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AutomationRunItem(ProjectBase):
+    __tablename__ = "automation_run_items"
+    __table_args__ = (
+        Index("uq_automation_run_items_chapter", "automation_run_id", "chapter_number", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    automation_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_number: Mapped[int] = mapped_column(Integer, index=True)
+    sequence_number: Mapped[int] = mapped_column(Integer)
+    chapter_contract_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    chapter_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    chapter_commit_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="waiting", index=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    error_code: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AutomationLease(ProjectBase):
+    __tablename__ = "automation_leases"
+
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(120), index=True)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class AutomationDailyReport(ProjectBase):
+    __tablename__ = "automation_daily_reports"
+    __table_args__ = (
+        Index("uq_automation_daily_reports_date", "project_id", "local_date", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    local_date: Mapped[str] = mapped_column(String(10), index=True)
+    timezone: Mapped[str] = mapped_column(String(80), default="UTC")
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    planned_count: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded_count: Mapped[int] = mapped_column(Integer, default=0)
+    isolated_count: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    status_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

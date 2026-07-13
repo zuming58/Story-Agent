@@ -157,10 +157,13 @@ class ModelRunOut(ApiModel):
     provider_name: str
     model_config_id: str | None
     model_id: str
+    automation_run_id: str | None = None
+    automation_run_item_id: str | None = None
     status: str
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    estimated_cost: float = 0.0
     duration_ms: int | None
     error_code: str | None
     diagnostic: dict[str, Any] | None = None
@@ -233,6 +236,8 @@ class ModelConfigCreate(ApiModel):
     max_output_tokens: int = Field(default=2048, ge=1, le=200000)
     supports_reasoning: bool = False
     is_enabled: bool = True
+    input_price_per_million: float | None = Field(default=None, ge=0)
+    output_price_per_million: float | None = Field(default=None, ge=0)
 
 
 class ModelConfigUpdate(ApiModel):
@@ -242,6 +247,8 @@ class ModelConfigUpdate(ApiModel):
     max_output_tokens: int | None = Field(default=None, ge=1, le=200000)
     supports_reasoning: bool | None = None
     is_enabled: bool | None = None
+    input_price_per_million: float | None = Field(default=None, ge=0)
+    output_price_per_million: float | None = Field(default=None, ge=0)
 
 
 class ModelProviderOut(ApiModel):
@@ -268,6 +275,8 @@ class ModelConfigOut(ApiModel):
     max_output_tokens: int
     supports_reasoning: bool
     is_enabled: bool
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -790,3 +799,109 @@ class ChapterCommitOut(ApiModel):
     revision: int
     committed_at: datetime
     created_at: datetime
+
+
+class AutomationPolicyUpdate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    enabled: bool
+    time_of_day: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    timezone: str = Field(min_length=1, max_length=80)
+    chapters_per_run: int = Field(ge=1, le=10)
+    target_words_min: int = Field(ge=1, le=200000)
+    target_words_max: int = Field(ge=1, le=200000)
+    max_revision_rounds: int = Field(ge=0, le=2)
+    daily_cost_limit: float | None = Field(default=None, ge=0)
+    stop_policy: Literal["stop_on_blocking", "stop_on_any_failure"] = "stop_on_blocking"
+    approval_mode: Literal["guarded_auto"] = "guarded_auto"
+
+
+class AutomationPolicyOut(ApiModel):
+    project_id: str
+    enabled: bool
+    time_of_day: str
+    timezone: str
+    chapters_per_run: int
+    target_words_min: int
+    target_words_max: int
+    max_revision_rounds: int
+    daily_cost_limit: float | None = None
+    stop_policy: str
+    approval_mode: str
+    next_run_at: datetime | None = None
+    last_scheduled_local_date: str | None = None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutomationRunCreate(ApiModel):
+    idempotency_key: str | None = Field(default=None, max_length=120)
+
+
+class AutomationRunItemOut(ApiModel):
+    id: str
+    project_id: str
+    automation_run_id: str
+    chapter_number: int
+    sequence_number: int
+    chapter_contract_id: str | None = None
+    chapter_job_id: str | None = None
+    chapter_commit_id: str | None = None
+    status: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost: float
+    error_code: str | None = None
+    diagnostic: dict[str, Any] | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime
+
+
+class AutomationRunOut(ApiModel):
+    id: str
+    project_id: str
+    policy_id: str
+    scheduled_local_date: str
+    trigger: str
+    status: str
+    idempotency_key: str | None = None
+    start_chapter: int | None = None
+    end_chapter: int | None = None
+    planned_count: int
+    succeeded_count: int
+    isolated_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost: float
+    stop_reason: str | None = None
+    diagnostic: dict[str, Any] | None = None
+    revision: int
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime
+    items: list[AutomationRunItemOut] = Field(default_factory=list)
+    available_actions: list[str] = Field(default_factory=list)
+    next_run_at: datetime | None = None
+
+
+class AutomationDailyReportOut(ApiModel):
+    id: str
+    project_id: str
+    local_date: str
+    timezone: str
+    run_count: int
+    planned_count: int
+    succeeded_count: int
+    isolated_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost: float
+    status_summary: dict[str, int]
+    generated_at: datetime
+    updated_at: datetime

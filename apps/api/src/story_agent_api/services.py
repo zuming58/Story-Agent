@@ -294,6 +294,8 @@ class CatalogModelSnapshot:
         self.max_output_tokens = model.max_output_tokens
         self.supports_reasoning = model.supports_reasoning
         self.is_enabled = model.is_enabled
+        self.input_price_per_million = model.input_price_per_million
+        self.output_price_per_million = model.output_price_per_million
 
 
 class StoryService:
@@ -304,8 +306,10 @@ class StoryService:
         self._cancelled_runs: set[str] = set()
         self.phase4 = Phase4Service(self)
         from .phase5 import Phase5Service
+        from .phase7 import Phase7Service
 
         self.phase5 = Phase5Service(self)
+        self.phase7 = Phase7Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -317,6 +321,7 @@ class StoryService:
         self._recover_interrupted_model_runs()
         self.phase4.ensure_existing_projects()
         self.phase5.recover_interrupted_jobs()
+        self.phase7.recover_interrupted_automation()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -483,6 +488,8 @@ class StoryService:
                 max_output_tokens=payload.max_output_tokens,
                 supports_reasoning=payload.supports_reasoning,
                 is_enabled=payload.is_enabled,
+                input_price_per_million=payload.input_price_per_million,
+                output_price_per_million=payload.output_price_per_million,
                 created_at=now,
                 updated_at=now,
             )
@@ -1163,10 +1170,25 @@ class StoryService:
                         "quality_runs",
                         "quality_findings",
                         "chapter_commits",
+                        "automation_policies",
+                        "automation_runs",
+                        "automation_run_items",
+                        "automation_leases",
+                        "automation_daily_reports",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
                         ), {"new_id": restored.id, "old_id": old_id})
+                    # AutomationPolicy uses project_id as its identity. Runs
+                    # keep a separate policy_id reference, so remap that
+                    # reference as part of the same restore transaction too.
+                    session.execute(text(
+                        "UPDATE automation_runs SET policy_id = :new_id WHERE policy_id = :old_id"
+                    ), {"new_id": restored.id, "old_id": old_id})
+                    # Lease rows are runtime ownership, not transferable
+                    # authority. Keep them in the backup for auditability, but
+                    # never let a restored clone inherit another process lease.
+                    session.execute(text("DELETE FROM automation_leases"))
                     index_state = session.get(RetrievalIndexState, old_id)
                     if index_state:
                         index_state.project_id = restored.id
@@ -1186,6 +1208,9 @@ class StoryService:
                     session.refresh(catalog)
                     restored = catalog
                 self._write_project_files(restored)
+                # With runtime leases cleared, active copied runs/jobs converge
+                # to interrupted and require an explicit resume in the clone.
+                self.phase7.reconcile_orphaned_automation()
                 return restored
             except Exception:
                 if restored is not None:
@@ -1688,6 +1713,18 @@ class StoryService:
     def _complete_model_run_success(self, project_id: str, folder_path: str, session_id: str, run_id: str, content: str, result: Any, started: float, *, create_message: bool = True, diagnostic: dict[str, Any] | None = None) -> dict[str, Any]:
         now = utc_now()
         duration = int((time.perf_counter() - started) * 1000)
+        with self.db.project(project_id, folder_path) as read_session:
+            current_run = read_session.get(ModelRun, run_id)
+            model_config_id = current_run.model_config_id if current_run else None
+        estimated_cost = 0.0
+        if model_config_id:
+            with self.db.catalog() as catalog_session:
+                model_config = catalog_session.get(ModelConfig, model_config_id)
+                if model_config:
+                    estimated_cost = (
+                        ((result.prompt_tokens or 0) * (model_config.input_price_per_million or 0.0))
+                        + ((result.completion_tokens or 0) * (model_config.output_price_per_million or 0.0))
+                    ) / 1_000_000
         with self.db.project_write(project_id, folder_path) as session:
             run = session.get(ModelRun, run_id)
             if not run:
@@ -1700,6 +1737,7 @@ class StoryService:
             run.prompt_tokens = result.prompt_tokens
             run.completion_tokens = result.completion_tokens
             run.total_tokens = result.total_tokens
+            run.estimated_cost = estimated_cost
             run.retry_count = getattr(result, "retry_count", run.retry_count)
             run.duration_ms = duration
             if result.actual_model:
@@ -1833,6 +1871,8 @@ class StoryService:
             "maxOutputTokens": item.max_output_tokens,
             "supportsReasoning": item.supports_reasoning,
             "isEnabled": item.is_enabled,
+            "inputPricePerMillion": item.input_price_per_million,
+            "outputPricePerMillion": item.output_price_per_million,
             "createdAt": item.created_at,
             "updatedAt": item.updated_at,
         }
@@ -1855,10 +1895,13 @@ class StoryService:
             "providerName": item.provider_name,
             "modelConfigId": item.model_config_id,
             "modelId": item.model_id,
+            "automationRunId": item.automation_run_id,
+            "automationRunItemId": item.automation_run_item_id,
             "status": item.status,
             "promptTokens": item.prompt_tokens,
             "completionTokens": item.completion_tokens,
             "totalTokens": item.total_tokens,
+            "estimatedCost": item.estimated_cost,
             "durationMs": item.duration_ms,
             "errorCode": item.error_code,
             "diagnostic": loads(item.diagnostic_json) if item.diagnostic_json else None,

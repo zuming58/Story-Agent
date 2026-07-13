@@ -18,6 +18,11 @@ from .schemas import (
     AgentSessionCreate,
     AgentSessionOut,
     AuditEventOut,
+    AutomationPolicyOut,
+    AutomationPolicyUpdate,
+    AutomationDailyReportOut,
+    AutomationRunCreate,
+    AutomationRunOut,
     CanonAnalyzeRequest,
     CanonChangeRequestCreate,
     CanonChangeRequestDecision,
@@ -100,7 +105,9 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         service.initialize()
+        service.phase7.start_scheduler()
         yield
+        await service.phase7.stop_scheduler()
         service.close()
 
     app = FastAPI(title="Story Agent API", version="0.1.0", lifespan=lifespan)
@@ -363,6 +370,42 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/commit", response_model=ChapterCommitOut)
     def commit_chapter_job(project_id: str, job_id: str, payload: ChapterCommitRequest, request: Request) -> object:
         return service.phase5.commit_chapter_job(project_id, job_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/automation/policy", response_model=AutomationPolicyOut)
+    def get_automation_policy(project_id: str) -> object:
+        return service.phase7.get_policy(project_id)
+
+    @app.put("/api/v1/projects/{project_id}/automation/policy", response_model=AutomationPolicyOut)
+    def update_automation_policy(project_id: str, payload: AutomationPolicyUpdate) -> object:
+        return service.phase7.update_policy(project_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/automation/runs", response_model=AutomationRunOut, status_code=201)
+    def create_automation_run(project_id: str, payload: AutomationRunCreate, request: Request) -> object:
+        return service.phase7.create_manual_run(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/automation/runs", response_model=list[AutomationRunOut])
+    def list_automation_runs(project_id: str) -> object:
+        return service.phase7.list_runs(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/automation/reports", response_model=list[AutomationDailyReportOut])
+    def list_automation_reports(project_id: str) -> object:
+        return service.phase7.get_daily_reports(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/automation/runs/{run_id}", response_model=AutomationRunOut)
+    def get_automation_run(project_id: str, run_id: str) -> object:
+        return service.phase7.get_run(project_id, run_id)
+
+    @app.post("/api/v1/projects/{project_id}/automation/runs/{run_id}/cancel", response_model=AutomationRunOut)
+    def cancel_automation_run(project_id: str, run_id: str, request: Request) -> object:
+        return service.phase7.cancel_run(project_id, run_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/automation/runs/{run_id}/resume", response_model=AutomationRunOut)
+    def resume_automation_run(project_id: str, run_id: str, request: Request) -> object:
+        return service.phase7.resume_run(project_id, run_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/automation/runs/{run_id}/catch-up", response_model=AutomationRunOut)
+    def catch_up_automation_run(project_id: str, run_id: str, request: Request) -> object:
+        return service.phase7.catch_up_run(project_id, run_id, request.state.request_id)
 
     @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
     def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:

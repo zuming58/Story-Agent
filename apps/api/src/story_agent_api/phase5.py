@@ -1123,9 +1123,9 @@ class Phase5Service:
             "temperature": min(float(model.temperature), 0.7),
             "max_tokens": min(model.max_output_tokens, {
                 "fact_extractor": 3072,
-                "continuity_reviewer": 2048,
-                "story_editor": 2048,
-                "style_reviewer": 2048,
+                "continuity_reviewer": 3072,
+                "story_editor": 3072,
+                "style_reviewer": 3072,
             }.get(role, model.max_output_tokens)),
         }
         if response_json:
@@ -1270,6 +1270,7 @@ class Phase5Service:
                     "你是小说事件与伏笔抽取器。只返回合法 JSON object，顶层只能有 events、foreshadows。"
                     "events 最多 5 项，每项只用 eventOrder、summary、participants，并合并连续动作。"
                     "foreshadows 最多 3 项，每项只用 code、label、status；status 只能是 planted、progressing、resolved。"
+                    "requiredForeshadows 中的线索若已在本章出现，code 必须逐字使用契约给出的值，不得改名。"
                     "不要 id、description，不要复述设定或叙事禁令，所有摘要保持短句。"
                 ),
                 ("events", "foreshadows"),
@@ -1286,13 +1287,18 @@ class Phase5Service:
                     "content": "上次输出无效或过长。每个数组最多 3 项，只返回完整、精简的 JSON object。",
                 }]
                 try:
+                    section_user = {**base_user, "section": section_name}
+                    if section_name == "narrative":
+                        section_user["requiredForeshadows"] = contract_payload["requiredForeshadows"]
+                        section_user["requiredHooks"] = contract_payload["requiredHooks"]
+                        section_user["completionConditions"] = contract_payload["completionConditions"]
                     text, final_run_id = self._complete_role_text(
                         project,
                         "fact_extractor",
                         request_id,
                         [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": dumps({**base_user, "section": section_name})},
+                            {"role": "user", "content": dumps(section_user)},
                             *repair,
                         ],
                         response_json=True,
@@ -1643,6 +1649,25 @@ class Phase5Service:
             draft = self._get_draft(session, project.id, draft_id)
             contract = self._get_contract(session, project.id, draft.chapter_contract_id)
             contract_data = self._contract_dict(contract)
+            forbidden_scope = contract_data["forbiddenScope"]
+            # Reviewers need the boundary, not the complete serialized future
+            # plan. Sending every downstream node wastes context and can make a
+            # concise JSON review hit the output limit on real providers.
+            compact_must_not_advance = []
+            for item in forbidden_scope.get("mustNotAdvance", []):
+                if isinstance(item, dict):
+                    compact_must_not_advance.append({
+                        key: item.get(key)
+                        for key in ("id", "title", "rangeMin", "targetChapter", "rangeMax")
+                        if item.get(key) is not None
+                    })
+                else:
+                    compact_must_not_advance.append(item)
+            compact_forbidden_scope = {
+                "mustNotAdvance": compact_must_not_advance,
+                "mustNotComplete": forbidden_scope.get("mustNotComplete", []),
+                "futureKeywords": forbidden_scope.get("futureKeywords", []),
+            }
             prompt = {
                 "role": role,
                 "chapterContract": {
@@ -1650,7 +1675,7 @@ class Phase5Service:
                     "title": contract_data["title"],
                     "objective": contract_data["objective"],
                     "allowedScope": contract_data["allowedScope"],
-                    "forbiddenScope": contract_data["forbiddenScope"],
+                    "forbiddenScope": compact_forbidden_scope,
                     "requiredCharacters": contract_data["requiredCharacters"],
                     "requiredForeshadows": contract_data["requiredForeshadows"],
                     "requiredHooks": contract_data["requiredHooks"],
@@ -1662,20 +1687,35 @@ class Phase5Service:
                 "chapterDraft": {"contentMarkdown": draft.content_markdown, "wordCount": draft.word_count},
                 "requiredOutput": {"findings": [{"ruleCode": "string", "severity": "info|warning|error|blocker", "category": "string", "message": "string", "evidence": [], "location": {}, "suggestedFix": "string"}]},
             }
-        text, run_id = self._complete_role_text(
-            project,
-            role,
-            request_id,
-            [
-                {"role": "system", "content": (
-                    "你是 Story Agent 的专项审稿人。只返回合法 JSON object，不改写正文。"
-                    "只报告确有证据的问题，最多 5 条；没有问题时返回 {\"findings\":[]}，不要输出通过项或长篇解释。"
-                    "evidence 只放必要短句，location 保持简短，不得降低确定性 blocker。"
-                )},
-                {"role": "user", "content": dumps(prompt)},
-            ],
-            response_json=True,
-        )
+        base_messages = [
+            {"role": "system", "content": (
+                "你是 Story Agent 的专项审稿人。只返回合法 JSON object，不改写正文。"
+                "只报告确有证据的问题，最多 5 条；没有问题时返回 {\"findings\":[]}，不要输出通过项或长篇解释。"
+                "evidence 只放必要短句，location 保持简短，不得降低确定性 blocker。"
+            )},
+            {"role": "user", "content": dumps(prompt)},
+        ]
+        for attempt in range(2):
+            retry_instruction = [] if attempt == 0 else [{
+                "role": "system",
+                "content": (
+                    "上次输出被截断。最多返回 3 条 findings；每条 evidence 最多 2 个短句，"
+                    "message 与 suggestedFix 各不超过 60 字。只输出完整 JSON object。"
+                ),
+            }]
+            try:
+                text, run_id = self._complete_role_text(
+                    project,
+                    role,
+                    request_id,
+                    [*base_messages, *retry_instruction],
+                    response_json=True,
+                )
+                break
+            except ModelProviderError as exc:
+                if exc.code == "content_truncated" and attempt == 0:
+                    continue
+                raise
         try:
             data = _json_object_from_text(text)
             raw_findings = data.get("findings", [])

@@ -18,6 +18,8 @@ from story_agent_api.services import StoryError
 class Phase5OpenAIHandler(BaseHTTPRequestHandler):
     post_count = 0
     invalid_extraction = False
+    reviewer_truncations_remaining = 0
+    observed_required_foreshadows: list[str] | None = None
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/chat/completions":
@@ -35,12 +37,25 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
         wants_json = request.get("response_format", {}).get("type") == "json_object"
         messages = request.get("messages", [])
         joined = "\n".join(str(item.get("content", "")) for item in messages if isinstance(item, dict))
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            try:
+                user_payload = json.loads(str(message.get("content", "")))
+            except (TypeError, ValueError):
+                continue
+            if user_payload.get("section") == "narrative":
+                type(self).observed_required_foreshadows = user_payload.get("requiredForeshadows")
+        finish_reason = "stop"
         if wants_json and type(self).invalid_extraction and "chapterMarkdown" in joined:
             content = "not-json"
-        elif wants_json and "contentMarkdown" in joined:
-            content = json.dumps({"contentMarkdown": "Lin Mo pushed open the old house door. The required condition is now visible."})
         elif wants_json and "requiredOutput" in joined:
             content = json.dumps({"findings": []})
+            if type(self).reviewer_truncations_remaining > 0:
+                type(self).reviewer_truncations_remaining -= 1
+                finish_reason = "length"
+        elif wants_json and "contentMarkdown" in joined:
+            content = json.dumps({"contentMarkdown": "Lin Mo pushed open the old house door. The required condition is now visible."})
         elif wants_json:
             content = json.dumps({
                 "summary": "Lin Mo enters the old house.",
@@ -59,7 +74,7 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
             content = "Lin Mo pushed open the old house door.\n\nA cold clue waited under the lamp."
         response = json.dumps({
             "model": "phase5-fake-model",
-            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+            "choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
             "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
         }).encode("utf-8")
         self.send_response(200)
@@ -72,12 +87,16 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
         return
 
 
-def start_phase5_server(*, invalid_extraction: bool = False) -> tuple[ThreadingHTTPServer, str]:
+def start_phase5_server(
+    *, invalid_extraction: bool = False, reviewer_truncations: int = 0,
+) -> tuple[ThreadingHTTPServer, str]:
     class Handler(Phase5OpenAIHandler):
         pass
 
     Handler.post_count = 0
     Handler.invalid_extraction = invalid_extraction
+    Handler.reviewer_truncations_remaining = reviewer_truncations
+    Handler.observed_required_foreshadows = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -665,6 +684,45 @@ def test_invalid_extraction_repairs_once_and_never_touches_official_state(client
         assert client.get(f"/api/v1/projects/{project_id}/state/entities").json() == []
         state = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
         assert state["status"] == "failed"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_model_reviewer_retries_one_truncated_response_without_redrafting(
+    client: TestClient, demo_project: dict,
+) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server(reviewer_truncations=1)
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(
+            f"/api/v1/projects/{project_id}/chapter-jobs",
+            json={"chapterContractId": contract["id"]},
+        ).json()
+        response = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "human_review"
+
+        quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        reviewer_runs = [item for item in quality["runs"] if item["gateType"] == "model"]
+        assert {item["reviewerRole"] for item in reviewer_runs} == {
+            "continuity_reviewer", "story_editor", "style_reviewer",
+        }
+        model_runs = client.get(f"/api/v1/projects/{project_id}/model-runs?limit=50").json()
+        assert sum(item["status"] == "failed" and item["errorCode"] == "content_truncated" for item in model_runs) == 1, (
+            [(item["role"], item["status"], item["errorCode"]) for item in model_runs],
+            server.RequestHandlerClass.post_count,
+            server.RequestHandlerClass.reviewer_truncations_remaining,
+        )
+        assert sum(item["status"] == "succeeded" and item["role"] == "continuity_reviewer" for item in model_runs) == 1
+        # One writer call plus four extraction sections and four reviewer calls
+        # proves the safe draft was not regenerated after the reviewer retry.
+        assert server.RequestHandlerClass.post_count == 9
+        assert contract["requiredForeshadows"]
+        assert server.RequestHandlerClass.observed_required_foreshadows == contract["requiredForeshadows"]
     finally:
         server.shutdown()
         server.server_close()

@@ -507,3 +507,180 @@ class ContextTrace(ProjectBase):
     checksum: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ChapterContract(ProjectBase):
+    __tablename__ = "chapter_contracts"
+    __table_args__ = (
+        Index(
+            "uq_chapter_contracts_locked",
+            "project_id",
+            "chapter_number",
+            unique=True,
+            sqlite_where=text("status = 'locked'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_number: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    plan_node_id: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    plan_node_revision: Mapped[int] = mapped_column(Integer, default=1)
+    canon_revision_digest: Mapped[str] = mapped_column(String(64), default="")
+    state_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    objective_json: Mapped[str] = mapped_column(Text, default="{}")
+    allowed_scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    forbidden_scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    required_characters_json: Mapped[str] = mapped_column(Text, default="[]")
+    required_foreshadows_json: Mapped[str] = mapped_column(Text, default="[]")
+    required_hooks_json: Mapped[str] = mapped_column(Text, default="[]")
+    completion_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    pov: Mapped[str] = mapped_column(String(120), default="")
+    target_words_min: Mapped[int] = mapped_column(Integer, default=1500)
+    target_words_max: Mapped[int] = mapped_column(Integer, default=3000)
+    pace: Mapped[str] = mapped_column(String(40), default="smooth")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChapterJob(ProjectBase):
+    __tablename__ = "chapter_jobs"
+    __table_args__ = (
+        Index(
+            "uq_chapter_jobs_idempotency",
+            "project_id",
+            "chapter_contract_id",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_contract_id: Mapped[str] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1)
+    current_revision_round: Mapped[int] = mapped_column(Integer, default=0)
+    context_trace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(120), default="")
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ChapterDraft(ProjectBase):
+    __tablename__ = "chapter_drafts"
+    __table_args__ = (
+        Index("uq_chapter_drafts_job_version", "chapter_job_id", "version_number", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_job_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_contract_id: Mapped[str] = mapped_column(String(36), index=True)
+    version_number: Mapped[int] = mapped_column(Integer, default=1)
+    parent_draft_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="generated", index=True)
+    content_markdown: Mapped[str] = mapped_column(Text, default="")
+    word_count: Mapped[int] = mapped_column(Integer, default=0)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    context_trace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="candidate", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ChapterExtraction(ProjectBase):
+    __tablename__ = "chapter_extractions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_draft_id: Mapped[str] = mapped_column(String(36), index=True)
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="candidate", index=True)
+    validation_errors_json: Mapped[str] = mapped_column(Text, default="[]")
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class QualityRun(ProjectBase):
+    __tablename__ = "quality_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_job_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_draft_id: Mapped[str] = mapped_column(String(36), index=True)
+    gate_type: Mapped[str] = mapped_column(String(30), index=True)
+    reviewer_role: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class QualityFinding(ProjectBase):
+    __tablename__ = "quality_findings"
+    __table_args__ = (
+        Index("uq_quality_findings_draft_fingerprint", "chapter_draft_id", "fingerprint", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    quality_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_draft_id: Mapped[str] = mapped_column(String(36), index=True)
+    rule_code: Mapped[str] = mapped_column(String(120), index=True)
+    severity: Mapped[str] = mapped_column(String(20), index=True)
+    category: Mapped[str] = mapped_column(String(80), index=True)
+    message: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    location_json: Mapped[str] = mapped_column(Text, default="{}")
+    suggested_fix: Mapped[str] = mapped_column(Text, default="")
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    accepted_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ChapterCommit(ProjectBase):
+    __tablename__ = "chapter_commits"
+    __table_args__ = (
+        Index(
+            "uq_chapter_commits_current",
+            "project_id",
+            "chapter_number",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_number: Mapped[int] = mapped_column(Integer, index=True)
+    chapter_contract_id: Mapped[str] = mapped_column(String(36), index=True)
+    approved_draft_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_version_id: Mapped[str] = mapped_column(String(36), index=True)
+    state_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    quality_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(20), default="official", index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    committed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

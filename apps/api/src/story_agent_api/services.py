@@ -241,6 +241,8 @@ MODEL_ROLES = [
     "chinese_writer",
     "fact_extractor",
     "logic_reviewer",
+    "continuity_reviewer",
+    "story_editor",
     "style_reviewer",
     "reviser",
     "embedding",
@@ -301,6 +303,9 @@ class StoryService:
         self.secret_store = secret_store or default_secret_store()
         self._cancelled_runs: set[str] = set()
         self.phase4 = Phase4Service(self)
+        from .phase5 import Phase5Service
+
+        self.phase5 = Phase5Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -311,6 +316,7 @@ class StoryService:
             self.create_project(ProjectCreate(title="夜巡人", mode="long-form", total_chapters=1000), seed_demo=True)
         self._recover_interrupted_model_runs()
         self.phase4.ensure_existing_projects()
+        self.phase5.recover_interrupted_jobs()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -1028,6 +1034,9 @@ class StoryService:
             for canon_file in (folder / "canon").rglob("*"):
                 if canon_file.is_file():
                     files[canon_file.relative_to(folder).as_posix()] = canon_file
+            for manuscript_file in (folder / "manuscripts").rglob("*"):
+                if manuscript_file.is_file():
+                    files[manuscript_file.relative_to(folder).as_posix()] = manuscript_file
             checksums = {name: sha256(path) for name, path in files.items()}
             manifest = {
                 "backupId": backup_id, "projectId": project.id, "projectTitle": project.title,
@@ -1113,6 +1122,12 @@ class StoryService:
                             destination = target_folder / canon_file.relative_to(temp)
                             destination.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(canon_file, destination)
+                if (temp / "manuscripts").exists():
+                    for manuscript_file in (temp / "manuscripts").rglob("*"):
+                        if manuscript_file.is_file():
+                            destination = target_folder / manuscript_file.relative_to(temp)
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(manuscript_file, destination)
                 self.db.ensure_project_database(restored.id, target_folder)
                 with self.db.project_write(restored.id, target_folder) as session:
                     old_meta = session.scalar(select(ProjectMeta))
@@ -1141,6 +1156,13 @@ class StoryService:
                         "knowledge_boundaries",
                         "state_snapshots",
                         "context_traces",
+                        "chapter_contracts",
+                        "chapter_jobs",
+                        "chapter_drafts",
+                        "chapter_extractions",
+                        "quality_runs",
+                        "quality_findings",
+                        "chapter_commits",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"

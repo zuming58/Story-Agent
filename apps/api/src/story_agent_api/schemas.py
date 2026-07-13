@@ -578,3 +578,201 @@ class ContextPackageOut(ApiModel):
     items: list[ContextTraceItemOut]
     payload: dict[str, Any]
     checksum: str
+
+
+class ChapterContractDerive(ApiModel):
+    chapter_number: int = Field(ge=1, le=5000)
+    plan_node_id: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    author_note: str = ""
+    target_words_min: int = Field(default=1500, ge=1, le=200000)
+    target_words_max: int = Field(default=3000, ge=1, le=200000)
+    pov: str = Field(default="", max_length=120)
+
+
+class ChapterContractUpdate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    objective: dict[str, Any] | None = None
+    allowed_scope: dict[str, Any] | None = None
+    forbidden_scope: dict[str, Any] | None = None
+    required_characters: list[str] | None = None
+    required_foreshadows: list[str] | None = None
+    required_hooks: list[str] | None = None
+    completion_conditions: list[str] | None = None
+    pov: str | None = Field(default=None, max_length=120)
+    target_words_min: int | None = Field(default=None, ge=1, le=200000)
+    target_words_max: int | None = Field(default=None, ge=1, le=200000)
+    pace: str | None = Field(default=None, max_length=40)
+
+
+class ChapterContractLock(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class ChapterContractOut(ApiModel):
+    id: str
+    project_id: str
+    chapter_number: int
+    title: str
+    plan_node_id: str | None = None
+    plan_node_revision: int
+    canon_revision_digest: str
+    state_snapshot_id: str | None = None
+    objective: dict[str, Any]
+    allowed_scope: dict[str, Any]
+    forbidden_scope: dict[str, Any]
+    required_characters: list[str]
+    required_foreshadows: list[str]
+    required_hooks: list[str]
+    completion_conditions: list[str]
+    pov: str
+    target_words_min: int
+    target_words_max: int
+    pace: str
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    locked_at: datetime | None = None
+
+
+class ChapterJobCreate(ApiModel):
+    chapter_contract_id: str
+    idempotency_key: str = Field(default="", max_length=120)
+
+
+class ChapterJobRun(ApiModel):
+    author_note: str = ""
+
+
+class ChapterJobRetry(ApiModel):
+    reason: str = ""
+
+
+class ChapterJobOut(ApiModel):
+    id: str
+    project_id: str
+    chapter_contract_id: str
+    status: str
+    attempt_number: int
+    current_revision_round: int
+    context_trace_id: str | None = None
+    idempotency_key: str
+    error_code: str | None = None
+    diagnostic: dict[str, Any] | None = None
+    revision: int
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime
+    contract: ChapterContractOut | None = None
+
+
+class ChapterDraftOut(ApiModel):
+    id: str
+    project_id: str
+    chapter_job_id: str
+    chapter_contract_id: str
+    version_number: int
+    parent_draft_id: str | None = None
+    kind: str
+    content_markdown: str
+    word_count: int
+    checksum: str
+    model_run_id: str | None = None
+    context_trace_id: str | None = None
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChapterExtractionOut(ApiModel):
+    id: str
+    project_id: str
+    chapter_draft_id: str
+    model_run_id: str | None = None
+    payload: dict[str, Any]
+    schema_version: int
+    status: str
+    validation_errors: list[dict[str, Any]]
+    checksum: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class QualityFindingOut(ApiModel):
+    id: str
+    project_id: str
+    quality_run_id: str
+    chapter_draft_id: str
+    rule_code: str
+    severity: str
+    category: str
+    message: str
+    evidence: list[Any]
+    location: dict[str, Any]
+    suggested_fix: str
+    fingerprint: str
+    status: str
+    accepted_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class QualityRunOut(ApiModel):
+    id: str
+    project_id: str
+    chapter_job_id: str
+    chapter_draft_id: str
+    gate_type: str
+    reviewer_role: str | None = None
+    model_run_id: str | None = None
+    status: str
+    summary: dict[str, Any]
+    created_at: datetime
+    completed_at: datetime | None = None
+    findings: list[QualityFindingOut] = Field(default_factory=list)
+
+
+class QualityReportOut(ApiModel):
+    job_id: str
+    current_draft_id: str | None = None
+    open_blocking_count: int
+    runs: list[QualityRunOut]
+    findings: list[QualityFindingOut]
+
+
+class QualityFindingAcceptRisk(ApiModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ChapterRevisionRequest(ApiModel):
+    reason: str = ""
+
+
+class ChapterApproveRequest(ApiModel):
+    mode: Literal["manual", "guarded_auto"] = "manual"
+    expected_job_revision: int = Field(ge=1)
+
+
+class ChapterCommitRequest(ApiModel):
+    expected_job_revision: int = Field(ge=1)
+
+
+class ChapterCommitOut(ApiModel):
+    id: str
+    project_id: str
+    chapter_number: int
+    chapter_contract_id: str
+    approved_draft_id: str
+    source_version_id: str
+    state_snapshot_id: str | None = None
+    quality_summary: dict[str, Any]
+    checksum: str
+    status: str
+    is_current: bool
+    revision: int
+    committed_at: datetime
+    created_at: datetime

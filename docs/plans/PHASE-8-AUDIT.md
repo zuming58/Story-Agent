@@ -30,3 +30,28 @@
 - 构建仍有既有 Vite chunk-size warning，不阻断本地试写，可在后续性能阶段做路由级拆包。
 - 自动测试使用确定性 Provider，不会消费真实 API；真实模型单章冒烟需要用户在 UI 配置 Credential Manager 密钥后执行。
 - 本阶段不含导出、外部发布、短篇策略、短剧改编和 Windows EXE。
+
+## 2026-07-13 真实 Canon、规划与第一章验收增量
+
+### 已验证
+
+- 正式项目从 `currentChapter=0` 开始，未继承示例项目第 36 章状态。
+- 真实 Canon 已生成、结构化、应用并锁定：19 实体、10 关系、16 规则。
+- 1000 章七卷规划已应用，第 1—5 章精确节拍完整；1/3/5 章就绪检查通过。
+- 第一章章节契约只消耗第 1 章节拍，明确禁止进入旧宅、获得巡夜灯、解释夜巡司或确认童年真相。
+- 第一章原始稿、两轮修订稿均以独立候选版本保留，没有覆盖历史版本。
+- 服务重启后 run/job 和候选稿均从 SQLite 恢复；旧 worker 租约过期后收敛为 `interrupted`，可继续 resume。
+
+### 真实验收暴露并修复
+
+1. Canon readiness 对“硬规则”做逐字匹配，产生语义误判；已改为结构化规则加语义检查，并在 apply 边界重算 readiness。
+2. reviewer 提示携带完整未来计划且输出上限为 2048，真实 DeepSeek 返回 `content_truncated`；已压缩提示、提高到 3072，并增加唯一一次精简重试。
+3. narrative extractor 未收到章节契约 `requiredForeshadows`，导致实际存在的异常来信无法映射到 `FOG-OLD-HOUSE-LETTER`；已透传精确 code、钩子和完成条件。
+4. 自动测试 fake Provider 原先用 `contentMarkdown` 区分 reviewer，实际 reviewer 同样含正文，旧测试没有真正走 reviewer 响应；测试桩已按 `requiredOutput.findings` 分类并新增截断回归。
+
+### 停止点
+
+- 第一章 v3 为当前安全候选，2518 字，revision round=2。
+- run/job 因主动重启处于 `interrupted`，没有正式 commit，项目仍为第 0 章。
+- 按用户要求今晚停止；明天必须 resume 原 run，用新抽取逻辑完成质量门，不得重新生成正文或开启第三轮修订。
+- 最新 API 全量为 115 passed / 1 failed；唯一失败是随后已修正的测试桩分类，两个相关专项测试已通过。修正后的全量 API、Web、build、e2e 尚待补跑。

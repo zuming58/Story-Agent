@@ -49,7 +49,7 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
         finish_reason = "stop"
         if wants_json and type(self).invalid_extraction and "chapterMarkdown" in joined:
             content = "not-json"
-        elif wants_json and "requiredOutput" in joined:
+        elif wants_json and "requiredOutput" in joined and '"findings"' in joined:
             content = json.dumps({"findings": []})
             if type(self).reviewer_truncations_remaining > 0:
                 type(self).reviewer_truncations_remaining -= 1

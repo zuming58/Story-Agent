@@ -4,6 +4,10 @@
 
 当前分支：`agent/longform-endurance-foundation`
 
+草稿 PR：[#9](https://github.com/zuming58/Story-Agent/pull/9)
+
+GPT-5.6 核心审计提交：`3ede241`
+
 准确开发基线：`agent/export-publishing-foundation@c81be33`
 
 最新提交：以 `agent/longform-endurance-foundation` 分支 HEAD 为准（交付回复会给出推送后的短 hash）。

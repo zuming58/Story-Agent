@@ -638,6 +638,15 @@ class Phase7Service:
             finally:
                 with self._dispatch_lock:
                     self._running_threads.pop(key, None)
+                # Phase 10 is an orchestration layer above this runner. Notify it
+                # only after Phase 7 has released its lease and committed its
+                # terminal state; the callback must never compromise Phase 7.
+                phase10 = getattr(self.service, "phase10", None)
+                if phase10 is not None:
+                    try:
+                        phase10.on_automation_terminal(project_id, run_id)
+                    except Exception as exc:
+                        phase10.record_callback_failure(project_id, run_id, exc)
 
         with self._dispatch_lock:
             active = self._running_threads.get(key)

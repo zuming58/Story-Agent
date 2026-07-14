@@ -58,6 +58,10 @@ from .models import (
     ExportArtifact,
     ExportJob,
     ExportJobChapter,
+    EnduranceCheckpoint,
+    EnduranceFinding,
+    EnduranceReport,
+    EnduranceRun,
     KnowledgeBoundary,
     utc_now,
 )
@@ -1328,6 +1332,7 @@ class StoryService:
                 # to interrupted and require an explicit resume in the clone.
                 self.phase7.reconcile_orphaned_automation()
                 self._repair_restored_export_metadata(restored, old_id)
+                self._repair_restored_endurance_metadata(restored, old_id)
                 return restored
             except Exception:
                 if restored is not None:
@@ -1374,6 +1379,59 @@ class StoryService:
                 chapter.issue_summary_json = dumps(remap_json_identifier(
                     safe_json_loads(chapter.issue_summary_json, []), source_project_id, project.id
                 ))
+
+    def _repair_restored_endurance_metadata(self, project: CatalogProject, source_project_id: str) -> None:
+        """Remap Phase 10 JSON payloads and re-seal derived checksums."""
+        with self.db.project_write(project.id, project.folder_path) as session:
+            for run in session.scalars(select(EnduranceRun)).all():
+                run.project_id = project.id
+                if run.diagnostic_json:
+                    run.diagnostic_json = dumps(remap_json_identifier(
+                        safe_json_loads(run.diagnostic_json, {}), source_project_id, project.id
+                    ))
+            for checkpoint in session.scalars(select(EnduranceCheckpoint)).all():
+                checkpoint.project_id = project.id
+                for attribute, fallback in (
+                    ("budget_summary_json", {}),
+                    ("character_knowledge_json", {}),
+                    ("ability_summary_json", {}),
+                    ("item_summary_json", {}),
+                    ("foreshadow_summary_json", {}),
+                    ("cost_summary_json", {}),
+                ):
+                    setattr(checkpoint, attribute, dumps(remap_json_identifier(
+                        safe_json_loads(getattr(checkpoint, attribute), fallback), source_project_id, project.id
+                    )))
+                checkpoint.checkpoint_checksum = self.phase10._checkpoint_checksum(session, checkpoint)
+            for finding in session.scalars(select(EnduranceFinding)).all():
+                finding.project_id = project.id
+                evidence = remap_json_identifier(
+                    safe_json_loads(finding.evidence_json, {}), source_project_id, project.id
+                )
+                finding.evidence_json = dumps(evidence)
+                finding.fingerprint = stable_digest({
+                    "rule": finding.rule_code,
+                    "chapter": finding.chapter_number,
+                    "evidence": evidence,
+                })
+            for report in session.scalars(select(EnduranceReport)).all():
+                report.project_id = project.id
+                report.quality_trend_json = dumps(remap_json_identifier(
+                    safe_json_loads(report.quality_trend_json, {}), source_project_id, project.id
+                ))
+                drift = remap_json_identifier(
+                    safe_json_loads(report.drift_trend_json, {}), source_project_id, project.id
+                )
+                report.drift_trend_json = dumps(drift)
+                run = session.get(EnduranceRun, report.run_id)
+                if run:
+                    report.checksum = stable_digest({
+                        "runId": run.id,
+                        "status": run.status,
+                        "successCount": report.success_count,
+                        "findings": drift,
+                        "cost": run.estimated_cost,
+                    })
 
     def _read_backup_manifest(self, archive: Path, *, require_checksums: bool) -> dict[str, Any]:
         if not zipfile.is_zipfile(archive):

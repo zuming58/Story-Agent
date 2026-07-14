@@ -70,6 +70,7 @@ from .schemas import (
     EnduranceReadinessOut,
     EnduranceReportOut,
     EnduranceRunCreate,
+    EnduranceRunAction,
     EnduranceRunOut,
     EnduranceSuiteCreate,
     EnduranceSuiteOut,
@@ -538,16 +539,16 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
         return service.phase10.get_run(project_id, run_id)
 
     @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/cancel", response_model=EnduranceRunOut)
-    def cancel_endurance_run(project_id: str, run_id: str, request: Request) -> object:
-        return service.phase10.cancel_run(project_id, run_id, request.state.request_id)
+    def cancel_endurance_run(project_id: str, run_id: str, payload: EnduranceRunAction, request: Request) -> object:
+        return service.phase10.cancel_run(project_id, run_id, payload.expected_revision, request.state.request_id)
 
     @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/resume", response_model=EnduranceRunOut)
-    def resume_endurance_run(project_id: str, run_id: str, request: Request) -> object:
-        return service.phase10.resume_run(project_id, run_id, request.state.request_id)
+    def resume_endurance_run(project_id: str, run_id: str, payload: EnduranceRunAction, request: Request) -> object:
+        return service.phase10.resume_run(project_id, run_id, payload.expected_revision, request.state.request_id)
 
     @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/evaluate", response_model=EnduranceRunOut)
-    def evaluate_endurance_run(project_id: str, run_id: str, request: Request) -> object:
-        return service.phase10.evaluate_run(project_id, run_id, request.state.request_id)
+    def evaluate_endurance_run(project_id: str, run_id: str, payload: EnduranceRunAction, request: Request) -> object:
+        return service.phase10.evaluate_run(project_id, run_id, payload.expected_revision, request.state.request_id)
 
     @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}/findings", response_model=list[EnduranceFindingOut])
     def list_endurance_findings(project_id: str, run_id: str) -> object:

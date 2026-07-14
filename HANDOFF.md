@@ -8,7 +8,23 @@
 
 最新提交：以 `agent/longform-endurance-foundation` 分支 HEAD 为准（交付回复会给出推送后的短 hash）。
 
-状态：**第十阶段后端基础已实现并通过专项、API 全量、Web 单元、构建和 Playwright 回归测试；等待 GPT-5.6 完整审计。**
+状态：**第十阶段已经由 GPT-5.6 完整审计、修复并通过全量验证；可交接第十一阶段后端开发。**
+
+完整审计记录：`docs/plans/PHASE-10-AUDIT.md`。
+
+## 第十阶段 GPT-5.6 审计结果
+
+- 修复真实 Phase 7 异步执行下“首批未完成即把未来章节判为缺章”的核心状态机错误。
+- 增加 Phase 7 终态回调；5 章正式收口后再建立 checkpoint、运行规则并派发下一批。
+- 10 章专项已验证为两个 5 章批次，第二批完成前不会误报第 6—10 章。
+- Checkpoint 只接纳本次 endurance automation item 的 committed 章节，并保存正确 run/item 和单章费用归属。
+- 补强 commit/draft/extraction/source/snapshot 的作品归属、互相引用、状态、revision 与实际 checksum 链。
+- 漂移规则已经适配 Phase 5 真实 `entities/facts/boundaries/events/foreshadows` 抽取结构。
+- Cancel/resume/evaluate 必须携带 `expectedRevision`；恢复同时校验 checkpoint、Canon 与 Plan revision。
+- 评估会 resolve 旧 finding 后按当前权威状态重建；恢复不再被旧问题永久阻断。
+- 备份恢复会 remap Phase 10 JSON 并重算 checkpoint/finding/report checksum。
+- 新增 `ENDURANCE_CONSECUTIVE_FAILURE_LIMIT`，并修正费用、历史重复任务和里程碑逾期误报。
+- 未修改 `apps/web/**`、UI、CSS、设计令牌、Playwright 或视觉快照。
 
 ## 第十阶段完成内容
 
@@ -60,26 +76,32 @@
 - `ENDURANCE_REVISION_LIMIT_BREACH`
 - `ENDURANCE_COST_LIMIT`
 - `ENDURANCE_RESTART_DUPLICATION`
+- `ENDURANCE_CONSECUTIVE_FAILURE_LIMIT`
 
 严重度支持 `info|warning|error|blocker`；suite 的 `stopSeverity` 控制 error/blocker 是否阻断后续运行。
 
 ## 第十阶段测试结果
 
 ```text
-Phase 10 focused API: 5 passed
-Full API: 135 passed, 295 warnings
+Phase 10 focused API: 8 passed
+Full API: 138 passed, 295 warnings
 Web unit: 3 files / 11 tests passed
 Build: passed（仅既有 Vite chunk-size warning）
 Playwright e2e: 14 passed（1440×1024 与 1280×800）
 ```
 
-## 已知限制与审计重点
+## 已知限制与下一步
 
 - 本阶段只提供后端基础和 API；没有新增 UI。
-- `POST /endurance/runs` 会派发 Phase 7 批次；审计和真实 20—30 章运行前必须确认模型费用和本地 Provider 配置。
-- 当前规则主要读取 structured source payload、Canon 约束、PlanNode 预算、Foreshadow、KnowledgeBoundary、AutomationRunItem 和 ChapterJob revision；真实长篇运行后应由 GPT-5.6 结合实际正文/抽取结构继续补强规则精度。
-- Git 传输在本轮开始时无法 fetch，但 GitHub API 可访问；本地用远端 patch 和 commit 元数据精确重建了 `c81be33`，当前分支 HEAD 的父链包含该 hash。
+- `POST /endurance/runs` 会派发 Phase 7 批次；真实 20—30 章运行前必须由用户确认模型费用和本地 Provider 配置。
+- 真实 20—30 章中程运行尚未执行；当前全量测试全部使用本地确定性数据，不消费 DeepSeek。
 - FastAPI TestClient 与 SQLite datetime adapter 仍有上游 deprecation warning。
+
+## 当前交给另一台电脑的任务
+
+第十一阶段方案：`docs/plans/PHASE-11-SHORTFORM-ADAPTATION-BRIDGE.md`。
+
+另一台电脑只实现“短篇策略与短剧改编桥梁”的后端基础、迁移、公共类型和 API 测试；不得修改 `apps/web/**`、UI、CSS、设计令牌、Playwright 或视觉快照，不调用真实 DeepSeek。完成后推送 `agent/shortform-adaptation-foundation` 并停止，返回当前 GPT-5.6 做完整审计。
 
 ---
 

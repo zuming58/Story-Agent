@@ -1237,6 +1237,10 @@ class EnduranceRunCreate(ApiModel):
     chapter_count: Literal[5, 10, 20, 30] | None = None
 
 
+class EnduranceRunAction(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
 class EnduranceCheckpointOut(ApiModel):
     id: str
     project_id: str

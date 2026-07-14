@@ -28,7 +28,7 @@ from story_agent_api.models import (
     StateSnapshot,
     utc_now,
 )
-from story_agent_api.services import dumps, stable_digest
+from story_agent_api.services import StoryError, dumps, stable_digest
 
 
 def _project(client: TestClient, title: str = "Endurance Story") -> dict:
@@ -85,7 +85,8 @@ def _seed_official_chapter(client: TestClient, project_id: str, chapter: int, pa
     payload = payload or {"summary": f"chapter {chapter}"}
     content = f"Official chapter {chapter}"
     draft_checksum = stable_digest(content)
-    source_checksum = stable_digest({"payload": payload, "draft": draft_checksum})
+    extraction_checksum = stable_digest(payload)
+    source_checksum = stable_digest({"draft": draft_checksum, "extraction": extraction_checksum})
     with service.db.project_write(project.id, project.folder_path) as session:
         contract = ChapterContract(
             id=str(uuid4()),
@@ -126,7 +127,7 @@ def _seed_official_chapter(client: TestClient, project_id: str, chapter: int, pa
             chapter_draft_id=draft.id,
             payload_json=dumps(payload),
             status="validated",
-            checksum=stable_digest(payload),
+            checksum=extraction_checksum,
             created_at=now,
             updated_at=now,
         )
@@ -149,8 +150,19 @@ def _seed_official_chapter(client: TestClient, project_id: str, chapter: int, pa
             project_id=project.id,
             snapshot_number=chapter,
             source_version_id=source.id,
-            summary_json=dumps({"chapter": chapter}),
-            checksum=stable_digest({"snapshot": chapter, "source": source.id}),
+            summary_json=dumps({
+                "entityCount": len(payload.get("entities", [])),
+                "factCount": len(payload.get("facts", [])),
+                "eventCount": len(payload.get("events", [])),
+                "foreshadowCount": len(payload.get("foreshadows", [])),
+            }),
+            checksum=stable_digest({
+                "sourceVersionId": source.id,
+                "entityCount": len(payload.get("entities", [])),
+                "factCount": len(payload.get("facts", [])),
+                "eventCount": len(payload.get("events", [])),
+                "foreshadowCount": len(payload.get("foreshadows", [])),
+            }),
             revision=1,
             created_at=now,
             updated_at=now,
@@ -164,7 +176,7 @@ def _seed_official_chapter(client: TestClient, project_id: str, chapter: int, pa
             source_version_id=source.id,
             state_snapshot_id=snapshot.id,
             quality_summary_json=dumps({}),
-            checksum=stable_digest({"draft": draft_checksum, "source": source.id}),
+            checksum=stable_digest({"draft": draft_checksum, "sourceVersionId": source.id, "quality": {}}),
             status="official",
             is_current=True,
             revision=1,
@@ -272,15 +284,22 @@ def test_endurance_run_reuses_phase7_and_creates_checkpoints_report_idempotently
     project = _project(client)
     _ensure_ready_foundation(client, project["id"])
     _install_fake_phase7(client, project["id"])
-    suite = client.post(f"/api/v1/projects/{project['id']}/endurance/suites", json={"targetChapterCount": 5}).json()
+    suite = client.post(f"/api/v1/projects/{project['id']}/endurance/suites", json={"targetChapterCount": 10}).json()
 
     created = client.post(f"/api/v1/projects/{project['id']}/endurance/runs", json={"suiteId": suite["id"], "idempotencyKey": "same"})
     assert created.status_code == 201, created.text
     run = created.json()
     assert run["status"] == "completed"
-    assert run["completedCount"] == 5
-    assert len(run["checkpoints"]) == 5
-    assert run["report"]["successCount"] == 5
+    assert run["completedCount"] == 10
+    assert len(run["checkpoints"]) == 10
+    assert run["report"]["successCount"] == 10
+    service = client.app.state.story_service
+    catalog = service.get_project(project["id"])
+    with service.db.project(catalog.id, catalog.folder_path) as session:
+        automation_runs = session.scalars(select(AutomationRun).where(
+            AutomationRun.idempotency_key.like(f"endurance:{run['id']}:%")
+        )).all()
+        assert len(automation_runs) == 2
     duplicate = client.post(f"/api/v1/projects/{project['id']}/endurance/runs", json={"suiteId": suite["id"], "idempotencyKey": "same"})
     assert duplicate.status_code == 201
     assert duplicate.json()["id"] == run["id"]
@@ -296,11 +315,24 @@ def test_endurance_rules_detect_drift_and_stop_on_blocker(client: TestClient) ->
         session.add(PlanNode(id="final-reveal", plan_id=plan.id, title="Final Reveal", type="milestone", target_chapter=4, range_min=3, range_max=4))
         session.add(CanonEntity(id=str(uuid4()), entity_type_id="character", canonical_name="Late Hero", aliases_json="[]", attributes_json=dumps({"earliestChapter": 3}), status="locked", created_at=now, updated_at=now, locked_at=now))
         session.add(CanonRule(id=str(uuid4()), rule_code="ABILITY_STEP2", category="ability", statement="Step2 after chapter 4", constraint_json=dumps({"ability": "Step2", "earliestChapter": 4, "prerequisites": ["Training"]}), status="locked", created_at=now, updated_at=now, locked_at=now))
-        session.add(KnowledgeBoundary(id=str(uuid4()), project_id=project["id"], entity_id="character", knowledge_json=dumps({"character": "Late Hero", "fact": "Secret", "allowedChapter": 5}), status="active", created_at=now, updated_at=now))
+        session.add(KnowledgeBoundary(id=str(uuid4()), project_id=project["id"], entity_id="character", knowledge_json=dumps({"character": "Late Hero", "fact": "reveal:Secret", "allowedChapter": 5}), status="active", created_at=now, updated_at=now))
         session.add(Foreshadow(id=str(uuid4()), project_id=project["id"], code="F1", label="F1", status="pending", latest_chapter=1, created_at=now, updated_at=now))
     payloads = {
-        1: {"summary": "chapter 1", "completedMilestones": ["Final Reveal"], "characters": ["Late Hero"], "abilities": ["Step2"], "items": [{"name": "Lamp", "holder": "A", "charges": 1}], "knowledge": [{"character": "Late Hero", "fact": "Secret"}]},
-        2: {"summary": "chapter 2", "items": [{"name": "Lamp", "holder": "A", "charges": 2}]},
+        1: {
+            "summary": "chapter 1",
+            "entities": [
+                {"canonicalName": "Late Hero", "entityTypeName": "person", "attributes": {"name": "Late Hero"}},
+                {"canonicalName": "Step2", "entityTypeName": "ability", "attributes": {"name": "Step2"}},
+                {"canonicalName": "Lamp", "entityTypeName": "item", "attributes": {"name": "Lamp", "holder": "A", "charges": 1}},
+            ],
+            "events": [{"eventOrder": 1, "summary": "Final Reveal", "participants": ["Late Hero"]}],
+            "boundaries": [{"entity": "Late Hero", "knowledge": {"reveal": "Secret"}}],
+            "foreshadows": [],
+        },
+        2: {
+            "summary": "chapter 2",
+            "entities": [{"canonicalName": "Lamp", "entityTypeName": "item", "attributes": {"name": "Lamp", "holder": "A", "charges": 2}}],
+        },
         3: {"summary": "chapter 3"},
         4: {"summary": "chapter 4"},
         5: {"summary": "chapter 5"},
@@ -320,6 +352,158 @@ def test_endurance_rules_detect_drift_and_stop_on_blocker(client: TestClient) ->
         "ENDURANCE_FORESHADOW_MISSED",
         "ENDURANCE_REVISION_LIMIT_BREACH",
     }.issubset(codes)
+
+
+def test_async_batches_do_not_flag_future_gaps_and_advance_after_callback(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_ready_foundation(client, project["id"])
+    service = client.app.state.story_service
+    created_automation_ids: list[str] = []
+
+    def fake_async_create(project_id_arg, payload, request_id):
+        catalog = service.get_project(project_id_arg)
+        now = utc_now()
+        run_id = str(uuid4())
+        count = payload.chapter_count or 5
+        with service.db.project_write(catalog.id, catalog.folder_path) as session:
+            meta = session.get(ProjectMeta, catalog.id)
+            start = (meta.current_chapter if meta else 0) + 1
+            automation = AutomationRun(
+                id=run_id,
+                project_id=catalog.id,
+                policy_id=catalog.id,
+                scheduled_local_date="2026-07-14",
+                trigger="manual",
+                status="running",
+                idempotency_key=payload.idempotency_key,
+                requested_chapter_count=count,
+                start_chapter=start,
+                end_chapter=start + count - 1,
+                planned_count=count,
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+            )
+            session.add(automation)
+            session.add_all([
+                AutomationRunItem(
+                    id=str(uuid4()),
+                    project_id=catalog.id,
+                    automation_run_id=run_id,
+                    chapter_number=chapter,
+                    sequence_number=offset,
+                    status="waiting",
+                    created_at=now,
+                    updated_at=now,
+                )
+                for offset, chapter in enumerate(range(start, start + count), start=1)
+            ])
+        created_automation_ids.append(run_id)
+        return service.phase7.get_run(catalog.id, run_id)
+
+    def finish_batch(automation_run_id: str) -> None:
+        catalog = service.get_project(project["id"])
+        with service.db.project(catalog.id, catalog.folder_path) as session:
+            chapters = list(session.scalars(select(AutomationRunItem.chapter_number).where(
+                AutomationRunItem.automation_run_id == automation_run_id
+            )).all())
+        commit_ids = {
+            chapter: _seed_official_chapter(client, project["id"], chapter)["commit"]
+            for chapter in chapters
+        }
+        now = utc_now()
+        with service.db.project_write(catalog.id, catalog.folder_path) as session:
+            automation = session.get(AutomationRun, automation_run_id)
+            automation.status = "completed"
+            automation.succeeded_count = len(chapters)
+            automation.completed_at = now
+            automation.updated_at = now
+            for item in session.scalars(select(AutomationRunItem).where(
+                AutomationRunItem.automation_run_id == automation_run_id
+            )).all():
+                item.status = "committed"
+                item.chapter_commit_id = commit_ids[item.chapter_number]
+                item.completed_at = now
+                item.updated_at = now
+
+    service.phase7.create_manual_run = fake_async_create
+    suite = client.post(
+        f"/api/v1/projects/{project['id']}/endurance/suites",
+        json={"targetChapterCount": 10},
+    ).json()
+    response = client.post(
+        f"/api/v1/projects/{project['id']}/endurance/runs",
+        json={"suiteId": suite["id"]},
+    )
+    assert response.status_code == 201, response.text
+    endurance = response.json()
+    assert endurance["status"] == "running"
+    assert endurance["completedCount"] == 0
+    assert endurance["findings"] == []
+    assert len(created_automation_ids) == 1
+
+    finish_batch(created_automation_ids[0])
+    service.phase10.on_automation_terminal(project["id"], created_automation_ids[0])
+    midway = client.get(f"/api/v1/projects/{project['id']}/endurance/runs/{endurance['id']}").json()
+    assert midway["status"] == "running"
+    assert midway["completedCount"] == 5
+    assert "ENDURANCE_COMMIT_SEQUENCE_GAP" not in {item["ruleCode"] for item in midway["findings"] if item["status"] == "open"}
+    assert len(created_automation_ids) == 2
+
+    finish_batch(created_automation_ids[1])
+    service.phase10.on_automation_terminal(project["id"], created_automation_ids[1])
+    completed = client.get(f"/api/v1/projects/{project['id']}/endurance/runs/{endurance['id']}").json()
+    assert completed["status"] == "completed"
+    assert completed["completedCount"] == 10
+    assert len(completed["checkpoints"]) == 10
+
+
+def test_endurance_run_actions_require_current_revision(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_ready_foundation(client, project["id"])
+    service = client.app.state.story_service
+    suite = client.post(f"/api/v1/projects/{project['id']}/endurance/suites", json={"targetChapterCount": 5}).json()
+    catalog = service.get_project(project["id"])
+    now = utc_now()
+    with service.db.project_write(catalog.id, catalog.folder_path) as session:
+        session.add(EnduranceRun(
+            id="revision-run",
+            project_id=catalog.id,
+            suite_id=suite["id"],
+            status="interrupted",
+            start_chapter=1,
+            end_chapter=5,
+            target_chapter_count=5,
+            revision=3,
+            created_at=now,
+            updated_at=now,
+        ))
+    stale = client.post(
+        f"/api/v1/projects/{project['id']}/endurance/runs/revision-run/resume",
+        json={"expectedRevision": 2},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "ENDURANCE_RUN_REVISION_CONFLICT"
+
+
+def test_dispatch_failure_does_not_leave_active_endurance_run(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_ready_foundation(client, project["id"])
+    service = client.app.state.story_service
+    suite = client.post(f"/api/v1/projects/{project['id']}/endurance/suites", json={"targetChapterCount": 5}).json()
+
+    def fail_dispatch(project_id_arg, payload, request_id):
+        raise StoryError(503, "MODEL_PROVIDER_UNAVAILABLE", "provider unavailable")
+
+    service.phase7.create_manual_run = fail_dispatch
+    response = client.post(
+        f"/api/v1/projects/{project['id']}/endurance/runs",
+        json={"suiteId": suite["id"], "idempotencyKey": "dispatch-failure"},
+    )
+    assert response.status_code == 503
+    runs = client.get(f"/api/v1/projects/{project['id']}/endurance/runs").json()
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["stopReason"] == "MODEL_PROVIDER_UNAVAILABLE"
 
 
 def test_gap_restart_recovery_cancel_and_resume_drift(client: TestClient) -> None:
@@ -343,8 +527,40 @@ def test_gap_restart_recovery_cancel_and_resume_drift(client: TestClient) -> Non
             started_at=now,
             updated_at=now,
         )
-        session.add(run)
-    evaluated = client.post(f"/api/v1/projects/{project['id']}/endurance/runs/manual-run/evaluate")
+        automation = AutomationRun(
+            id="manual-automation",
+            project_id=catalog.id,
+            policy_id=catalog.id,
+            scheduled_local_date="2026-07-14",
+            trigger="manual",
+            status="failed",
+            idempotency_key="endurance:manual-run:1",
+            start_chapter=1,
+            end_chapter=1,
+            planned_count=1,
+            created_at=now,
+            started_at=now,
+            completed_at=now,
+            updated_at=now,
+        )
+        item = AutomationRunItem(
+            id="manual-item",
+            project_id=catalog.id,
+            automation_run_id=automation.id,
+            chapter_number=1,
+            sequence_number=1,
+            status="failed",
+            created_at=now,
+            started_at=now,
+            completed_at=now,
+            updated_at=now,
+        )
+        run.current_automation_run_id = automation.id
+        session.add_all([run, automation, item])
+    evaluated = client.post(
+        f"/api/v1/projects/{project['id']}/endurance/runs/manual-run/evaluate",
+        json={"expectedRevision": 1},
+    )
     assert evaluated.status_code == 200
     assert "ENDURANCE_COMMIT_SEQUENCE_GAP" in {item["ruleCode"] for item in evaluated.json()["findings"]}
 
@@ -374,7 +590,11 @@ def test_gap_restart_recovery_cancel_and_resume_drift(client: TestClient) -> Non
         )
         session.add(checkpoint)
         run.last_checkpoint_id = checkpoint.id
-    resumed = client.post(f"/api/v1/projects/{project['id']}/endurance/runs/manual-run/resume")
+        current_revision = run.revision
+    resumed = client.post(
+        f"/api/v1/projects/{project['id']}/endurance/runs/manual-run/resume",
+        json={"expectedRevision": current_revision},
+    )
     assert resumed.status_code == 409
 
 

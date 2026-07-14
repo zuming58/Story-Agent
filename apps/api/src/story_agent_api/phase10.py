@@ -15,6 +15,7 @@ from .models import (
     CanonRule,
     ChapterCommit,
     ChapterDraft,
+    ChapterExtraction,
     ChapterJob,
     EnduranceCheckpoint,
     EnduranceFinding,
@@ -49,9 +50,11 @@ DEFAULT_RULES = [
     "ENDURANCE_REVISION_LIMIT_BREACH",
     "ENDURANCE_COST_LIMIT",
     "ENDURANCE_RESTART_DUPLICATION",
+    "ENDURANCE_CONSECUTIVE_FAILURE_LIMIT",
 ]
 ACTIVE_RUN_STATUSES = {"queued", "running", "paused", "cancel_requested"}
 TERMINAL_RUN_STATUSES = {"blocked", "completed", "cancelled", "interrupted", "failed"}
+AUTOMATION_TERMINAL_STATUSES = {"completed", "partial", "failed", "blocked", "cancelled", "interrupted", "missed"}
 SEVERITY_ORDER = {"info": 0, "warning": 1, "error": 2, "blocker": 3}
 
 
@@ -166,6 +169,10 @@ class Phase10Service:
             meta = session.get(ProjectMeta, project.id)
             start = payload.start_chapter or ((meta.current_chapter if meta else project.current_chapter) + 1)
             now = _now()
+            if start + payload.target_chapter_count - 1 > (meta.total_chapters if meta else project.total_chapters):
+                raise StoryError(422, "ENDURANCE_RANGE_OUT_OF_BOUNDS", "Endurance range exceeds project total chapters.")
+            rules = payload.enabled_rules if payload.enabled_rules else DEFAULT_RULES
+            self._validate_rules(rules)
             suite = EnduranceSuite(
                 id=str(uuid4()),
                 project_id=project.id,
@@ -176,7 +183,7 @@ class Phase10Service:
                 total_cost_limit=payload.total_cost_limit,
                 consecutive_failure_limit=payload.consecutive_failure_limit,
                 stop_severity=payload.stop_severity,
-                enabled_rules_json=dumps(payload.enabled_rules or DEFAULT_RULES),
+                enabled_rules_json=dumps(rules),
                 revision=1,
                 created_at=now,
                 updated_at=now,
@@ -200,7 +207,11 @@ class Phase10Service:
                 raise StoryError(409, "ENDURANCE_SUITE_REVISION_CONFLICT", "Endurance suite revision conflict.", {"currentRevision": suite.revision})
             for key, value in payload.model_dump(exclude={"expected_revision"}, exclude_unset=True).items():
                 if key == "enabled_rules":
-                    suite.enabled_rules_json = dumps(value or DEFAULT_RULES)
+                    rules = value if value else DEFAULT_RULES
+                    self._validate_rules(rules)
+                    suite.enabled_rules_json = dumps(rules)
+                elif key in {"daily_cost_limit", "total_cost_limit"}:
+                    setattr(suite, key, value)
                 elif value is not None:
                     setattr(suite, key, value)
             suite.revision += 1
@@ -212,23 +223,38 @@ class Phase10Service:
     # ------------------------------------------------------------------
     def create_run(self, project_id: str, payload: EnduranceRunCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
-            suite = self._get_suite(session, project.id, payload.suite_id)
-            if payload.idempotency_key:
+        if payload.idempotency_key:
+            with self.service.db.project(project.id, project.folder_path) as session:
                 existing = session.scalar(select(EnduranceRun).where(
                     EnduranceRun.project_id == project.id,
                     EnduranceRun.idempotency_key == payload.idempotency_key,
                 ))
                 if existing:
                     return self._run_dict(session, existing, include_details=True)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            suite = self._get_suite(session, project.id, payload.suite_id)
             active = session.scalar(select(EnduranceRun.id).where(EnduranceRun.project_id == project.id, EnduranceRun.status.in_(ACTIVE_RUN_STATUSES)))
             if active:
                 raise StoryError(409, "ENDURANCE_ACTIVE_RUN_EXISTS", "Only one active endurance run is allowed per project.", {"runId": active})
+            active_automation = session.scalar(select(AutomationRun.id).where(
+                AutomationRun.project_id == project.id,
+                AutomationRun.status.in_(["queued", "running", "cancel_requested"]),
+            ))
+            if active_automation:
+                raise StoryError(409, "ENDURANCE_AUTOMATION_ACTIVE", "An automation run is already active for this project.", {"automationRunId": active_automation})
             target = payload.chapter_count or suite.target_chapter_count
             if target not in ALLOWED_COUNTS:
                 raise StoryError(422, "ENDURANCE_CHAPTER_COUNT_INVALID", "chapterCount must be 5, 10, 20, or 30.")
             meta = session.get(ProjectMeta, project.id)
-            start = suite.start_chapter or ((meta.current_chapter if meta else project.current_chapter) + 1)
+            expected_start = (meta.current_chapter if meta else project.current_chapter) + 1
+            start = suite.start_chapter or expected_start
+            if project.project_kind != "standard":
+                raise StoryError(409, "ENDURANCE_STANDARD_PROJECT_REQUIRED", "Only standard projects can start endurance runs.")
+            if start != expected_start:
+                raise StoryError(409, "ENDURANCE_SUITE_START_STALE", "Suite start chapter no longer matches the next uncommitted chapter.", {"expectedStartChapter": expected_start})
+            canon_locked = session.scalar(select(CanonDocument.id).where(CanonDocument.id == "story-core", CanonDocument.status == "locked"))
+            if not canon_locked:
+                raise StoryError(409, "ENDURANCE_CANON_NOT_LOCKED", "Lock Canon before starting an endurance run.")
             end = start + target - 1
             total = meta.total_chapters if meta else project.total_chapters
             if end > total:
@@ -252,8 +278,9 @@ class Phase10Service:
             session.add(self.service._audit("endurance_run.queued", "endurance_run", run.id, {"requestId": request_id, "targetChapterCount": target}, request_id))
             session.flush()
             run_id = run.id
-        self._dispatch_next_batch(project.id, run_id, request_id)
-        self.evaluate_run(project.id, run_id, request_id)
+        automation = self._dispatch_next_batch(project.id, run_id, request_id)
+        if automation and automation.get("status") in AUTOMATION_TERMINAL_STATUSES:
+            self.on_automation_terminal(project.id, automation["id"], request_id=request_id)
         return self.get_run(project.id, run_id)
 
     def list_runs(self, project_id: str) -> list[dict[str, Any]]:
@@ -268,11 +295,12 @@ class Phase10Service:
         with self.service.db.project(project.id, project.folder_path) as session:
             return self._run_dict(session, self._get_run(session, project.id, run_id), include_details=True)
 
-    def cancel_run(self, project_id: str, run_id: str, request_id: str) -> dict[str, Any]:
+    def cancel_run(self, project_id: str, run_id: str, expected_revision: int, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         automation_run_id: str | None = None
         with self.service.db.project_write(project.id, project.folder_path) as session:
             run = self._get_run(session, project.id, run_id)
+            self._check_run_revision(run, expected_revision)
             if run.status in TERMINAL_RUN_STATUSES:
                 return self._run_dict(session, run, include_details=True)
             automation_run_id = run.current_automation_run_id
@@ -283,28 +311,41 @@ class Phase10Service:
             run.revision += 1
             session.add(self.service._audit("endurance_run.cancel_requested", "endurance_run", run.id, {"requestId": request_id}, request_id))
         if automation_run_id:
-            try:
-                self.service.phase7.cancel_run(project.id, automation_run_id, request_id)
-            except StoryError:
-                pass
+            automation = self.service.phase7.cancel_run(project.id, automation_run_id, request_id)
+            if automation["status"] not in AUTOMATION_TERMINAL_STATUSES and automation["status"] != "cancel_requested":
+                raise StoryError(409, "ENDURANCE_AUTOMATION_CANCEL_FAILED", "Underlying automation run did not accept cancellation.")
         with self.service.db.project_write(project.id, project.folder_path) as session:
             run = self._get_run(session, project.id, run_id)
-            if run.status == "cancel_requested":
+            automation_terminal = True
+            if run.current_automation_run_id:
+                current = session.get(AutomationRun, run.current_automation_run_id)
+                automation_terminal = current is None or current.status in AUTOMATION_TERMINAL_STATUSES
+            if run.status == "cancel_requested" and automation_terminal:
                 run.status = "cancelled"
                 run.completed_at = _now()
                 run.updated_at = _now()
                 run.revision += 1
             return self._run_dict(session, run, include_details=True)
 
-    def resume_run(self, project_id: str, run_id: str, request_id: str) -> dict[str, Any]:
+    def resume_run(self, project_id: str, run_id: str, expected_revision: int, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
-        with self.service.db.project(project.id, project.folder_path) as session:
+        with self.service.db.project_write(project.id, project.folder_path) as session:
             run = self._get_run(session, project.id, run_id)
+            self._check_run_revision(run, expected_revision)
             if run.status not in {"interrupted", "paused", "blocked", "failed"}:
                 raise StoryError(409, "ENDURANCE_RUN_NOT_RESUMABLE", "Endurance run is not resumable in its current status.")
             self._validate_last_checkpoint(session, run)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
-            run = self._get_run(session, project.id, run_id)
+            other_active = session.scalar(select(EnduranceRun.id).where(
+                EnduranceRun.project_id == project.id,
+                EnduranceRun.id != run.id,
+                EnduranceRun.status.in_(ACTIVE_RUN_STATUSES),
+            ))
+            active_automation = session.scalar(select(AutomationRun.id).where(
+                AutomationRun.project_id == project.id,
+                AutomationRun.status.in_(["queued", "running", "cancel_requested"]),
+            ))
+            if other_active or active_automation:
+                raise StoryError(409, "ENDURANCE_RESUME_CONFLICT", "Another endurance or automation run is active.", {"runId": other_active, "automationRunId": active_automation})
             run.status = "running"
             run.stop_reason = None
             run.diagnostic_json = None
@@ -312,14 +353,74 @@ class Phase10Service:
             run.completed_at = None
             run.updated_at = _now()
             run.revision += 1
-        self._dispatch_next_batch(project.id, run_id, request_id)
-        self.evaluate_run(project.id, run_id, request_id)
+            for finding in session.scalars(select(EnduranceFinding).where(EnduranceFinding.run_id == run.id, EnduranceFinding.status == "open")).all():
+                finding.status = "resolved"
+                finding.revision += 1
+                finding.updated_at = _now()
+        automation = self._dispatch_next_batch(project.id, run_id, request_id)
+        if automation and automation.get("status") in AUTOMATION_TERMINAL_STATUSES:
+            self.on_automation_terminal(project.id, automation["id"], request_id=request_id)
         return self.get_run(project.id, run_id)
 
-    def evaluate_run(self, project_id: str, run_id: str, request_id: str) -> dict[str, Any]:
+    def evaluate_run(self, project_id: str, run_id: str, expected_revision: int, request_id: str) -> dict[str, Any]:
+        project = self.service.get_project(project_id)
+        self._evaluate_internal(project.id, run_id, request_id, expected_revision=expected_revision)
+        return self.get_run(project.id, run_id)
+
+    def on_automation_terminal(self, project_id: str, automation_run_id: str, *, request_id: str | None = None) -> None:
+        """Advance an endurance run after its Phase 7 batch reaches a terminal state."""
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            run = session.scalar(select(EnduranceRun).where(
+                EnduranceRun.project_id == project.id,
+                EnduranceRun.current_automation_run_id == automation_run_id,
+                EnduranceRun.status.in_(ACTIVE_RUN_STATUSES),
+            ))
+            if not run:
+                return
+            run_id = run.id
+        request_id = request_id or str(uuid4())
+        # Synchronous test providers can finish a batch before returning. Loop
+        # over those terminal batches, while real providers normally exit after
+        # dispatching one asynchronous batch.
+        for _ in range(8):
+            self._evaluate_internal(project.id, run_id, request_id)
+            current = self.get_run(project.id, run_id)
+            if current["status"] != "running":
+                return
+            automation = self._dispatch_next_batch(project.id, run_id, request_id)
+            if not automation or automation.get("status") not in AUTOMATION_TERMINAL_STATUSES:
+                return
+
+    def record_callback_failure(self, project_id: str, automation_run_id: str, exc: Exception) -> None:
+        """Fail closed when a terminal callback cannot advance its supervisor."""
+        try:
+            project = self.service.get_project(project_id)
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                run = session.scalar(select(EnduranceRun).where(
+                    EnduranceRun.project_id == project.id,
+                    EnduranceRun.current_automation_run_id == automation_run_id,
+                    EnduranceRun.status.in_(ACTIVE_RUN_STATUSES),
+                ))
+                if not run:
+                    return
+                run.status = "interrupted"
+                run.stop_reason = "ENDURANCE_CALLBACK_FAILED"
+                run.diagnostic_json = dumps({"errorType": type(exc).__name__})
+                run.completed_at = _now()
+                run.updated_at = _now()
+                run.revision += 1
+        except Exception:
+            # The callback originates in a daemon worker; never let a secondary
+            # persistence failure escape and terminate unrelated automation.
+            return
+
+    def _evaluate_internal(self, project_id: str, run_id: str, request_id: str, *, expected_revision: int | None = None) -> None:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             run = self._get_run(session, project.id, run_id)
+            if expected_revision is not None:
+                self._check_run_revision(run, expected_revision)
             suite = self._get_suite(session, project.id, run.suite_id)
             if run.status == "cancel_requested":
                 run.status = "cancelled"
@@ -327,13 +428,20 @@ class Phase10Service:
                 run.completed_at = _now()
                 run.updated_at = _now()
                 run.revision += 1
-                return self._run_dict(session, run, include_details=True)
+                return
+            for finding in session.scalars(select(EnduranceFinding).where(
+                EnduranceFinding.run_id == run.id,
+                EnduranceFinding.status == "open",
+            )).all():
+                finding.status = "resolved"
+                finding.revision += 1
+                finding.updated_at = _now()
             self._create_missing_checkpoints(session, project.id, run)
+            self._refresh_run_summary(session, run, suite, apply_status=False)
             self._evaluate_rules(session, project.id, run, suite)
             self._refresh_run_summary(session, run, suite)
             self._refresh_report(session, run)
             session.add(self.service._audit("endurance_run.evaluated", "endurance_run", run.id, {"requestId": request_id}, request_id))
-            return self._run_dict(session, run, include_details=True)
 
     def list_findings(self, project_id: str, run_id: str) -> list[dict[str, Any]]:
         project = self.service.get_project(project_id)
@@ -352,26 +460,42 @@ class Phase10Service:
                 raise StoryError(404, "ENDURANCE_REPORT_NOT_FOUND", "Endurance report not found.")
             return self._report_dict(report)
 
-    def _dispatch_next_batch(self, project_id: str, run_id: str, request_id: str) -> None:
+    def _dispatch_next_batch(self, project_id: str, run_id: str, request_id: str) -> dict[str, Any] | None:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             run = self._get_run(session, project.id, run_id)
             if run.status in TERMINAL_RUN_STATUSES or run.status == "cancel_requested":
-                return
+                return None
+            if run.current_automation_run_id:
+                current = session.get(AutomationRun, run.current_automation_run_id)
+                if current and current.status not in AUTOMATION_TERMINAL_STATUSES:
+                    return self.service.phase7._run_dict(session, current, include_items=True)
             next_chapter = run.start_chapter + run.completed_count
             if next_chapter > run.end_chapter:
-                return
+                return None
             remaining = run.end_chapter - next_chapter + 1
-            batch_count = min(5, remaining)
+            batch_count = 5 if remaining >= 5 else 3 if remaining >= 3 else 1
             run.status = "running"
             run.started_at = run.started_at or _now()
             run.updated_at = _now()
             run.revision += 1
-        automation = self.service.phase7.create_manual_run(
-            project.id,
-            AutomationRunCreate(idempotency_key=f"endurance:{run_id}:{next_chapter}", chapter_count=batch_count if batch_count in {1, 3, 5} else 5),
-            request_id,
-        )
+        try:
+            automation = self.service.phase7.create_manual_run(
+                project.id,
+                AutomationRunCreate(idempotency_key=f"endurance:{run_id}:{next_chapter}", chapter_count=batch_count),
+                request_id,
+            )
+        except Exception as exc:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                run = self._get_run(session, project.id, run_id)
+                if run.status in ACTIVE_RUN_STATUSES:
+                    run.status = "failed"
+                    run.stop_reason = getattr(exc, "code", "ENDURANCE_DISPATCH_FAILED")
+                    run.diagnostic_json = dumps({"errorType": type(exc).__name__})
+                    run.completed_at = _now()
+                    run.updated_at = _now()
+                    run.revision += 1
+            raise
         with self.service.db.project_write(project.id, project.folder_path) as session:
             run = self._get_run(session, project.id, run_id)
             run.current_automation_run_id = automation["id"]
@@ -384,12 +508,23 @@ class Phase10Service:
             run.estimated_cost += automation.get("estimatedCost", 0.0)
             run.updated_at = _now()
             run.revision += 1
+        return self.service.phase7.get_run(project.id, automation["id"])
 
     # ------------------------------------------------------------------
     # Checkpoints and rules
     # ------------------------------------------------------------------
     def _create_missing_checkpoints(self, session: Session, project_id: str, run: EnduranceRun) -> None:
-        for chapter in range(run.start_chapter, run.end_chapter + 1):
+        automation_ids = self._automation_run_ids(session, project_id, run.id)
+        if not automation_ids:
+            return
+        committed_items = session.scalars(select(AutomationRunItem).where(
+            AutomationRunItem.automation_run_id.in_(automation_ids),
+            AutomationRunItem.status == "committed",
+            AutomationRunItem.chapter_number >= run.start_chapter,
+            AutomationRunItem.chapter_number <= run.end_chapter,
+        ).order_by(AutomationRunItem.chapter_number, AutomationRunItem.completed_at)).all()
+        for item in committed_items:
+            chapter = item.chapter_number
             existing = session.scalar(select(EnduranceCheckpoint.id).where(
                 EnduranceCheckpoint.run_id == run.id,
                 EnduranceCheckpoint.chapter_number == chapter,
@@ -407,12 +542,25 @@ class Phase10Service:
             source = session.get(SourceVersion, commit.source_version_id)
             snapshot = session.get(StateSnapshot, commit.state_snapshot_id) if commit.state_snapshot_id else None
             draft = session.get(ChapterDraft, commit.approved_draft_id)
-            if not source or source.project_id != project_id or source.status != "official" or not snapshot or snapshot.project_id != project_id or not draft or draft.project_id != project_id or draft.status != "approved":
+            extraction = session.scalar(select(ChapterExtraction).where(
+                ChapterExtraction.chapter_draft_id == commit.approved_draft_id,
+                ChapterExtraction.status == "validated",
+            ).order_by(ChapterExtraction.created_at.desc()))
+            valid_chain = (
+                source and source.project_id == project_id and source.status == "official"
+                and snapshot and snapshot.project_id == project_id and snapshot.source_version_id == source.id
+                and draft and draft.project_id == project_id and draft.status == "approved"
+                and stable_digest(draft.content_markdown) == draft.checksum
+                and extraction and extraction.project_id == project_id
+                and self._chain_checksums_valid(commit, source, snapshot, draft, extraction)
+                and (not item.chapter_commit_id or item.chapter_commit_id == commit.id)
+            )
+            if not valid_chain:
                 continue
             plan = session.scalar(select(Plan))
             canon = session.get(CanonDocument, "story-core")
-            payload = loads(source.payload_json) or {}
-            cost = self._chapter_cost_summary(session, project_id, chapter)
+            payload = self._normalize_checkpoint_payload(loads(source.payload_json) or {})
+            cost = self._chapter_cost_summary(item)
             checkpoint_payload = {
                 "runId": run.id,
                 "chapterNumber": chapter,
@@ -425,6 +573,9 @@ class Phase10Service:
                 "commitChecksum": commit.checksum,
                 "sourceChecksum": source.checksum,
                 "snapshotChecksum": snapshot.checksum,
+                "approvedDraftId": draft.id,
+                "draftRevision": draft.revision,
+                "draftChecksum": draft.checksum,
                 "canonRevision": canon.revision if canon else 0,
                 "planRevision": plan.revision if plan else 0,
                 "budgetSummary": self._budget_summary(session, chapter),
@@ -438,8 +589,8 @@ class Phase10Service:
                 id=str(uuid4()),
                 project_id=project_id,
                 run_id=run.id,
-                automation_run_id=run.current_automation_run_id,
-                automation_run_item_id=run.current_automation_run_item_id,
+                automation_run_id=item.automation_run_id,
+                automation_run_item_id=item.id,
                 chapter_number=chapter,
                 chapter_commit_id=commit.id,
                 source_version_id=source.id,
@@ -470,7 +621,9 @@ class Phase10Service:
         enabled = set(loads(suite.enabled_rules_json) or DEFAULT_RULES)
         checkpoints = session.scalars(select(EnduranceCheckpoint).where(EnduranceCheckpoint.run_id == run.id).order_by(EnduranceCheckpoint.chapter_number)).all()
         checkpoint_by_chapter = {item.chapter_number: item for item in checkpoints}
-        for chapter in range(run.start_chapter, run.end_chapter + 1):
+        completed_milestones: set[str] = set()
+        attempted_end = self._terminal_attempted_end(session, project_id, run)
+        for chapter in range(run.start_chapter, (attempted_end or run.start_chapter - 1) + 1):
             current_count = session.scalar(select(func.count()).select_from(ChapterCommit).where(
                 ChapterCommit.project_id == project_id,
                 ChapterCommit.chapter_number == chapter,
@@ -485,13 +638,24 @@ class Phase10Service:
             commit = session.get(ChapterCommit, checkpoint.chapter_commit_id)
             source = session.get(SourceVersion, checkpoint.source_version_id)
             snapshot = session.get(StateSnapshot, checkpoint.state_snapshot_id)
+            draft = session.get(ChapterDraft, commit.approved_draft_id) if commit else None
+            extraction = session.scalar(select(ChapterExtraction).where(
+                ChapterExtraction.chapter_draft_id == commit.approved_draft_id,
+                ChapterExtraction.status == "validated",
+            ).order_by(ChapterExtraction.created_at.desc())) if commit else None
+            checkpoint_drift = self._checkpoint_checksum(session, checkpoint) != checkpoint.checkpoint_checksum
             if "ENDURANCE_STATE_NON_ATOMIC" in enabled and (
                 not commit or commit.project_id != project_id or not commit.is_current or commit.revision != checkpoint.commit_revision or commit.checksum != checkpoint.commit_checksum
                 or not source or source.project_id != project_id or source.status != "official" or source.revision != checkpoint.source_revision or source.checksum != checkpoint.source_checksum
-                or not snapshot or snapshot.project_id != project_id or snapshot.revision != checkpoint.snapshot_revision or snapshot.checksum != checkpoint.snapshot_checksum
+                or not snapshot or snapshot.project_id != project_id or snapshot.source_version_id != checkpoint.source_version_id or snapshot.revision != checkpoint.snapshot_revision or snapshot.checksum != checkpoint.snapshot_checksum
+                or not draft or draft.project_id != project_id or draft.status != "approved" or stable_digest(draft.content_markdown) != draft.checksum
+                or not extraction or extraction.project_id != project_id
+                or (commit and source and snapshot and draft and extraction and not self._chain_checksums_valid(commit, source, snapshot, draft, extraction))
+                or checkpoint_drift
             ):
                 self._add_finding(session, project_id, run.id, checkpoint.id, "ENDURANCE_STATE_NON_ATOMIC", "blocker", checkpoint.chapter_number, {"checkpointId": checkpoint.id}, "停止运行并修复 commit/source/snapshot 引用或 checksum 漂移。")
-            payload = loads(source.payload_json) if source else {}
+            payload = self._normalize_checkpoint_payload(loads(source.payload_json) if source else {})
+            completed_milestones.update(_as_text_list(payload.get("completedMilestones")))
             self._evaluate_pacing(session, project_id, run, checkpoint, payload, enabled)
             self._evaluate_characters(session, project_id, run, checkpoint, payload, enabled)
             self._evaluate_abilities(session, project_id, run, checkpoint, payload, enabled)
@@ -499,11 +663,28 @@ class Phase10Service:
             self._evaluate_knowledge(session, project_id, run, checkpoint, payload, enabled)
             self._evaluate_foreshadows(session, project_id, run, checkpoint, payload, enabled)
             self._evaluate_revision_limit(session, project_id, run, checkpoint, enabled)
+        if checkpoints and "ENDURANCE_PACING_LATE" in enabled:
+            latest = checkpoints[-1]
+            for node in session.scalars(select(PlanNode).where(
+                PlanNode.range_max >= run.start_chapter,
+                PlanNode.range_max < latest.chapter_number,
+                PlanNode.type.in_(["milestone", "里程碑"]),
+            )).all():
+                if not any(node.title == value or node.title in value for value in completed_milestones):
+                    self._add_finding(
+                        session, project_id, run.id, latest.id, "ENDURANCE_PACING_LATE", "warning",
+                        latest.chapter_number,
+                        {"planNodeId": node.id, "rangeMax": node.range_max, "title": node.title},
+                        "里程碑超过最晚章节仍未完成，请补写或正式调整规划。",
+                    )
         if "ENDURANCE_COST_LIMIT" in enabled and suite.total_cost_limit is not None and run.estimated_cost > suite.total_cost_limit:
             self._add_finding(session, project_id, run.id, run.last_checkpoint_id, "ENDURANCE_COST_LIMIT", "blocker", None, {"estimatedCost": run.estimated_cost, "totalCostLimit": suite.total_cost_limit}, "提高预算或停止本次耐久运行。")
+        if "ENDURANCE_COST_LIMIT" in enabled and suite.daily_cost_limit is not None and run.estimated_cost > suite.daily_cost_limit:
+            self._add_finding(session, project_id, run.id, run.last_checkpoint_id, "ENDURANCE_COST_LIMIT", "blocker", None, {"estimatedCost": run.estimated_cost, "dailyCostLimit": suite.daily_cost_limit}, "本次耐久运行已达到每日费用上限。")
         if "ENDURANCE_RESTART_DUPLICATION" in enabled:
+            automation_ids = self._automation_run_ids(session, project_id, run.id)
             rows = session.execute(select(AutomationRunItem.chapter_number, func.count()).where(
-                AutomationRunItem.project_id == project_id,
+                AutomationRunItem.automation_run_id.in_(automation_ids),
                 AutomationRunItem.status == "committed",
                 AutomationRunItem.chapter_number >= run.start_chapter,
                 AutomationRunItem.chapter_number <= run.end_chapter,
@@ -511,11 +692,29 @@ class Phase10Service:
             for chapter, count in rows:
                 if count > 1:
                     self._add_finding(session, project_id, run.id, checkpoint_by_chapter.get(chapter).id if checkpoint_by_chapter.get(chapter) else None, "ENDURANCE_RESTART_DUPLICATION", "error", chapter, {"automationCommittedItems": count}, "检查恢复逻辑，确认没有重复创建任务、扣费或 commit。")
+        if "ENDURANCE_CONSECUTIVE_FAILURE_LIMIT" in enabled:
+            automation_ids = self._automation_run_ids(session, project_id, run.id)
+            terminal_items = session.scalars(select(AutomationRunItem).where(
+                AutomationRunItem.automation_run_id.in_(automation_ids),
+            ).order_by(AutomationRunItem.chapter_number.desc())).all()
+            failures = 0
+            for item in terminal_items:
+                if item.status in {"failed", "isolated"}:
+                    failures += 1
+                elif item.status in {"committed", "skipped", "cancelled"}:
+                    break
+            if failures >= suite.consecutive_failure_limit:
+                self._add_finding(
+                    session, project_id, run.id, run.last_checkpoint_id,
+                    "ENDURANCE_CONSECUTIVE_FAILURE_LIMIT", "blocker", None,
+                    {"consecutiveFailures": failures, "limit": suite.consecutive_failure_limit},
+                    "连续失败达到上限，必须人工诊断后再恢复。",
+                )
 
     def _evaluate_pacing(self, session: Session, project_id: str, run: EnduranceRun, checkpoint: EnduranceCheckpoint, payload: dict[str, Any], enabled: set[str]) -> None:
         completed = set(_as_text_list(payload.get("completedMilestones"))) | set(_as_text_list(payload.get("milestones")))
         for node in session.scalars(select(PlanNode)).all():
-            if node.title not in completed:
+            if not any(node.title == value or node.title in value for value in completed):
                 continue
             if "ENDURANCE_PACING_EARLY" in enabled and checkpoint.chapter_number < node.range_min:
                 self._add_finding(session, project_id, run.id, checkpoint.id, "ENDURANCE_PACING_EARLY", "error", checkpoint.chapter_number, {"planNodeId": node.id, "rangeMin": node.range_min, "title": node.title}, "不要在预算窗口前完成该里程碑。")
@@ -609,15 +808,19 @@ class Phase10Service:
         if job and job.current_revision_round > 2:
             self._add_finding(session, project_id, run.id, checkpoint.id, "ENDURANCE_REVISION_LIMIT_BREACH", "error", checkpoint.chapter_number, {"chapterJobId": job.id, "revisionRound": job.current_revision_round}, "单章修订超过两轮，需审计 Phase 5 上限。")
 
-    def _refresh_run_summary(self, session: Session, run: EnduranceRun, suite: EnduranceSuite) -> None:
+    def _refresh_run_summary(self, session: Session, run: EnduranceRun, suite: EnduranceSuite, *, apply_status: bool = True) -> None:
         checkpoints = session.scalars(select(EnduranceCheckpoint).where(EnduranceCheckpoint.run_id == run.id)).all()
         findings = session.scalars(select(EnduranceFinding).where(EnduranceFinding.run_id == run.id, EnduranceFinding.status == "open")).all()
         run.completed_count = len(checkpoints)
-        costs = [loads(item.cost_summary_json) or {} for item in checkpoints]
-        run.prompt_tokens = sum(int(item.get("promptTokens", 0)) for item in costs)
-        run.completion_tokens = sum(int(item.get("completionTokens", 0)) for item in costs)
-        run.total_tokens = sum(int(item.get("totalTokens", 0)) for item in costs)
-        run.estimated_cost = sum(float(item.get("estimatedCost", 0.0)) for item in costs)
+        automation_ids = self._automation_run_ids(session, run.project_id, run.id)
+        items = session.scalars(select(AutomationRunItem).where(AutomationRunItem.automation_run_id.in_(automation_ids))).all() if automation_ids else []
+        run.prompt_tokens = sum(item.prompt_tokens for item in items)
+        run.completion_tokens = sum(item.completion_tokens for item in items)
+        run.total_tokens = sum(item.total_tokens for item in items)
+        run.estimated_cost = sum(item.estimated_cost for item in items)
+        if not apply_status:
+            run.updated_at = _now()
+            return
         stopping = [item for item in findings if _severity_at_least(item.severity, suite.stop_severity)]
         if stopping:
             run.status = "blocked"
@@ -634,15 +837,18 @@ class Phase10Service:
 
     def _refresh_report(self, session: Session, run: EnduranceRun) -> EnduranceReport:
         checkpoints = session.scalars(select(EnduranceCheckpoint).where(EnduranceCheckpoint.run_id == run.id)).all()
-        findings = session.scalars(select(EnduranceFinding).where(EnduranceFinding.run_id == run.id)).all()
-        jobs = session.scalars(select(ChapterJob).where(ChapterJob.project_id == run.project_id)).all()
+        findings = session.scalars(select(EnduranceFinding).where(EnduranceFinding.run_id == run.id, EnduranceFinding.status == "open")).all()
+        automation_ids = self._automation_run_ids(session, run.project_id, run.id)
+        items = session.scalars(select(AutomationRunItem).where(AutomationRunItem.automation_run_id.in_(automation_ids))).all() if automation_ids else []
+        job_ids = [item.chapter_job_id for item in items if item.chapter_job_id]
+        jobs = session.scalars(select(ChapterJob).where(ChapterJob.id.in_(job_ids))).all() if job_ids else []
         report = session.scalar(select(EnduranceReport).where(EnduranceReport.run_id == run.id))
         if not report:
             report = EnduranceReport(id=str(uuid4()), project_id=run.project_id, run_id=run.id, generated_at=_now(), updated_at=_now())
             session.add(report)
         report.success_count = len(checkpoints)
-        report.isolated_count = len([item for item in findings if item.severity == "blocker"])
-        report.failed_count = len([item for item in findings if item.severity == "error"])
+        report.isolated_count = len([item for item in items if item.status == "isolated"])
+        report.failed_count = len([item for item in items if item.status == "failed"])
         report.prompt_tokens = run.prompt_tokens
         report.completion_tokens = run.completion_tokens
         report.total_tokens = run.total_tokens
@@ -673,10 +879,26 @@ class Phase10Service:
         commit = session.get(ChapterCommit, checkpoint.chapter_commit_id)
         source = session.get(SourceVersion, checkpoint.source_version_id)
         snapshot = session.get(StateSnapshot, checkpoint.state_snapshot_id)
+        draft = session.get(ChapterDraft, commit.approved_draft_id) if commit else None
+        extraction = session.scalar(select(ChapterExtraction).where(
+            ChapterExtraction.chapter_draft_id == commit.approved_draft_id,
+            ChapterExtraction.status == "validated",
+        ).order_by(ChapterExtraction.created_at.desc())) if commit else None
+        canon = session.get(CanonDocument, "story-core")
+        plan = session.scalar(select(Plan))
         drift = (
-            not commit or not commit.is_current or commit.revision != checkpoint.commit_revision or commit.checksum != checkpoint.commit_checksum
-            or not source or source.status != "official" or source.revision != checkpoint.source_revision or source.checksum != checkpoint.source_checksum
-            or not snapshot or snapshot.revision != checkpoint.snapshot_revision or snapshot.checksum != checkpoint.snapshot_checksum
+            checkpoint.project_id != run.project_id or checkpoint.run_id != run.id
+            or not commit or commit.project_id != run.project_id or not commit.is_current or commit.status != "official"
+            or commit.source_version_id != checkpoint.source_version_id or commit.state_snapshot_id != checkpoint.state_snapshot_id
+            or commit.revision != checkpoint.commit_revision or commit.checksum != checkpoint.commit_checksum
+            or not source or source.project_id != run.project_id or source.status != "official" or source.revision != checkpoint.source_revision or source.checksum != checkpoint.source_checksum
+            or not snapshot or snapshot.project_id != run.project_id or snapshot.source_version_id != source.id or snapshot.revision != checkpoint.snapshot_revision or snapshot.checksum != checkpoint.snapshot_checksum
+            or not draft or draft.project_id != run.project_id or draft.status != "approved" or stable_digest(draft.content_markdown) != draft.checksum
+            or not extraction or extraction.project_id != run.project_id
+            or (commit and source and snapshot and draft and extraction and not self._chain_checksums_valid(commit, source, snapshot, draft, extraction))
+            or (canon.revision if canon else 0) != checkpoint.canon_revision
+            or (plan.revision if plan else 0) != checkpoint.plan_revision
+            or self._checkpoint_checksum(session, checkpoint) != checkpoint.checkpoint_checksum
         )
         if drift:
             raise StoryError(409, "ENDURANCE_CHECKPOINT_DRIFT", "Current official state has drifted from the last endurance checkpoint.", {"checkpointId": checkpoint.id})
@@ -687,6 +909,7 @@ class Phase10Service:
         if existing:
             existing.status = "open"
             existing.updated_at = _now()
+            existing.revision += 1
             return
         session.add(EnduranceFinding(
             id=str(uuid4()),
@@ -719,6 +942,97 @@ class Phase10Service:
         if not run or run.project_id != project_id:
             raise StoryError(404, "ENDURANCE_RUN_NOT_FOUND", "Endurance run not found.")
         return run
+
+    @staticmethod
+    def _check_run_revision(run: EnduranceRun, expected_revision: int) -> None:
+        if run.revision != expected_revision:
+            raise StoryError(409, "ENDURANCE_RUN_REVISION_CONFLICT", "Endurance run revision conflict.", {"currentRevision": run.revision})
+
+    @staticmethod
+    def _validate_rules(rules: list[str]) -> None:
+        unknown = sorted(set(rules) - set(DEFAULT_RULES))
+        if unknown:
+            raise StoryError(422, "ENDURANCE_RULE_INVALID", "Unknown endurance rule.", {"rules": unknown})
+
+    @staticmethod
+    def _automation_run_ids(session: Session, project_id: str, run_id: str) -> list[str]:
+        return list(session.scalars(select(AutomationRun.id).where(
+            AutomationRun.project_id == project_id,
+            AutomationRun.idempotency_key.like(f"endurance:{run_id}:%"),
+        )).all())
+
+    def _terminal_attempted_end(self, session: Session, project_id: str, run: EnduranceRun) -> int | None:
+        automation_ids = list(session.scalars(select(AutomationRun.id).where(
+            AutomationRun.project_id == project_id,
+            AutomationRun.idempotency_key.like(f"endurance:{run.id}:%"),
+            AutomationRun.status.in_(AUTOMATION_TERMINAL_STATUSES),
+        )).all())
+        if not automation_ids:
+            return None
+        return session.scalar(select(func.max(AutomationRunItem.chapter_number)).where(
+            AutomationRunItem.automation_run_id.in_(automation_ids),
+            AutomationRunItem.chapter_number >= run.start_chapter,
+            AutomationRunItem.chapter_number <= run.end_chapter,
+        ))
+
+    def _checkpoint_checksum(self, session: Session, checkpoint: EnduranceCheckpoint) -> str:
+        commit = session.get(ChapterCommit, checkpoint.chapter_commit_id)
+        draft = session.get(ChapterDraft, commit.approved_draft_id) if commit else None
+        return stable_digest({
+            "runId": checkpoint.run_id,
+            "chapterNumber": checkpoint.chapter_number,
+            "chapterCommitId": checkpoint.chapter_commit_id,
+            "sourceVersionId": checkpoint.source_version_id,
+            "stateSnapshotId": checkpoint.state_snapshot_id,
+            "commitRevision": checkpoint.commit_revision,
+            "sourceRevision": checkpoint.source_revision,
+            "snapshotRevision": checkpoint.snapshot_revision,
+            "commitChecksum": checkpoint.commit_checksum,
+            "sourceChecksum": checkpoint.source_checksum,
+            "snapshotChecksum": checkpoint.snapshot_checksum,
+            "approvedDraftId": draft.id if draft else None,
+            "draftRevision": draft.revision if draft else None,
+            "draftChecksum": draft.checksum if draft else None,
+            "canonRevision": checkpoint.canon_revision,
+            "planRevision": checkpoint.plan_revision,
+            "budgetSummary": loads(checkpoint.budget_summary_json) or {},
+            "characterKnowledge": loads(checkpoint.character_knowledge_json) or {},
+            "abilitySummary": loads(checkpoint.ability_summary_json) or {},
+            "itemSummary": loads(checkpoint.item_summary_json) or {},
+            "foreshadowSummary": loads(checkpoint.foreshadow_summary_json) or {},
+            "costSummary": loads(checkpoint.cost_summary_json) or {},
+        })
+
+    @staticmethod
+    def _chain_checksums_valid(
+        commit: ChapterCommit,
+        source: SourceVersion,
+        snapshot: StateSnapshot,
+        draft: ChapterDraft,
+        extraction: ChapterExtraction,
+    ) -> bool:
+        try:
+            snapshot_summary = loads(snapshot.summary_json) or {}
+            quality_summary = loads(commit.quality_summary_json) or {}
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(snapshot_summary, dict) or not isinstance(quality_summary, dict):
+            return False
+        expected_source = stable_digest({"draft": draft.checksum, "extraction": extraction.checksum})
+        expected_snapshot = stable_digest({
+            "sourceVersionId": source.id,
+            **snapshot_summary,
+        })
+        expected_commit = stable_digest({
+            "draft": draft.checksum,
+            "sourceVersionId": source.id,
+            "quality": quality_summary,
+        })
+        return (
+            source.checksum == expected_source
+            and snapshot.checksum == expected_snapshot
+            and commit.checksum == expected_commit
+        )
 
     @staticmethod
     def _suite_dict(item: EnduranceSuite) -> dict[str, Any]:
@@ -864,13 +1178,71 @@ class Phase10Service:
         nodes = session.scalars(select(PlanNode).where(PlanNode.range_min <= chapter, PlanNode.range_max >= chapter)).all()
         return {"chapter": chapter, "nodes": [{"id": item.id, "title": item.title, "rangeMin": item.range_min, "targetChapter": item.target_chapter, "rangeMax": item.range_max} for item in nodes]}
 
-    def _chapter_cost_summary(self, session: Session, project_id: str, chapter: int) -> dict[str, Any]:
-        rows = session.scalars(select(AutomationRunItem).where(AutomationRunItem.project_id == project_id, AutomationRunItem.chapter_number == chapter)).all()
+    @staticmethod
+    def _normalize_checkpoint_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Expose Phase 5's canonical extraction schema to drift rules.
+
+        Older deterministic fixtures used convenience keys such as characters
+        and items. Production extraction stores typed entities, facts,
+        boundaries and foreshadows, so derive the same rule inputs without
+        changing the official source payload.
+        """
+        result = dict(payload)
+        entities = [item for item in payload.get("entities", []) if isinstance(item, dict)]
+        facts = [item for item in payload.get("facts", []) if isinstance(item, dict)]
+        events = [item for item in payload.get("events", []) if isinstance(item, dict)]
+        names_by_type: dict[str, list[str]] = {}
+        attributes_by_name: dict[str, dict[str, Any]] = {}
+        for entity in entities:
+            name = entity.get("canonicalName") or entity.get("canonical_name") or entity.get("name")
+            kind = entity.get("entityTypeName") or entity.get("entity_type_name") or entity.get("type")
+            if not name:
+                continue
+            names_by_type.setdefault(str(kind or "intel"), []).append(str(name))
+            attributes_by_name[str(name)] = dict(entity.get("attributes") or {})
+        participants = [
+            str(name)
+            for event in events
+            for name in event.get("participants", [])
+            if isinstance(name, str)
+        ]
+        result.setdefault("characters", list(dict.fromkeys(names_by_type.get("person", []) + participants)))
+        result.setdefault("abilities", names_by_type.get("ability", []))
+        if "items" not in result:
+            items: list[dict[str, Any]] = []
+            for name in names_by_type.get("item", []):
+                item = {"name": name, **attributes_by_name.get(name, {})}
+                for fact in facts:
+                    if fact.get("entity") == name and fact.get("fieldPath"):
+                        item[str(fact["fieldPath"])] = fact.get("value")
+                items.append(item)
+            result["items"] = items
+        if "knowledge" not in result:
+            knowledge: list[dict[str, str]] = []
+            for boundary in payload.get("boundaries", []):
+                if not isinstance(boundary, dict) or not isinstance(boundary.get("knowledge"), dict):
+                    continue
+                for key, value in boundary["knowledge"].items():
+                    knowledge.append({"character": str(boundary.get("entity") or ""), "fact": f"{key}:{value}"})
+            result["knowledge"] = knowledge
+        resolutions = [
+            str(item.get("code"))
+            for item in payload.get("foreshadows", [])
+            if isinstance(item, dict) and item.get("status") == "resolved" and item.get("code")
+        ]
+        result.setdefault("foreshadowResolutions", resolutions)
+        result.setdefault("completedMilestones", [
+            str(event.get("summary")) for event in events if event.get("summary")
+        ])
+        return result
+
+    @staticmethod
+    def _chapter_cost_summary(item: AutomationRunItem) -> dict[str, Any]:
         return {
-            "promptTokens": sum(item.prompt_tokens for item in rows),
-            "completionTokens": sum(item.completion_tokens for item in rows),
-            "totalTokens": sum(item.total_tokens for item in rows),
-            "estimatedCost": sum(item.estimated_cost for item in rows),
+            "promptTokens": item.prompt_tokens,
+            "completionTokens": item.completion_tokens,
+            "totalTokens": item.total_tokens,
+            "estimatedCost": item.estimated_cost,
         }
 
     def _job_chapter_number(self, session: Session, job: ChapterJob) -> int:

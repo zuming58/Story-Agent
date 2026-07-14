@@ -67,6 +67,8 @@ export function ModelSettingsPage() {
     temperature: 0.7,
     maxOutputTokens: 2048,
     supportsReasoning: false,
+    inputPricePerMillion: "",
+    outputPricePerMillion: "",
   });
   const [testResult, setTestResult] = useState<ProviderConnectionTest | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -162,9 +164,11 @@ export function ModelSettingsPage() {
       maxOutputTokens: Number(modelForm.maxOutputTokens),
       supportsReasoning: modelForm.supportsReasoning,
       isEnabled: true,
+      inputPricePerMillion: modelForm.inputPricePerMillion === "" ? null : Number(modelForm.inputPricePerMillion),
+      outputPricePerMillion: modelForm.outputPricePerMillion === "" ? null : Number(modelForm.outputPricePerMillion),
     }),
     onSuccess: async () => {
-      setModelForm({ modelId: "", displayName: "", temperature: 0.7, maxOutputTokens: 2048, supportsReasoning: false });
+      setModelForm({ modelId: "", displayName: "", temperature: 0.7, maxOutputTokens: 2048, supportsReasoning: false, inputPricePerMillion: "", outputPricePerMillion: "" });
       await refreshSettings();
       setNotice("模型配置已保存。");
     },
@@ -172,8 +176,9 @@ export function ModelSettingsPage() {
   });
   const testMutation = useMutation({
     mutationFn: (provider: ModelProvider) => api.testModelProvider(provider.id),
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       setTestResult(result);
+      await client.invalidateQueries({ queryKey: ["model-providers"] });
       setNotice(result.message);
     },
     onError: (error) => setNotice(errorMessage(error)),
@@ -267,9 +272,9 @@ export function ModelSettingsPage() {
                   <button onClick={() => testMutation.mutate(selectedProvider)} disabled={testMutation.isPending}><Flask size={16} />测试连接</button>
                   <button className="danger" onClick={() => deleteProviderMutation.mutate(selectedProvider.id)} disabled={deleteProviderMutation.isPending}><Trash size={16} />删除</button>
                 </div>
-                <div className={`connection-result ${testResult?.ok ? "success" : testResult ? "failed" : ""}`}>
-                  {testResult?.ok ? <CheckCircle size={17} /> : <ShieldWarning size={17} />}
-                  <span>{statusText(testResult?.status)}{testResult?.model ? ` · ${testResult.model}` : ""}</span>
+                <div className={`connection-result ${(testResult?.ok || selectedProvider.lastTestStatus === "success") ? "success" : (testResult || selectedProvider.lastTestStatus) ? "failed" : ""}`}>
+                  {(testResult?.ok || selectedProvider.lastTestStatus === "success") ? <CheckCircle size={17} /> : <ShieldWarning size={17} />}
+                  <span>{statusText(testResult?.status ?? selectedProvider.lastTestStatus ?? undefined)}{testResult?.model ? ` · ${testResult.model}` : ""}{selectedProvider.lastTestedAt ? ` · ${new Date(selectedProvider.lastTestedAt).toLocaleString("zh-CN")}` : ""}</span>
                 </div>
               </div>
 
@@ -277,7 +282,7 @@ export function ModelSettingsPage() {
                 {models.map((model) => (
                   <article key={model.id} className="model-row">
                     <div><strong>{model.displayName}</strong><span>{model.modelId}</span></div>
-                    <small>温度 {model.temperature} · 输出 {model.maxOutputTokens} · {model.supportsReasoning ? "思考开启" : "思考关闭"}</small>
+                    <small>温度 {model.temperature} · 输出 {model.maxOutputTokens} · {model.supportsReasoning ? "思考开启" : "思考关闭"} · 价格 {model.inputPricePerMillion ?? "—"}/{model.outputPricePerMillion ?? "—"} 每百万 Token（DeepSeek 预设为 USD）</small>
                   </article>
                 ))}
                 {!models.length && <div className="settings-empty">该 Provider 尚未配置模型。</div>}
@@ -286,6 +291,10 @@ export function ModelSettingsPage() {
                 <div className="settings-form-row">
                   <label><span>模型 ID</span><input aria-label="模型 ID" value={modelForm.modelId} onChange={(event) => setModelForm({ ...modelForm, modelId: event.target.value })} placeholder="deepseek-v4-pro" /></label>
                   <label><span>显示名</span><input aria-label="模型显示名" value={modelForm.displayName} onChange={(event) => setModelForm({ ...modelForm, displayName: event.target.value })} /></label>
+                </div>
+                <div className="settings-form-row">
+                  <label><span>输入价 / 百万 Token</span><input aria-label="模型输入价格" type="number" min={0} step={0.01} value={modelForm.inputPricePerMillion} onChange={(event) => setModelForm({ ...modelForm, inputPricePerMillion: event.target.value })} placeholder="可选" /></label>
+                  <label><span>输出价 / 百万 Token</span><input aria-label="模型输出价格" type="number" min={0} step={0.01} value={modelForm.outputPricePerMillion} onChange={(event) => setModelForm({ ...modelForm, outputPricePerMillion: event.target.value })} placeholder="可选" /></label>
                 </div>
                 <div className="settings-form-row">
                   <label><span>温度</span><input aria-label="模型温度" type="number" min={0} max={2} step={0.1} value={modelForm.temperature} onChange={(event) => setModelForm({ ...modelForm, temperature: Number(event.target.value) })} /></label>

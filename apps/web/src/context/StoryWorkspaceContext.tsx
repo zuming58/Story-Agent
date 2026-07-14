@@ -32,8 +32,9 @@ interface StoryWorkspaceValue {
   errorMessage: string | null;
   selectProject: (id: string) => void;
   createProject: (payload: ProjectCreateRequest) => Promise<ProjectSummary>;
+  createMilestone: (payload: Omit<PlanNode, "id" | "revision">) => Promise<PlanNode>;
   updateMilestone: (id: string, changes: Partial<PlanNode>) => Promise<void>;
-  sendMessage: (content: string, action?: string) => Promise<void>;
+  sendMessage: (content: string, action?: string, selectedNodeId?: string | null) => Promise<void>;
   cancelRun: () => Promise<void>;
   retryLastMessage: () => Promise<void>;
   applyProposal: (operationIds: string[]) => Promise<void>;
@@ -56,7 +57,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
   const [streamPreview, setStreamPreview] = useState("");
   const [runStatus, setRunStatus] = useState<StoryWorkspaceValue["runStatus"]>({ runId: null, provider: null, model: null, status: "idle", error: null });
   const [proposalStatus, setProposalStatus] = useState<StoryWorkspaceValue["proposalStatus"]>({ status: "idle", runId: null, error: null, attempts: 0 });
-  const lastPrompt = useRef<{ content: string; action?: string } | null>(null);
+  const lastPrompt = useRef<{ content: string; action?: string; selectedNodeId?: string | null } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: api.projects, retry: 1 });
@@ -64,7 +65,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (projects.length && (!activeProjectId || !projects.some((item) => item.id === activeProjectId))) {
-      setActiveProjectId(projects[0].id);
+      setActiveProjectId((projects.find((item) => item.projectKind === "standard") ?? projects[0]).id);
     }
   }, [projects, activeProjectId, setActiveProjectId]);
 
@@ -101,6 +102,12 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
   };
 
   const createMutation = useMutation({ mutationFn: api.createProject });
+  const createNodeMutation = useMutation({
+    mutationFn: (payload: Omit<PlanNode, "id" | "revision">) => {
+      if (!project) throw new Error("作品尚未加载");
+      return api.createNode(project.id, payload);
+    },
+  });
   const updateMutation = useMutation({
     mutationFn: ({ id, changes }: { id: string; changes: Partial<PlanNode> }) => {
       if (!project || !plan) throw new Error("作品尚未加载");
@@ -117,10 +124,10 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
     setNotice(message);
   };
 
-  const sendStreamMessage = async (content: string, action = "chat") => {
+  const sendStreamMessage = async (content: string, action = "chat", selectedNodeId?: string | null) => {
     if (!project) return;
     try {
-      lastPrompt.current = { content, action };
+      lastPrompt.current = { content, action, selectedNodeId };
       setStreamPreview("");
       setRunStatus({ runId: null, provider: null, model: null, status: "running", error: null });
       setProposalStatus({ status: "idle", runId: null, error: null, attempts: 0 });
@@ -128,7 +135,12 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
       if (!activeSession) activeSession = await api.createSession(project.id, agentScopeLabels.length ? agentScopeLabels : [plan?.volumeTitle ?? "当前作品"]);
       const controller = new AbortController();
       abortRef.current = controller;
-      await api.streamMessage(activeSession.id, { projectId: project.id, content, selectedNodeId: selected?.id, action }, (event: AgentStreamEvent) => {
+      await api.streamMessage(activeSession.id, {
+        projectId: project.id,
+        content,
+        selectedNodeId: selectedNodeId === undefined ? selected?.id : selectedNodeId ?? undefined,
+        action,
+      }, (event: AgentStreamEvent) => {
         if (event.event === "run_started") setRunStatus({ runId: event.runId, provider: event.provider, model: event.model, status: "running", error: null });
         if (event.event === "text_delta") setStreamPreview((current) => current + event.delta);
         if (event.event === "completed") setRunStatus((current) => ({ ...current, runId: event.runId, status: "idle", error: null }));
@@ -182,6 +194,15 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
         return created;
       } catch (error) { handleError(error); throw error; }
     },
+    createMilestone: async (payload) => {
+      try {
+        const created = await createNodeMutation.mutateAsync(payload);
+        await invalidateWorkspace();
+        selectMilestone(created.id);
+        setNotice("规划窗口已创建并写入作品数据库。");
+        return created;
+      } catch (error) { handleError(error); throw error; }
+    },
     updateMilestone: async (id, changes) => {
       try {
         await updateMutation.mutateAsync({ id, changes });
@@ -205,7 +226,7 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
     retryLastMessage: async () => {
       const prompt = lastPrompt.current;
       if (!prompt) return;
-      await sendStreamMessage(prompt.content, prompt.action);
+      await sendStreamMessage(prompt.content, prompt.action, prompt.selectedNodeId);
     },
     applyProposal: async (operationIds) => {
       if (!project || !proposal) return;

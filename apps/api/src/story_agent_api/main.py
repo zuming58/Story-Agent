@@ -32,6 +32,10 @@ from .schemas import (
     CanonEntityOut,
     CanonEntityTypeOut,
     CanonLockRequest,
+    StoryBrief,
+    ArchitectureProposalDecision,
+    CanonGenerationProposalOut,
+    CanonReadinessOut,
     CanonRelationOut,
     CanonRuleOut,
     BackupManifest,
@@ -49,12 +53,28 @@ from .schemas import (
     ChapterDraftOut,
     ChapterJobCreate,
     ChapterJobOut,
+    ChapterQualityRevalidate,
     ChapterJobRetry,
     ChapterJobRun,
     ChapterRevisionRequest,
     ContextCompileRequest,
     ContextPackageOut,
     ContextTraceItemOut,
+    ExportCreate,
+    ExportJobOut,
+    ExportProfileOut,
+    ExportProfileUpdate,
+    ExportReadinessOut,
+    ExportReadinessRequest,
+    EnduranceFindingOut,
+    EnduranceReadinessOut,
+    EnduranceReportOut,
+    EnduranceRunCreate,
+    EnduranceRunAction,
+    EnduranceRunOut,
+    EnduranceSuiteCreate,
+    EnduranceSuiteOut,
+    EnduranceSuiteUpdate,
     ForeshadowOut,
     KnowledgeBoundaryOut,
     ModelConfigCreate,
@@ -66,14 +86,19 @@ from .schemas import (
     ModelRunOut,
     ModelRoleBindingOut,
     ModelRoleBindingUpdate,
+    PlanNodeCreate,
     PlanNodeOut,
     PlanNodeUpdate,
+    PlanGenerationRequest,
+    PlanGenerationProposalOut,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
     ProposalApply,
     ProposalReject,
     ProviderConnectionTestOut,
+    PublicationRecordCreate,
+    PublicationRecordOut,
     QualityFindingAcceptRisk,
     QualityFindingOut,
     QualityReportOut,
@@ -90,6 +115,7 @@ from .schemas import (
     StoryEntityOut,
     StoryEventOut,
     StoryPlanOut,
+    TrialReadinessOut,
 )
 from .secrets import SecretStore
 from .services import StoryError, StoryService
@@ -223,6 +249,26 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def lock_canon(project_id: str, payload: CanonLockRequest, request: Request) -> object:
         return service.phase4.lock_canon(project_id, payload, request.state.request_id)
 
+    @app.post("/api/v1/projects/{project_id}/canon/generation-proposals", response_model=CanonGenerationProposalOut, status_code=201)
+    def create_canon_generation_proposal(project_id: str, payload: StoryBrief, request: Request) -> object:
+        return service.phase8.create_canon_proposal(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/canon/generation-proposals", response_model=list[CanonGenerationProposalOut])
+    def list_canon_generation_proposals(project_id: str) -> object:
+        return service.phase8.list_canon_proposals(project_id)
+
+    @app.post("/api/v1/canon/generation-proposals/{proposal_id}/apply")
+    def apply_canon_generation_proposal(proposal_id: str, payload: ArchitectureProposalDecision, request: Request) -> object:
+        return service.phase8.apply_canon_proposal(proposal_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/canon/generation-proposals/{proposal_id}/reject", response_model=CanonGenerationProposalOut)
+    def reject_canon_generation_proposal(proposal_id: str, payload: ArchitectureProposalDecision, request: Request) -> object:
+        return service.phase8.reject_canon_proposal(proposal_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/canon/readiness", response_model=CanonReadinessOut)
+    def get_canon_readiness(project_id: str) -> object:
+        return service.phase8.canon_readiness(project_id)
+
     @app.post("/api/v1/projects/{project_id}/canon/change-requests")
     def create_canon_change_request(project_id: str, payload: CanonChangeRequestCreate, request: Request) -> object:
         return service.phase4.create_canon_change_request(project_id, payload, request.state.request_id)
@@ -331,6 +377,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def retry_chapter_job(project_id: str, job_id: str, payload: ChapterJobRetry, request: Request) -> object:
         return service.phase5.retry_chapter_job(project_id, job_id, payload, request.state.request_id)
 
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/resume", response_model=ChapterJobOut)
+    def resume_chapter_job(project_id: str, job_id: str, request: Request) -> object:
+        return service.phase5.resume_chapter_job(project_id, job_id, request.state.request_id)
+
     @app.get("/api/v1/projects/{project_id}/chapters/{chapter_number}/drafts", response_model=list[ChapterDraftOut])
     def list_chapter_drafts(project_id: str, chapter_number: int) -> object:
         return service.phase5.list_chapter_drafts(project_id, chapter_number)
@@ -346,6 +396,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality", response_model=QualityReportOut)
     def get_chapter_quality(project_id: str, job_id: str) -> object:
         return service.phase5.get_quality_report(project_id, job_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality/revalidate", response_model=ChapterJobOut)
+    def revalidate_chapter_quality(project_id: str, job_id: str, payload: ChapterQualityRevalidate, request: Request) -> object:
+        return service.phase5.revalidate_deterministic_quality(project_id, job_id, payload, request.state.request_id)
 
     @app.post("/api/v1/projects/{project_id}/quality-findings/{finding_id}/accept-risk", response_model=QualityFindingOut)
     def accept_quality_risk(project_id: str, finding_id: str, payload: QualityFindingAcceptRisk, request: Request) -> object:
@@ -374,6 +428,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/automation/policy", response_model=AutomationPolicyOut)
     def get_automation_policy(project_id: str) -> object:
         return service.phase7.get_policy(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/trial-readiness", response_model=TrialReadinessOut)
+    def get_trial_readiness(project_id: str, chapter_count: int = Query(default=1, alias="chapterCount")) -> object:
+        return service.phase7.get_trial_readiness(project_id, chapter_count)
 
     @app.put("/api/v1/projects/{project_id}/automation/policy", response_model=AutomationPolicyOut)
     def update_automation_policy(project_id: str, payload: AutomationPolicyUpdate) -> object:
@@ -407,9 +465,122 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def catch_up_automation_run(project_id: str, run_id: str, request: Request) -> object:
         return service.phase7.catch_up_run(project_id, run_id, request.state.request_id)
 
+    @app.get("/api/v1/projects/{project_id}/exports/profile", response_model=ExportProfileOut)
+    def get_export_profile(project_id: str) -> object:
+        return service.phase9.get_profile(project_id)
+
+    @app.put("/api/v1/projects/{project_id}/exports/profile", response_model=ExportProfileOut)
+    def update_export_profile(project_id: str, payload: ExportProfileUpdate) -> object:
+        return service.phase9.update_profile(project_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/exports/readiness", response_model=ExportReadinessOut)
+    def check_export_readiness(project_id: str, payload: ExportReadinessRequest) -> object:
+        return service.phase9.readiness(project_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/exports", response_model=ExportJobOut, status_code=201)
+    def create_export(project_id: str, payload: ExportCreate, request: Request) -> object:
+        return service.phase9.create_export(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/exports", response_model=list[ExportJobOut])
+    def list_exports(project_id: str) -> object:
+        return service.phase9.list_exports(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/exports/{export_id}", response_model=ExportJobOut)
+    def get_export(project_id: str, export_id: str) -> object:
+        return service.phase9.get_export(project_id, export_id)
+
+    @app.post("/api/v1/projects/{project_id}/exports/{export_id}/cancel", response_model=ExportJobOut)
+    def cancel_export(project_id: str, export_id: str, request: Request) -> object:
+        return service.phase9.cancel_export(project_id, export_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/exports/{export_id}/resume", response_model=ExportJobOut)
+    def resume_export(project_id: str, export_id: str, request: Request) -> object:
+        return service.phase9.resume_export(project_id, export_id, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/exports/{export_id}/artifacts/{artifact_id}/download")
+    def download_export_artifact(project_id: str, export_id: str, artifact_id: str) -> FileResponse:
+        path = service.phase9.artifact_path(project_id, export_id, artifact_id)
+        return FileResponse(path, filename=path.name)
+
+    @app.post("/api/v1/projects/{project_id}/exports/{export_id}/publication-records", response_model=PublicationRecordOut, status_code=201)
+    def create_publication_record(project_id: str, export_id: str, payload: PublicationRecordCreate, request: Request) -> object:
+        return service.phase9.create_publication_record(project_id, export_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/publication-records", response_model=list[PublicationRecordOut])
+    def list_publication_records(project_id: str) -> object:
+        return service.phase9.list_publication_records(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/readiness", response_model=EnduranceReadinessOut)
+    def get_endurance_readiness(project_id: str, chapter_count: int = Query(default=5, alias="chapterCount")) -> object:
+        return service.phase10.readiness(project_id, chapter_count)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/suites", response_model=EnduranceSuiteOut, status_code=201)
+    def create_endurance_suite(project_id: str, payload: EnduranceSuiteCreate) -> object:
+        return service.phase10.create_suite(project_id, payload)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/suites", response_model=list[EnduranceSuiteOut])
+    def list_endurance_suites(project_id: str) -> object:
+        return service.phase10.list_suites(project_id)
+
+    @app.put("/api/v1/projects/{project_id}/endurance/suites/{suite_id}", response_model=EnduranceSuiteOut)
+    def update_endurance_suite(project_id: str, suite_id: str, payload: EnduranceSuiteUpdate) -> object:
+        return service.phase10.update_suite(project_id, suite_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs", response_model=EnduranceRunOut, status_code=201)
+    def create_endurance_run(project_id: str, payload: EnduranceRunCreate, request: Request) -> object:
+        return service.phase10.create_run(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs", response_model=list[EnduranceRunOut])
+    def list_endurance_runs(project_id: str) -> object:
+        return service.phase10.list_runs(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}", response_model=EnduranceRunOut)
+    def get_endurance_run(project_id: str, run_id: str) -> object:
+        return service.phase10.get_run(project_id, run_id)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/cancel", response_model=EnduranceRunOut)
+    def cancel_endurance_run(project_id: str, run_id: str, payload: EnduranceRunAction, request: Request) -> object:
+        return service.phase10.cancel_run(project_id, run_id, payload.expected_revision, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/resume", response_model=EnduranceRunOut)
+    def resume_endurance_run(project_id: str, run_id: str, payload: EnduranceRunAction, request: Request) -> object:
+        return service.phase10.resume_run(project_id, run_id, payload.expected_revision, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/evaluate", response_model=EnduranceRunOut)
+    def evaluate_endurance_run(project_id: str, run_id: str, payload: EnduranceRunAction, request: Request) -> object:
+        return service.phase10.evaluate_run(project_id, run_id, payload.expected_revision, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}/findings", response_model=list[EnduranceFindingOut])
+    def list_endurance_findings(project_id: str, run_id: str) -> object:
+        return service.phase10.list_findings(project_id, run_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}/report", response_model=EnduranceReportOut)
+    def get_endurance_report(project_id: str, run_id: str) -> object:
+        return service.phase10.get_report(project_id, run_id)
+
     @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
     def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:
         return service.update_plan_node(project_id, node_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/plan/nodes", response_model=PlanNodeOut, status_code=201)
+    def create_plan_node(project_id: str, payload: PlanNodeCreate, request: Request) -> object:
+        return service.create_plan_node(project_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/plan/generation-proposals", response_model=PlanGenerationProposalOut, status_code=201)
+    def create_plan_generation_proposal(project_id: str, payload: PlanGenerationRequest, request: Request) -> object:
+        return service.phase8.create_plan_proposal(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/plan/generation-proposals", response_model=list[PlanGenerationProposalOut])
+    def list_plan_generation_proposals(project_id: str) -> object:
+        return service.phase8.list_plan_proposals(project_id)
+
+    @app.post("/api/v1/plan/generation-proposals/{proposal_id}/apply")
+    def apply_plan_generation_proposal(proposal_id: str, payload: ArchitectureProposalDecision, request: Request) -> object:
+        return service.phase8.apply_plan_proposal(proposal_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/plan/generation-proposals/{proposal_id}/reject", response_model=PlanGenerationProposalOut)
+    def reject_plan_generation_proposal(proposal_id: str, payload: ArchitectureProposalDecision, request: Request) -> object:
+        return service.phase8.reject_plan_proposal(proposal_id, payload, request.state.request_id)
 
     @app.get("/api/v1/projects/{project_id}/agent/sessions", response_model=list[AgentSessionOut])
     def list_sessions(project_id: str) -> object:

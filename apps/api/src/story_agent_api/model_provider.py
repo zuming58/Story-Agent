@@ -144,8 +144,6 @@ class OpenAICompatibleModelProvider:
             first = choices[0]
             if not isinstance(first, dict):
                 raise ModelProviderError("invalid_response", "模型服务 choices 结构无效。", retryable=False)
-            if first.get("finish_reason") == "length":
-                raise ModelProviderError("content_truncated", "模型输出被截断。", retryable=False)
             message = first.get("message")
             content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, str):
@@ -159,6 +157,8 @@ class OpenAICompatibleModelProvider:
                 actual_model=data.get("model") if isinstance(data.get("model"), str) else None,
                 retry_count=self._last_result.retry_count,
             )
+            if first.get("finish_reason") == "length":
+                raise ModelProviderError("content_truncated", "模型输出被截断。", retryable=False)
             return self._last_result
         except httpx.TimeoutException as exc:
             raise ModelProviderError("timeout", "模型调用超时。", retryable=True) from exc

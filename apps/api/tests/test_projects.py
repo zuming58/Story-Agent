@@ -39,3 +39,28 @@ def test_plan_revision_conflict(client: TestClient, demo_project: dict) -> None:
     stale = client.patch(f"/api/v1/projects/{project_id}/plan/nodes/{node['id']}", json=payload)
     assert stale.status_code == 409
     assert stale.json()["code"] == "REVISION_CONFLICT"
+
+
+def test_plan_window_can_be_created_and_persisted(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    response = client.post(f"/api/v1/projects/{project_id}/plan/nodes", json={
+        "title": "档案馆调查期",
+        "type": "章节窗口",
+        "targetChapter": 37,
+        "rangeMin": 22,
+        "rangeMax": 42,
+        "importance": 3,
+        "note": "连接纸人初遇与第 45 章转折。",
+        "prerequisites": ["完成首次纸人接触"],
+        "completionConditions": ["获得北水塔入口"],
+        "foreshadows": ["第四声铜铃"],
+        "contracts": ["不得提前揭示纸童身份"],
+        "pace": "smooth",
+    })
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["revision"] == 1
+    assert created["rangeMin"] == 22
+    assert created["rangeMax"] == 42
+    plan = client.get(f"/api/v1/projects/{project_id}/plan").json()
+    assert any(item["id"] == created["id"] for item in plan["milestones"])

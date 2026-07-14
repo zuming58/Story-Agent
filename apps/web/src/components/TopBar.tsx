@@ -9,7 +9,7 @@ export function TopBar() {
   return (
     <header className="topbar">
       <button className="project-switcher">
-        <strong>{project.title}</strong>
+        <strong>{project.title}</strong>{project.projectKind === "demo" && <em className="project-kind-badge">示例项目</em>}
         <CaretDown size={15} />
       </button>
       <span className="mode-chip">长篇网文</span>

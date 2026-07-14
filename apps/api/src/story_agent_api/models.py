@@ -28,6 +28,7 @@ class CatalogProject(CatalogBase):
     folder_path: Mapped[str] = mapped_column(Text, unique=True)
     current_chapter: Mapped[int] = mapped_column(Integer, default=0)
     total_chapters: Mapped[int] = mapped_column(Integer, default=100)
+    project_kind: Mapped[str] = mapped_column(String(20), default="standard", index=True)
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -53,6 +54,8 @@ class ModelProvider(CatalogBase):
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     api_key_ref: Mapped[str | None] = mapped_column(String(240), nullable=True)
     api_key_preview: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_test_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     models: Mapped[list[ModelConfig]] = relationship(back_populates="provider", cascade="all, delete-orphan")
@@ -96,6 +99,7 @@ class ProjectMeta(ProjectBase):
     mode: Mapped[str] = mapped_column(String(40))
     current_chapter: Mapped[int] = mapped_column(Integer, default=0)
     total_chapters: Mapped[int] = mapped_column(Integer, default=100)
+    project_kind: Mapped[str] = mapped_column(String(20), default="standard", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -130,6 +134,7 @@ class PlanNode(ProjectBase):
     completion_conditions_json: Mapped[str] = mapped_column(Text, default="[]")
     foreshadows_json: Mapped[str] = mapped_column(Text, default="[]")
     contracts_json: Mapped[str] = mapped_column(Text, default="[]")
+    chapter_beats_json: Mapped[str] = mapped_column(Text, default="[]")
     pace: Mapped[str] = mapped_column(String(20), default="smooth")
     revision: Mapped[int] = mapped_column(Integer, default=1)
     plan: Mapped[Plan] = relationship(back_populates="nodes")
@@ -326,6 +331,62 @@ class CanonRule(ProjectBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CanonGenerationProposal(ProjectBase):
+    __tablename__ = "canon_generation_proposals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    base_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    brief_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_markdown: Mapped[str] = mapped_column(Text, default="")
+    structured_json: Mapped[str] = mapped_column(Text, default="{}")
+    readiness_json: Mapped[str] = mapped_column(Text, default="{}")
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PlanGenerationProposal(ProjectBase):
+    __tablename__ = "plan_generation_proposals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    base_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    plan_json: Mapped[str] = mapped_column(Text, default="{}")
+    validation_json: Mapped[str] = mapped_column(Text, default="{}")
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StoryBudget(ProjectBase):
+    __tablename__ = "story_budgets"
+    __table_args__ = (Index("uq_story_budgets_project_code", "project_id", "code", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    code: Mapped[str] = mapped_column(String(100))
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    earliest_chapter: Mapped[int] = mapped_column(Integer)
+    target_min: Mapped[int] = mapped_column(Integer)
+    target_max: Mapped[int] = mapped_column(Integer)
+    latest_chapter: Mapped[int] = mapped_column(Integer)
+    prerequisites_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="planned", index=True)
+    consumed_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class CanonChangeRequest(ProjectBase):
@@ -745,6 +806,7 @@ class AutomationRun(ProjectBase):
     trigger: Mapped[str] = mapped_column(String(20), default="manual", index=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    requested_chapter_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     start_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
     planned_count: Mapped[int] = mapped_column(Integer, default=0)

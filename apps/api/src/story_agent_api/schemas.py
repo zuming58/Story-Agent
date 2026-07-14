@@ -32,10 +32,38 @@ class ProjectOut(ApiModel):
     mode: str
     current_chapter: int
     total_chapters: int
+    project_kind: Literal["demo", "standard"] = "standard"
     folder_path: str
     created_at: datetime
     updated_at: datetime
     last_opened_at: datetime
+
+
+class ChapterBeat(ApiModel):
+    chapter_number: int = Field(ge=1, le=5000)
+    title: str = Field(min_length=1, max_length=240)
+    objective: str = Field(min_length=1, max_length=2000)
+    completion_conditions: list[str] = Field(default_factory=list)
+    hooks: list[str] = Field(default_factory=list)
+    foreshadows: list[str] = Field(default_factory=list)
+    required_characters: list[str] = Field(default_factory=list)
+    forbidden: list[str] = Field(default_factory=list)
+
+
+class PlanNodeCreate(ApiModel):
+    title: str = Field(min_length=1, max_length=240)
+    type: str = "章节窗口"
+    target_chapter: int = Field(ge=1, le=5000)
+    range_min: int = Field(ge=1, le=5000)
+    range_max: int = Field(ge=1, le=5000)
+    importance: int = Field(default=3, ge=1, le=5)
+    note: str = ""
+    prerequisites: list[str] = Field(default_factory=list)
+    completion_conditions: list[str] = Field(default_factory=list)
+    foreshadows: list[str] = Field(default_factory=list)
+    contracts: list[str] = Field(default_factory=list)
+    chapter_beats: list[ChapterBeat] = Field(default_factory=list)
+    pace: str = "smooth"
 
 
 class PlanNodeUpdate(ApiModel):
@@ -51,6 +79,7 @@ class PlanNodeUpdate(ApiModel):
     completion_conditions: list[str] | None = None
     foreshadows: list[str] | None = None
     contracts: list[str] | None = None
+    chapter_beats: list[ChapterBeat] | None = None
     pace: str | None = None
 
 
@@ -67,6 +96,7 @@ class PlanNodeOut(ApiModel):
     completion_conditions: list[str]
     foreshadows: list[str]
     contracts: list[str]
+    chapter_beats: list[ChapterBeat]
     pace: str
     revision: int
 
@@ -261,6 +291,8 @@ class ModelProviderOut(ApiModel):
     is_enabled: bool
     has_api_key: bool
     api_key_preview: str | None = None
+    last_test_status: str | None = None
+    last_tested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -396,6 +428,65 @@ class CanonAnalyzeRequest(ApiModel):
     project_id: str
     source_text: str = Field(min_length=1)
     title: str | None = None
+
+
+class StoryBrief(ApiModel):
+    title: str = Field(min_length=1, max_length=200)
+    mode: Literal["long-form", "short-form", "short-drama"] = "long-form"
+    target_chapters: int = Field(default=1000, ge=1, le=5000)
+    genre: str = Field(min_length=1, max_length=200)
+    premise: str = Field(min_length=20, max_length=6000)
+    tone: str = Field(default="克制、悬疑、可视化", max_length=1000)
+    world_preferences: list[str] = Field(default_factory=list)
+    progression_preset: Literal["restrained-explicit", "strong-numeric", "rule-first"] = "restrained-explicit"
+    romance: str = Field(default="弱感情线，不喧宾夺主", max_length=1000)
+    forbidden_content: list[str] = Field(default_factory=list)
+    reference_traits: list[str] = Field(default_factory=list)
+
+
+class ArchitectureProposalDecision(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class CanonGenerationProposalOut(ApiModel):
+    id: str
+    project_id: str
+    base_revision: int
+    status: str
+    brief: dict[str, Any]
+    content_markdown: str
+    structured: dict[str, Any]
+    readiness: dict[str, Any]
+    model_run_id: str | None = None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    applied_at: datetime | None = None
+
+
+class CanonReadinessOut(ApiModel):
+    ready: bool
+    revision: int
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PlanGenerationRequest(ApiModel):
+    expected_plan_revision: int = Field(ge=1)
+    precise_chapter_count: Literal[5] = 5
+
+
+class PlanGenerationProposalOut(ApiModel):
+    id: str
+    project_id: str
+    base_revision: int
+    status: str
+    plan: dict[str, Any]
+    validation: dict[str, Any]
+    model_run_id: str | None = None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    applied_at: datetime | None = None
 
 
 class CanonLockRequest(ApiModel):
@@ -659,6 +750,17 @@ class ChapterJobRetry(ApiModel):
     reason: str = ""
 
 
+class ChapterQualityRevalidate(ApiModel):
+    """Request a deterministic quality pass against the current candidate.
+
+    This is intentionally separate from a revision: it is for safely
+    re-evaluating an existing draft after a deterministic-rule upgrade, and
+    must never invoke a writer or mutate the candidate body.
+    """
+
+    expected_job_revision: int = Field(ge=1)
+
+
 class ChapterJobOut(ApiModel):
     id: str
     project_id: str
@@ -836,6 +938,7 @@ class AutomationPolicyOut(ApiModel):
 
 class AutomationRunCreate(ApiModel):
     idempotency_key: str | None = Field(default=None, max_length=120)
+    chapter_count: Literal[1, 3, 5] | None = None
 
 
 class AutomationRunItemOut(ApiModel):
@@ -868,6 +971,7 @@ class AutomationRunOut(ApiModel):
     trigger: str
     status: str
     idempotency_key: str | None = None
+    requested_chapter_count: int | None = None
     start_chapter: int | None = None
     end_chapter: int | None = None
     planned_count: int
@@ -905,3 +1009,22 @@ class AutomationDailyReportOut(ApiModel):
     status_summary: dict[str, int]
     generated_at: datetime
     updated_at: datetime
+
+
+class TrialReadinessCheckOut(ApiModel):
+    code: str
+    status: Literal["ready", "warning", "blocked"]
+    title: str
+    detail: str
+    action_path: str | None = None
+    chapter_number: int | None = None
+
+
+class TrialReadinessOut(ApiModel):
+    project_id: str
+    chapter_count: Literal[1, 3, 5]
+    start_chapter: int
+    end_chapter: int
+    ready: bool
+    max_safe_chapter_count: int
+    checks: list[TrialReadinessCheckOut]

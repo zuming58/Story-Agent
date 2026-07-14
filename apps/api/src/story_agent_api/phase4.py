@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from .models import (
     ContextTrace,
     Foreshadow,
     KnowledgeBoundary,
+    ModelRun,
     PlanNode,
     ProjectMeta,
     RetrievalIndexState,
@@ -367,7 +369,17 @@ class Phase4Service:
         prompt_messages = [
             {
                 "role": "system",
-                "content": "你是 Story Agent 的 Canon 分析器。只输出 JSON object，字段包含 documents、entityTypes、entities、relations、rules。",
+                "content": (
+                    "你是 Story Agent 的 Canon 分析器。只输出合法 JSON object，不要 Markdown 或解释。"
+                    "顶层字段固定为 documents、entityTypes、entities、relations、rules。"
+                    "documents 和 entityTypes 通常输出空数组；不得改写用户原始故事核心。"
+                    "entities 每项使用 canonicalName、entityTypeName、aliasesJson、attributesJson，"
+                    "entityTypeName 只能优先使用 person、location、organization、item、ability、event、intel、foreshadow、time_point。"
+                    "relations 每项使用 subjectCanonicalName、predicate，以及 objectCanonicalName 或 objectValueJson；"
+                    "不要虚构数据库 UUID。rules 每项使用 ruleCode、category、statement、severity、constraintJson。"
+                    "只提取来源文本明确支持的设定，保留能力代价、知识边界、时间窗口和禁止提前揭示事项。"
+                    "最多输出 20 个实体、20 条关系和 16 条规则；合并重复信息，所有字段保持简洁，避免复述整篇原文。"
+                ),
             },
             {
                 "role": "user",
@@ -380,71 +392,190 @@ class Phase4Service:
                 }, ensure_ascii=False),
             },
         ]
-        response = None
-        last_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                async def _run() -> Any:
-                    return await provider_client.complete_chat({
-                        "model": model.model_id,
-                        "messages": prompt_messages if attempt == 0 else prompt_messages + [{
-                            "role": "system",
-                            "content": "上一次输出无效。请只返回合法 JSON object，不要 Markdown，不要解释。",
-                        }],
-                        "temperature": min(float(model.temperature), 0.2),
-                        "max_tokens": model.max_output_tokens,
-                        "response_format": {"type": "json_object"},
-                    })
-                # bridge async inside sync method
-                import asyncio
+        sections = [
+            (
+                "entities_relations",
+                "只输出 entities 和 relations 两个数组。最多 20 个实体、20 条关系；attributesJson 每个字段保持短句。不要输出 rules、documents 或 entityTypes。",
+                ("entities", "relations"),
+            ),
+            (
+                "rules",
+                "只输出 rules 数组。最多 16 条规则，合并重复规则；constraintJson 只保存机器检查需要的关键边界。不要输出 entities、relations、documents 或 entityTypes。",
+                ("rules",),
+            ),
+        ]
+        extracted: dict[str, list[dict[str, Any]]] = {"entities": [], "relations": [], "rules": []}
+        attempts_used: dict[str, int] = {}
+        import asyncio
 
-                result = asyncio.run(_run())
-                response = result.text
-                data = json.loads(response or "")
-                if not isinstance(data, dict):
-                    raise ValueError("not object")
-                draft = CanonDraftUpdate(
-                    documents=data.get("documents", []) if isinstance(data.get("documents"), list) else [],
-                    entity_types=data.get("entityTypes", []) if isinstance(data.get("entityTypes"), list) else [],
-                    entities=data.get("entities", []) if isinstance(data.get("entities"), list) else [],
-                    relations=data.get("relations", []) if isinstance(data.get("relations"), list) else [],
-                    rules=data.get("rules", []) if isinstance(data.get("rules"), list) else [],
-                )
+        for section_name, instruction, accepted_keys in sections:
+            last_error: Exception | None = None
+            for attempt in range(2):
+                model_run_id = str(uuid4())
+                started_clock = time.perf_counter()
                 with self.service.db.project_write(project.id, project.folder_path) as session:
-                    if session.scalar(select(CanonDocument).where(CanonDocument.status == "locked")):
-                        raise _story_error(409, "CANON_LOCKED", "Canon 已锁定，只能通过变更申请修改。")
-                    now = datetime.now(timezone.utc)
-                    for entry in draft.documents:
-                        self._upsert_document(session, entry, now)
-                    for entry in draft.entity_types:
-                        self._upsert_entity_type(session, entry, now)
-                    for entry in draft.entities:
-                        self._upsert_entity(session, entry, now)
-                    for entry in draft.relations:
-                        self._upsert_relation(session, entry, now)
-                    for entry in draft.rules:
-                        self._upsert_rule(session, entry, now)
-                    session.add(self.service._audit("canon.analysis_completed", "canon_document", "story-core", {
-                        "requestId": request_id,
-                        "attempt": attempt + 1,
-                        "reversible": False,
-                    }, request_id))
-                self._mirror_canon_markdown_safely(project.id, project.folder_path)
-                return self.get_canon(project_id)
-            except (json.JSONDecodeError, ValueError) as exc:
-                last_error = exc
-                continue
-            except ModelProviderError as exc:
-                # Transport/auth/rate-limit retries belong to the provider.
-                # The second architect call is reserved for malformed JSON only.
-                raise _story_error(502, "MODEL_PROVIDER_ERROR", exc.message, {"providerCode": exc.code}) from exc
-            except Exception as exc:
-                from .services import StoryError
+                    session.add(ModelRun(
+                        id=model_run_id,
+                        session_id=None,
+                        role=f"architect:{section_name}",
+                        provider_id=provider.id,
+                        provider_name=provider.name,
+                        model_config_id=model.id,
+                        model_id=model.model_id,
+                        status="running",
+                        request_id=request_id,
+                        retry_count=attempt,
+                        started_at=datetime.now(timezone.utc),
+                    ))
+                try:
+                    section_messages = prompt_messages + [{"role": "system", "content": instruction}]
+                    if attempt:
+                        section_messages.append({
+                            "role": "system",
+                            "content": "上一次输出无效。请严格缩短内容，只返回本子任务要求的合法 JSON object。",
+                        })
+                    result = asyncio.run(provider_client.complete_chat({
+                        "model": model.model_id,
+                        "messages": section_messages,
+                        "temperature": min(float(model.temperature), 0.2),
+                        "max_tokens": min(model.max_output_tokens, 8192),
+                        "response_format": {"type": "json_object"},
+                    }))
+                    data = json.loads(result.text or "")
+                    if not isinstance(data, dict):
+                        raise ValueError("not object")
+                    for key in accepted_keys:
+                        value = data.get(key, [])
+                        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                            raise ValueError(f"invalid {key}")
+                        extracted[key] = value
+                    self._finish_canon_model_run(
+                        project.id,
+                        project.folder_path,
+                        model_run_id,
+                        "succeeded",
+                        provider_client.last_result,
+                        model,
+                        started_clock,
+                    )
+                    attempts_used[section_name] = attempt + 1
+                    break
+                except (json.JSONDecodeError, ValueError) as exc:
+                    last_error = exc
+                    self._finish_canon_model_run(
+                        project.id,
+                        project.folder_path,
+                        model_run_id,
+                        "failed",
+                        provider_client.last_result,
+                        model,
+                        started_clock,
+                        "invalid_json",
+                        {"section": section_name, "attempt": attempt + 1},
+                    )
+                    continue
+                except ModelProviderError as exc:
+                    self._finish_canon_model_run(
+                        project.id,
+                        project.folder_path,
+                        model_run_id,
+                        "failed",
+                        provider_client.last_result,
+                        model,
+                        started_clock,
+                        exc.code,
+                        {"section": section_name, "attempt": attempt + 1, "retryable": exc.retryable},
+                    )
+                    raise _story_error(502, "MODEL_PROVIDER_ERROR", exc.message, {
+                        "providerCode": exc.code,
+                        "section": section_name,
+                    }) from exc
+            else:
+                raise _story_error(422, "CANON_ANALYSIS_INVALID", "Canon 分析器未能输出有效 JSON。", {
+                    "section": section_name,
+                    "error": str(last_error) if last_error else "invalid model output",
+                })
 
-                if isinstance(exc, StoryError):
-                    raise
-                raise _story_error(422, "CANON_ANALYSIS_INVALID", f"Canon 分析失败: {exc}") from exc
-        raise _story_error(422, "CANON_ANALYSIS_INVALID", "Canon 分析器未能输出有效 JSON。", {"error": str(last_error) if last_error else "invalid model output"})
+        entity_by_name = {
+            str(item.get("canonicalName") or item.get("canonical_name") or "").strip(): item
+            for item in extracted["entities"]
+            if str(item.get("canonicalName") or item.get("canonical_name") or "").strip()
+        }
+        relation_by_key = {
+            json.dumps({
+                "subject": item.get("subjectCanonicalName") or item.get("subject_canonical_name") or item.get("subject"),
+                "predicate": item.get("predicate"),
+                "object": item.get("objectCanonicalName") or item.get("object_canonical_name") or item.get("object"),
+                "value": item.get("objectValueJson") if "objectValueJson" in item else item.get("object_value_json"),
+            }, ensure_ascii=False, sort_keys=True): item
+            for item in extracted["relations"]
+        }
+        rule_by_code = {
+            str(item.get("ruleCode") or item.get("rule_code") or "").strip(): item
+            for item in extracted["rules"]
+            if str(item.get("ruleCode") or item.get("rule_code") or "").strip()
+        }
+        draft = CanonDraftUpdate(
+            entities=list(entity_by_name.values()),
+            relations=list(relation_by_key.values()),
+            rules=list(rule_by_code.values()),
+        )
+        try:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                if session.scalar(select(CanonDocument).where(CanonDocument.status == "locked")):
+                    raise _story_error(409, "CANON_LOCKED", "Canon 已锁定，只能通过变更申请修改。")
+                now = datetime.now(timezone.utc)
+                for entry in draft.entities:
+                    self._upsert_entity(session, entry, now)
+                for entry in draft.relations:
+                    self._upsert_relation(session, entry, now)
+                for entry in draft.rules:
+                    self._upsert_rule(session, entry, now)
+                session.add(self.service._audit("canon.analysis_completed", "canon_document", "story-core", {
+                    "requestId": request_id,
+                    "sections": attempts_used,
+                    "reversible": False,
+                }, request_id))
+            self._mirror_canon_markdown_safely(project.id, project.folder_path)
+            return self.get_canon(project_id)
+        except Exception as exc:
+            from .services import StoryError
+
+            if isinstance(exc, StoryError):
+                raise
+            raise _story_error(422, "CANON_ANALYSIS_INVALID", f"Canon 分析失败: {exc}") from exc
+
+    def _finish_canon_model_run(
+        self,
+        project_id: str,
+        folder_path: str,
+        run_id: str,
+        status: str,
+        result: Any,
+        model: Any,
+        started_clock: float,
+        error_code: str | None = None,
+        diagnostic: dict[str, Any] | None = None,
+    ) -> None:
+        with self.service.db.project_write(project_id, folder_path) as session:
+            run = session.get(ModelRun, run_id)
+            if not run:
+                return
+            run.status = status
+            run.prompt_tokens = result.prompt_tokens
+            run.completion_tokens = result.completion_tokens
+            run.total_tokens = result.total_tokens
+            run.estimated_cost = (
+                ((result.prompt_tokens or 0) * (model.input_price_per_million or 0.0))
+                + ((result.completion_tokens or 0) * (model.output_price_per_million or 0.0))
+            ) / 1_000_000
+            run.retry_count = result.retry_count
+            run.duration_ms = int((time.perf_counter() - started_clock) * 1000)
+            run.error_code = error_code
+            run.diagnostic_json = _dumps(diagnostic) if diagnostic else None
+            if result.actual_model:
+                run.model_id = result.actual_model
+            run.ended_at = datetime.now(timezone.utc)
 
     def lock_canon(self, project_id: str, payload: CanonLockRequest, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -988,8 +1119,26 @@ class Phase4Service:
             raise _story_error(409, "CANON_LOCKED", "Canon 已锁定。")
         is_new = row is None
         subject_entity_id = str(item.get("subjectEntityId") or item.get("subject_entity_id") or "").strip()
+        subject_name = str(
+            item.get("subjectCanonicalName")
+            or item.get("subject_canonical_name")
+            or item.get("subject")
+            or ""
+        ).strip()
+        if not subject_entity_id and subject_name:
+            subject = session.scalar(select(CanonEntity).where(CanonEntity.canonical_name == subject_name))
+            subject_entity_id = subject.id if subject else ""
         predicate = str(item.get("predicate") or "").strip()
         object_entity_id = item.get("objectEntityId") or item.get("object_entity_id")
+        object_name = str(
+            item.get("objectCanonicalName")
+            or item.get("object_canonical_name")
+            or item.get("object")
+            or ""
+        ).strip()
+        if not object_entity_id and object_name:
+            object_entity = session.scalar(select(CanonEntity).where(CanonEntity.canonical_name == object_name))
+            object_entity_id = object_entity.id if object_entity else None
         object_value = item["objectValueJson"] if "objectValueJson" in item else item.get("object_value_json")
         if not subject_entity_id or session.get(CanonEntity, subject_entity_id) is None:
             raise _story_error(422, "CANON_SCHEMA_INVALID", "关系的主语实体不存在。")

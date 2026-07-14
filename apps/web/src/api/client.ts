@@ -4,8 +4,15 @@ import type {
   AgentStreamEvent,
   ApiErrorShape,
   AuditEvent,
+  AutomationDailyReport,
+  AutomationPolicy,
+  AutomationRun,
   BackupRecord,
   BackupManifest,
+  CanonChangeRequest,
+  CanonGenerationProposal,
+  CanonReadiness,
+  CanonWorkspace,
   ChapterCommit,
   ChapterContract,
   ChapterDraft,
@@ -23,6 +30,10 @@ import type {
   QualityFinding,
   QualityReport,
   StoryPlan,
+  StoryBrief,
+  PlanGenerationProposal,
+  TrialReadiness,
+  TrialRunSize,
 } from "../types";
 
 export class ApiClientError extends Error {
@@ -53,6 +64,8 @@ export const api = {
   plan: (projectId: string) => request<StoryPlan>(`/projects/${projectId}/plan`),
   updateNode: (projectId: string, nodeId: string, payload: Partial<PlanNode> & { expectedRevision: number }) =>
     request<PlanNode>(`/projects/${projectId}/plan/nodes/${nodeId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  createNode: (projectId: string, payload: Omit<PlanNode, "id" | "revision">) =>
+    request<PlanNode>(`/projects/${projectId}/plan/nodes`, { method: "POST", body: JSON.stringify(payload) }),
   sessions: (projectId: string) => request<AgentSession[]>(`/projects/${projectId}/agent/sessions`),
   createSession: (projectId: string, scope: string[]) => request<AgentSession>(`/projects/${projectId}/agent/sessions`, { method: "POST", body: JSON.stringify({ scope }) }),
   sendMessage: (sessionId: string, payload: { projectId: string; content: string; selectedNodeId?: string }) =>
@@ -163,6 +176,8 @@ export const api = {
     maxOutputTokens: number;
     supportsReasoning: boolean;
     isEnabled: boolean;
+    inputPricePerMillion?: number | null;
+    outputPricePerMillion?: number | null;
   }) => request<ModelConfig>(`/model-providers/${providerId}/models`, { method: "POST", body: JSON.stringify(payload) }),
   updateModel: (modelId: string, payload: Partial<{
     modelId: string;
@@ -171,11 +186,68 @@ export const api = {
     maxOutputTokens: number;
     supportsReasoning: boolean;
     isEnabled: boolean;
+    inputPricePerMillion: number | null;
+    outputPricePerMillion: number | null;
   }>) => request<ModelConfig>(`/models/${modelId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteModel: (modelId: string) => request<void>(`/models/${modelId}`, { method: "DELETE" }),
   roleBindings: () => request<ModelRoleBinding[]>("/model-role-bindings"),
   updateRoleBinding: (role: string, payload: { modelId: string | null; dailyCostLimit?: number | null }) =>
     request<ModelRoleBinding>(`/model-role-bindings/${role}`, { method: "PUT", body: JSON.stringify(payload) }),
+  canon: (projectId: string) => request<CanonWorkspace>(`/projects/${projectId}/canon`),
+  updateCanonDraft: (projectId: string, payload: {
+    documents?: Array<Record<string, unknown>>;
+    entityTypes?: Array<Record<string, unknown>>;
+    entities?: Array<Record<string, unknown>>;
+    relations?: Array<Record<string, unknown>>;
+    rules?: Array<Record<string, unknown>>;
+  }) => request<CanonWorkspace>(`/projects/${projectId}/canon/draft`, { method: "PUT", body: JSON.stringify(payload) }),
+  analyzeCanon: (projectId: string, sourceText: string, title?: string) =>
+    request<CanonWorkspace>(`/projects/${projectId}/canon/analyze`, { method: "POST", body: JSON.stringify({ projectId, sourceText, title }) }),
+  lockCanon: (projectId: string, expectedRevision: number) =>
+    request<CanonWorkspace>(`/projects/${projectId}/canon/lock`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  createCanonChangeRequest: (projectId: string, payload: {
+    targetKind: CanonChangeRequest["targetKind"];
+    targetId: string;
+    reason: string;
+    impactSummary: string;
+    afterJson: Record<string, unknown>;
+  }) => request<CanonChangeRequest>(`/projects/${projectId}/canon/change-requests`, { method: "POST", body: JSON.stringify({ projectId, ...payload }) }),
+  applyCanonChangeRequest: (projectId: string, requestId: string, expectedRevision: number) =>
+    request<CanonChangeRequest>(`/canon/change-requests/${requestId}/apply`, { method: "POST", body: JSON.stringify({ projectId, expectedRevision }) }),
+  rejectCanonChangeRequest: (projectId: string, requestId: string, expectedRevision: number) =>
+    request<CanonChangeRequest>(`/canon/change-requests/${requestId}/reject`, { method: "POST", body: JSON.stringify({ projectId, expectedRevision }) }),
+  canonGenerationProposals: (projectId: string) =>
+    request<CanonGenerationProposal[]>(`/projects/${projectId}/canon/generation-proposals`),
+  createCanonGenerationProposal: (projectId: string, payload: StoryBrief) =>
+    request<CanonGenerationProposal>(`/projects/${projectId}/canon/generation-proposals`, { method: "POST", body: JSON.stringify(payload) }),
+  applyCanonGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<CanonWorkspace>(`/canon/generation-proposals/${proposalId}/apply`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  rejectCanonGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<CanonGenerationProposal>(`/canon/generation-proposals/${proposalId}/reject`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  canonReadiness: (projectId: string) => request<CanonReadiness>(`/projects/${projectId}/canon/readiness`),
+  planGenerationProposals: (projectId: string) => request<PlanGenerationProposal[]>(`/projects/${projectId}/plan/generation-proposals`),
+  createPlanGenerationProposal: (projectId: string, expectedPlanRevision: number) =>
+    request<PlanGenerationProposal>(`/projects/${projectId}/plan/generation-proposals`, { method: "POST", body: JSON.stringify({ expectedPlanRevision, preciseChapterCount: 5 }) }),
+  applyPlanGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<StoryPlan>(`/plan/generation-proposals/${proposalId}/apply`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  rejectPlanGenerationProposal: (proposalId: string, expectedRevision: number) =>
+    request<PlanGenerationProposal>(`/plan/generation-proposals/${proposalId}/reject`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  trialReadiness: (projectId: string, chapterCount: TrialRunSize) =>
+    request<TrialReadiness>(`/projects/${projectId}/trial-readiness?chapterCount=${chapterCount}`),
+  automationPolicy: (projectId: string) => request<AutomationPolicy>(`/projects/${projectId}/automation/policy`),
+  updateAutomationPolicy: (projectId: string, payload: Omit<AutomationPolicy, "projectId" | "nextRunAt" | "lastScheduledLocalDate" | "revision" | "createdAt" | "updatedAt"> & { expectedRevision: number }) =>
+    request<AutomationPolicy>(`/projects/${projectId}/automation/policy`, { method: "PUT", body: JSON.stringify(payload) }),
+  automationRuns: (projectId: string) => request<AutomationRun[]>(`/projects/${projectId}/automation/runs`),
+  automationRun: (projectId: string, runId: string) => request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}`),
+  createAutomationRun: (projectId: string, chapterCount: TrialRunSize, idempotencyKey: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs`, { method: "POST", body: JSON.stringify({ chapterCount, idempotencyKey }) }),
+  cancelAutomationRun: (projectId: string, runId: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}/cancel`, { method: "POST" }),
+  resumeAutomationRun: (projectId: string, runId: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}/resume`, { method: "POST" }),
+  catchUpAutomationRun: (projectId: string, runId: string) =>
+    request<AutomationRun>(`/projects/${projectId}/automation/runs/${runId}/catch-up`, { method: "POST" }),
+  automationReports: (projectId: string) => request<AutomationDailyReport[]>(`/projects/${projectId}/automation/reports`),
   chapterContracts: (projectId: string) => request<ChapterContract[]>(`/projects/${projectId}/chapter-contracts`),
   deriveChapterContract: (projectId: string, payload: {
     chapterNumber: number; planNodeId?: string | null; title?: string; authorNote?: string;

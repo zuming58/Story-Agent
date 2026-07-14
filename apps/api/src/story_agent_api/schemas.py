@@ -1335,3 +1335,231 @@ class EnduranceRunOut(ApiModel):
     findings: list[EnduranceFindingOut] = Field(default_factory=list)
     report: EnduranceReportOut | None = None
     available_actions: list[str] = Field(default_factory=list)
+
+
+class AdaptationWorkspaceCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=160)
+    kind: Literal["short_story", "short_drama"]
+    source_type: Literal["canon", "short_story_strategy", "chapter_range"] = "canon"
+    source_id: str | None = None
+    chapter_start: int | None = Field(default=None, ge=1, le=5000)
+    chapter_end: int | None = Field(default=None, ge=1, le=5000)
+    target_word_count: int | None = Field(default=None, ge=1000, le=300000)
+    target_chapter_count: int | None = Field(default=None, ge=1, le=30)
+    target_episode_count: Literal[6, 12, 24] | None = None
+    unit_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
+    audience: str = Field(default="", max_length=160)
+    platform_constraints: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = Field(default=None, max_length=120)
+
+
+class AdaptationWorkspaceUpdate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    target_word_count: int | None = Field(default=None, ge=1000, le=300000)
+    target_chapter_count: int | None = Field(default=None, ge=1, le=30)
+    target_episode_count: Literal[6, 12, 24] | None = None
+    unit_duration_seconds: int | None = Field(default=None, ge=30, le=1800)
+    audience: str | None = Field(default=None, max_length=160)
+    platform_constraints: dict[str, Any] | None = None
+    status: Literal["draft", "ready", "locked", "archived"] | None = None
+
+
+class ShortStoryStrategyOut(ApiModel):
+    id: str
+    project_id: str
+    workspace_id: str
+    core_hook: str
+    opening_hook: str
+    main_conflict: str
+    emotional_curve: list[Any]
+    ending: str
+    point_of_view: str
+    target_word_count: int
+    chapter_budget: list[dict[str, Any]]
+    character_merge_plan: list[dict[str, Any]]
+    foreshadow_plan: dict[str, Any]
+    compression_rules: dict[str, Any]
+    forbidden_reveals: list[Any]
+    checksum: str
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AdaptationWorkspaceOut(ApiModel):
+    id: str
+    project_id: str
+    name: str
+    kind: str
+    source_type: str
+    source_id: str | None = None
+    source_manifest: dict[str, Any]
+    canon_revision: int
+    canon_checksum: str
+    plan_revision: int | None = None
+    plan_checksum: str | None = None
+    commit_manifest: list[dict[str, Any]]
+    target_word_count: int | None = None
+    target_chapter_count: int | None = None
+    target_episode_count: int | None = None
+    unit_duration_seconds: int | None = None
+    audience: str
+    platform_constraints: dict[str, Any]
+    status: str
+    diagnostic: dict[str, Any] | None = None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    locked_at: datetime | None = None
+    strategy: ShortStoryStrategyOut | None = None
+
+
+class AdaptationReadinessCheckOut(ApiModel):
+    code: str
+    status: Literal["ready", "warning", "blocked"]
+    title: str
+    detail: str
+
+
+class AdaptationReadinessOut(ApiModel):
+    project_id: str
+    workspace_id: str
+    ready: bool
+    checks: list[AdaptationReadinessCheckOut]
+    source_manifest: dict[str, Any]
+    updated_at: datetime
+
+
+class ShortStoryProposalCreate(ApiModel):
+    expected_workspace_revision: int = Field(ge=1)
+    idempotency_key: str | None = Field(default=None, max_length=120)
+    instructions: str = ""
+
+
+class DramaOutlineProposalCreate(ApiModel):
+    expected_workspace_revision: int = Field(ge=1)
+    idempotency_key: str | None = Field(default=None, max_length=120)
+    target_episode_count: Literal[6, 12, 24] | None = None
+    instructions: str = ""
+
+
+class ScriptProposalCreate(ApiModel):
+    expected_workspace_revision: int = Field(ge=1)
+    idempotency_key: str | None = Field(default=None, max_length=120)
+    instructions: str = ""
+
+
+class AdaptationProposalAction(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class ScriptVersionApprove(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class AdaptationProposalOut(ApiModel):
+    id: str
+    project_id: str
+    workspace_id: str
+    proposal_kind: str
+    idempotency_key: str | None = None
+    input_snapshot: dict[str, Any]
+    structured_output: dict[str, Any]
+    diff: dict[str, Any]
+    impact_scope: list[dict[str, Any]]
+    canon_deviations: list[dict[str, Any]]
+    model_run_id: str | None = None
+    status: str
+    error_code: str | None = None
+    error_message: str | None = None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    applied_at: datetime | None = None
+    rejected_at: datetime | None = None
+
+
+class DramaSceneOut(ApiModel):
+    id: str
+    project_id: str
+    workspace_id: str
+    episode_id: str
+    scene_number: int
+    setting_type: str
+    location: str
+    time_of_day: str
+    characters: list[str]
+    objective: str
+    conflict: str
+    turn: str
+    visual_action: str
+    estimated_duration_seconds: int
+    source_evidence: list[dict[str, Any]]
+    canon_refs: list[Any]
+    checksum: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class DramaScriptVersionOut(ApiModel):
+    id: str
+    project_id: str
+    workspace_id: str
+    episode_id: str
+    version_number: int
+    parent_version_id: str | None = None
+    kind: str
+    fountain_text: str
+    markdown_text: str
+    structured_dialogue: list[dict[str, Any]]
+    word_count: int
+    estimated_duration_seconds: int
+    model_run_id: str | None = None
+    checksum: str
+    status: str
+    is_current: bool
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    approved_at: datetime | None = None
+
+
+class DramaEpisodeOut(ApiModel):
+    id: str
+    project_id: str
+    workspace_id: str
+    episode_number: int
+    title: str
+    logline: str
+    target_duration_seconds: int
+    opening_hook: str
+    cliffhanger: str
+    source_refs: list[dict[str, Any]]
+    status: str
+    checksum: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    scenes: list[DramaSceneOut] = Field(default_factory=list)
+    script_versions: list[DramaScriptVersionOut] = Field(default_factory=list)
+
+
+class AdaptationFindingOut(ApiModel):
+    id: str
+    project_id: str
+    workspace_id: str
+    proposal_id: str | None = None
+    episode_id: str | None = None
+    scene_id: str | None = None
+    rule_code: str
+    severity: str
+    evidence: dict[str, Any]
+    suggestion: str
+    fingerprint: str
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime

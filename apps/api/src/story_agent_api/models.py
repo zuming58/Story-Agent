@@ -1139,3 +1139,214 @@ class EnduranceReport(ProjectBase):
     checksum: Mapped[str] = mapped_column(String(64), default="")
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AdaptationWorkspace(ProjectBase):
+    __tablename__ = "adaptation_workspaces"
+    __table_args__ = (
+        Index(
+            "uq_adaptation_workspaces_active_name",
+            "project_id",
+            "name",
+            unique=True,
+            sqlite_where=text("status != 'archived'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="canon", index=True)
+    source_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    canon_revision: Mapped[int] = mapped_column(Integer, default=0)
+    canon_checksum: Mapped[str] = mapped_column(String(64), default="")
+    plan_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plan_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    commit_manifest_json: Mapped[str] = mapped_column(Text, default="[]")
+    target_word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_chapter_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_episode_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unit_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    audience: Mapped[str] = mapped_column(String(160), default="")
+    platform_constraints_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ShortStoryStrategy(ProjectBase):
+    __tablename__ = "short_story_strategies"
+    __table_args__ = (
+        Index(
+            "uq_short_story_strategies_current",
+            "workspace_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    core_hook: Mapped[str] = mapped_column(Text, default="")
+    opening_hook: Mapped[str] = mapped_column(Text, default="")
+    main_conflict: Mapped[str] = mapped_column(Text, default="")
+    emotional_curve_json: Mapped[str] = mapped_column(Text, default="[]")
+    ending: Mapped[str] = mapped_column(Text, default="")
+    point_of_view: Mapped[str] = mapped_column(String(120), default="")
+    target_word_count: Mapped[int] = mapped_column(Integer, default=10000)
+    chapter_budget_json: Mapped[str] = mapped_column(Text, default="[]")
+    character_merge_plan_json: Mapped[str] = mapped_column(Text, default="[]")
+    foreshadow_plan_json: Mapped[str] = mapped_column(Text, default="{}")
+    compression_rules_json: Mapped[str] = mapped_column(Text, default="{}")
+    forbidden_reveals_json: Mapped[str] = mapped_column(Text, default="[]")
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AdaptationProposal(ProjectBase):
+    __tablename__ = "adaptation_proposals"
+    __table_args__ = (
+        Index(
+            "uq_adaptation_proposals_idempotency",
+            "workspace_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    proposal_kind: Mapped[str] = mapped_column(String(40), index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    input_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    structured_output_json: Mapped[str] = mapped_column(Text, default="{}")
+    diff_json: Mapped[str] = mapped_column(Text, default="{}")
+    impact_scope_json: Mapped[str] = mapped_column(Text, default="[]")
+    canon_deviations_json: Mapped[str] = mapped_column(Text, default="[]")
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    error_code: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DramaEpisode(ProjectBase):
+    __tablename__ = "drama_episodes"
+    __table_args__ = (
+        Index("uq_drama_episodes_workspace_number", "workspace_id", "episode_number", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    episode_number: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(String(240), default="")
+    logline: Mapped[str] = mapped_column(Text, default="")
+    target_duration_seconds: Mapped[int] = mapped_column(Integer, default=90)
+    opening_hook: Mapped[str] = mapped_column(Text, default="")
+    cliffhanger: Mapped[str] = mapped_column(Text, default="")
+    source_refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class DramaScene(ProjectBase):
+    __tablename__ = "drama_scenes"
+    __table_args__ = (
+        Index("uq_drama_scenes_episode_number", "episode_id", "scene_number", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    episode_id: Mapped[str] = mapped_column(String(36), index=True)
+    scene_number: Mapped[int] = mapped_column(Integer, index=True)
+    setting_type: Mapped[str] = mapped_column(String(40), default="")
+    location: Mapped[str] = mapped_column(String(240), default="")
+    time_of_day: Mapped[str] = mapped_column(String(40), default="")
+    characters_json: Mapped[str] = mapped_column(Text, default="[]")
+    objective: Mapped[str] = mapped_column(Text, default="")
+    conflict: Mapped[str] = mapped_column(Text, default="")
+    turn: Mapped[str] = mapped_column(Text, default="")
+    visual_action: Mapped[str] = mapped_column(Text, default="")
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    source_evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    canon_refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class DramaScriptVersion(ProjectBase):
+    __tablename__ = "drama_script_versions"
+    __table_args__ = (
+        Index(
+            "uq_drama_script_versions_current_approved",
+            "episode_id",
+            unique=True,
+            sqlite_where=text("status = 'approved' AND is_current = 1"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    episode_id: Mapped[str] = mapped_column(String(36), index=True)
+    version_number: Mapped[int] = mapped_column(Integer, default=1)
+    parent_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(40), default="candidate", index=True)
+    fountain_text: Mapped[str] = mapped_column(Text, default="")
+    markdown_text: Mapped[str] = mapped_column(Text, default="")
+    structured_dialogue_json: Mapped[str] = mapped_column(Text, default="[]")
+    word_count: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(20), default="candidate", index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AdaptationFinding(ProjectBase):
+    __tablename__ = "adaptation_findings"
+    __table_args__ = (
+        Index("uq_adaptation_findings_workspace_fingerprint", "workspace_id", "fingerprint", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    episode_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    scene_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    rule_code: Mapped[str] = mapped_column(String(120), index=True)
+    severity: Mapped[str] = mapped_column(String(20), index=True)
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    suggestion: Mapped[str] = mapped_column(Text, default="")
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

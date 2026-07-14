@@ -4,6 +4,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ from sqlalchemy import select
 
 import story_agent_api.phase5 as phase5_module
 from story_agent_api.model_provider import ModelStreamResult
-from story_agent_api.models import ChapterCommit, ChapterJob, StateFact, SourceVersion
+from story_agent_api.models import ChapterCommit, ChapterJob, QualityFinding, QualityRun, StateFact, SourceVersion, utc_now
 from story_agent_api.services import StoryError
 
 
@@ -579,6 +580,39 @@ def test_startup_recovery_and_retry_reset_job_timing(client: TestClient, demo_pr
     assert retried.json()["finishedAt"] is None
 
 
+def test_manual_resume_endpoint_reuses_persisted_candidate_after_interruption(client: TestClient, demo_project: dict) -> None:
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        generated = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={})
+        assert generated.status_code == 200, generated.text
+        before = client.get(f"/api/v1/projects/{project_id}/chapters/1/drafts").json()
+        assert len(before) == 1
+
+        service = client.app.state.story_service
+        project = service.get_project(project_id)
+        with service.db.project_write(project.id, project.folder_path) as session:
+            row = session.get(ChapterJob, job["id"])
+            assert row is not None
+            row.status = "interrupted"
+            row.error_code = "startup_recovery"
+            row.revision += 1
+
+        resumed = client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/resume")
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["status"] == "human_review"
+        after = client.get(f"/api/v1/projects/{project_id}/chapters/1/drafts").json()
+        assert len(after) == 1
+        assert after[0]["id"] == before[0]["id"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_phase5_project_namespaces_are_isolated(client: TestClient, demo_project: dict) -> None:
     first_id = demo_project["id"]
     second = client.post("/api/v1/projects", json={"title": "Phase Five Second", "mode": "long-form", "totalChapters": 100}).json()
@@ -728,6 +762,63 @@ def test_model_reviewer_retries_one_truncated_response_without_redrafting(
         server.server_close()
 
 
+def test_deterministic_quality_revalidation_supersedes_stale_findings_without_rewriting_candidate(client: TestClient, demo_project: dict) -> None:
+    """A deterministic-rule upgrade may clear a false positive, never rewrite prose."""
+    project_id = demo_project["id"]
+    lock_canon(client, project_id)
+    server, base_url = start_phase5_server()
+    try:
+        configure_phase5_roles(client, base_url, reviewers=True)
+        contract = derive_locked_contract(client, project_id)
+        job = client.post(f"/api/v1/projects/{project_id}/chapter-jobs", json={"chapterContractId": contract["id"]}).json()
+        assert client.post(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/run", json={}).status_code == 200
+
+        service = client.app.state.story_service
+        project = service.get_project(project_id)
+        with service.db.project_write(project.id, project.folder_path) as session:
+            current_job = session.get(ChapterJob, job["id"])
+            assert current_job is not None
+            draft = service.phase5._current_draft(session, current_job.id)
+            assert draft is not None
+            now = utc_now()
+            stale_run = QualityRun(
+                id=str(uuid4()), project_id=project.id, chapter_job_id=current_job.id,
+                chapter_draft_id=draft.id, gate_type="deterministic", reviewer_role=None,
+                status="succeeded", summary_json="{}", created_at=now, completed_at=now,
+            )
+            session.add(stale_run)
+            session.add(QualityFinding(
+                id=str(uuid4()), project_id=project.id, quality_run_id=stale_run.id,
+                chapter_draft_id=draft.id, rule_code="STALE_RULE_FALSE_POSITIVE",
+                severity="error", category="contract", message="obsolete rule result",
+                evidence_json="[\"obsolete\"]", location_json="{}", suggested_fix="revalidate",
+                fingerprint=str(uuid4()).replace("-", ""), status="open", created_at=now, updated_at=now,
+            ))
+
+        current = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}").json()
+        conflict = client.post(
+            f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality/revalidate",
+            json={"expectedJobRevision": current["revision"] - 1},
+        )
+        assert conflict.status_code == 409
+
+        revalidated = client.post(
+            f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality/revalidate",
+            json={"expectedJobRevision": current["revision"]},
+        )
+        assert revalidated.status_code == 200, revalidated.text
+        assert revalidated.json()["status"] == "human_review"
+        assert revalidated.json()["revision"] > current["revision"]
+        quality = client.get(f"/api/v1/projects/{project_id}/chapter-jobs/{job['id']}/quality").json()
+        stale = next(item for item in quality["findings"] if item["ruleCode"] == "STALE_RULE_FALSE_POSITIVE")
+        assert stale["status"] == "superseded"
+        drafts = client.get(f"/api/v1/projects/{project_id}/chapters/1/drafts").json()
+        assert len(drafts) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_extraction_normalizes_common_model_shape_without_promoting_narrative_boundaries(client: TestClient, demo_project: dict) -> None:
     project_id = demo_project["id"]
     lock_canon(client, project_id)
@@ -739,7 +830,7 @@ def test_extraction_normalizes_common_model_shape_without_promoting_narrative_bo
             {"id": "e2", "type": "artifact", "name": "Night Lamp"},
         ],
         "facts": [
-            {"subject": "Lin Mo", "predicate": "location", "object": "archive", "expectedCurrentValue": True, "stateChanging": True},
+            {"subject": "Lin Mo", "predicate": "location", "object": "archive", "confidence": "high", "expectedCurrentValue": True, "stateChanging": True},
             {"description": "ambient observation", "stateChanging": False},
         ],
         "events": [{"sequence": 1, "description": "Lin Mo enters the archive."}],
@@ -753,13 +844,46 @@ def test_extraction_normalizes_common_model_shape_without_promoting_narrative_bo
         "entity": "Lin Mo",
         "fieldPath": "location",
         "value": "archive",
-        "confidence": 1.0,
+        "confidence": 0.9,
     }]
     assert payload["events"][0]["eventOrder"] == 1
     assert payload["foreshadows"][0]["code"] == "f1"
     assert payload["boundaries"] == []
     with service.db.project(project.id, project.folder_path) as session:
         service.phase4._validate_state_payload(session, project.id, payload)
+
+
+def test_requirement_evidence_accepts_explicit_chapter_beat_synonyms() -> None:
+    assert phase5_module._requirement_evident(
+        "沈砚决定夜间实地确认街巷位置",
+        "沈砚在工作日志上写下：今晚去槐树巷看现场，确认岔口与十七号是否存在。今晚我去看看。",
+    )
+
+
+def test_requirement_evidence_accepts_night_watch_rule_language_without_verbatim_beat_copy() -> None:
+    prose = "他发现夜雾把青石板路折叠回原点。巡夜灯悬在前方引路，回来后他竟想不起老周的全名。"
+    assert phase5_module._requirement_evident("沈砚确认夜雾会改变街道路经", prose)
+    assert phase5_module._requirement_evident("巡夜灯第一次被动显路并产生轻微记忆代价", prose)
+
+
+def test_requirement_and_canon_reference_accept_controlled_paper_child_aliases() -> None:
+    prose = "沈砚始终直视纸人，一步步后退到槐树巷；纸人没有跟出槐安巷。"
+    assert phase5_module._requirement_evident("沈砚利用规则脱离当前危险", prose)
+    assert phase5_module._canonical_reference_evident("无脸纸童", prose, set())
+    assert not phase5_module._canonical_reference_evident("老周", prose, set())
+
+    evidence_prose = "他低头再抬头，纸人已经贴近五步。再次移开视线，纸人前移两步。他记录下验证结果。"
+    assert phase5_module._requirement_evident("纸童移动规则获得至少两次可验证证据", evidence_prose)
+
+
+def test_writer_and_reviser_prompts_include_contract_word_budget(client: TestClient, demo_project: dict) -> None:
+    service = client.app.state.story_service
+    contract = {"targetWordsMin": 1500, "targetWordsMax": 3000}
+    writer = service.phase5._writer_messages(contract, {"traceId": "test"}, "")[0]["content"]
+    reviser = service.phase5._revision_messages(contract, {"contentMarkdown": "draft"}, [], "tighten")[0]["content"]
+    assert "1500—3000" in writer
+    assert "1500—3000" in reviser
+    assert "下限以下" in reviser
 
 
 def test_model_provider_call_occurs_without_holding_project_write_lock(client: TestClient, demo_project: dict, monkeypatch: pytest.MonkeyPatch) -> None:

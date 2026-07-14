@@ -750,6 +750,17 @@ class ChapterJobRetry(ApiModel):
     reason: str = ""
 
 
+class ChapterQualityRevalidate(ApiModel):
+    """Request a deterministic quality pass against the current candidate.
+
+    This is intentionally separate from a revision: it is for safely
+    re-evaluating an existing draft after a deterministic-rule upgrade, and
+    must never invoke a writer or mutate the candidate body.
+    """
+
+    expected_job_revision: int = Field(ge=1)
+
+
 class ChapterJobOut(ApiModel):
     id: str
     project_id: str

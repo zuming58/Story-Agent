@@ -1,154 +1,123 @@
 # Story Agent 第八阶段重制交接
 
-更新时间：2026-07-13 夜间（GPT-5.6）
+更新时间：2026-07-14（GPT-5.6）
 
 当前分支：`agent/trial-ready-workbench`
 
 草稿 PR：[#8](https://github.com/zuming58/Story-Agent/pull/8)
 
-状态：**正式 Canon 与 1000 章分层规划已完成；第一章保留 3 个安全候选稿，未正式提交。按用户要求今晚停止，明天继续真实验收。**
+状态：**第八阶段代码与真实第 1—5 章验收已经完成；等待用户检查页面与试写结果后再决定是否合并 `main`。**
 
-## 1. 今晚完成的正式数据
+## 1. 当前可用能力
 
-正式项目：
+- 正式项目与示例项目已隔离，正式项目从第 0 章开始。
+- Canon 故事架构器可生成、分析、校验、应用和锁定完整设定。
+- Canon 覆盖人物、地点、组织、物品、能力、规则、关系、升级窗口与揭示边界。
+- 长篇规划器已支持全书、卷、故事弧和下一批精确 `ChapterBeat`。
+- 章节流水线会生成章节契约、编译上下文、写作、分段事实抽取、多角色质量复核、至多两轮修订和原子正式提交。
+- 自动托管支持 1/3/5 章试写、预算保护、取消、恢复、补跑、租约恢复和运行报告。
+- 候选正文、正式 Canon、状态快照和正式正文保持隔离；未经批准的候选不会污染正式状态。
+- 写作模型调用期间不持有 SQLite 长写事务。
+
+## 2. 正式试写项目
 
 - 项目：`夜巡人·正式试写`
 - Project ID：`1ffdb07d-d717-42cf-8456-30e1475b2859`
 - `projectKind=standard`
-- `currentChapter=0`
 - 总章数：1000
+- 当前正式进度：`currentChapter=5`
 
 Canon：
 
-- 真实 DeepSeek Canon 已生成、分析、应用并锁定。
-- Canon 文档 revision：3。
-- 结构化数据：19 个实体、10 条关系、16 条规则。
-- 六阶能力、四级法器、三个第一卷核心物品、七卷边界、升级窗口、揭示窗口和第 1—5 章节拍均存在。
-- Canon 就绪检查：全部通过，无 blocked 项。
+- 已通过真实 DeepSeek 完成生成、结构化分析、应用和锁定。
+- 当前结构化基线为 19 个实体、10 条关系、16 条规则。
+- 六阶能力、四级法器、三个第一卷核心物品、七卷边界、升级窗口和真相揭示窗口均已落盘。
 
 规划：
 
-- 真实规划提案已生成并应用，Plan revision：2。
-- 共 11 个规划节点，覆盖 1000 章七卷边界。
-- 第一卷包含升级与真相预算；第 1—5 章均有精确 `ChapterBeat`。
-- 项目仍为第 0 章，没有把演示项目第 36 章状态带入正式项目。
-- 1、3、5 章试写就绪检查均通过。
+- 1000 章、七卷分层规划已经应用。
+- 第一卷具有升级预算、真相预算和故事弧边界。
+- 第 1—5 章均有独立精确节拍，没有继承示例项目第 36 章状态。
 
-## 2. 第一章真实验收保存点
+正文验收：
 
-自动化运行：
+| 章节 | 标题 | 结果 |
+|---:|---|---|
+| 1 | 午夜多出的档案袋 | 已质量复核并正式提交 |
+| 2 | 不存在的门牌 | 已质量复核并正式提交 |
+| 3 | 灯照旧路 | 两轮修订后正式提交 |
+| 4 | 纸人不看人 | 中断恢复、两轮修订后正式提交 |
+| 5 | 被遗忘的一句话 | 首稿通过阻断门并正式提交；仅保留字数 warning |
 
-- Run ID：`d5dabe1d-ba2c-471d-ad43-e840c85cfd30`
-- Chapter Job ID：`749f971f-ee3f-4dd0-be95-878fbb0bfd74`
-- 当前安全状态：run=`interrupted`、item=`waiting`、job=`interrupted`
-- `availableActions` 包含 `resume`
-- 当前 revision round：2（已经达到允许的第二轮，不得再开启第三轮修订）
-- 中断原因：为加载新抽取逻辑主动重启服务；租约过期后系统正确收敛为 `automation_lease_recovery`。
+每章均有且只有一个 current official commit；本地 `canon/chapters/chapter-0001.md` 至 `chapter-0005.md` 镜像存在。真实正文、SQLite、模型密钥和费用数据只保存在本机 `.data`/Credential Manager，不进入 Git。
 
-候选稿：
+## 3. 本轮真实验收修复
 
-| 版本 | 类型 | 字数 | 当前稿 | 说明 |
-|---|---:|---:|---:|---|
-| v1 | generated | 4123 | 否 | 原始稿，超出 3000 字且钩子/节拍检查未完全通过 |
-| v2 | revised | 2358 | 否 | 第一轮修订稿，模型审稿通过，仅精确伏笔代码未匹配 |
-| v3 | revised | 2518 | 是 | 第二轮安全候选，等待用新逻辑重新完成抽取与质量门 |
+1. 新增公开的章节任务恢复接口，服务重启后可复用已有安全候选稿，不重复调用写作模型。
+2. 新增带 `expectedJobRevision` 的确定性质量重检接口；规则升级可审计地清除旧误报，不改写正文、不调用模型。
+3. 修正自然中文与规划语句逐字不一致造成的完成条件误报，包括夜雾改路、巡夜灯显路、记忆代价、利用规则脱险和两次规则验证。
+4. Canon 描述性名称允许受控的人物称谓变化，例如“纸童/纸人”；普通二、三字人名仍保持精确匹配。
+5. 事实抽取拆成实体、状态事实、知识边界、事件伏笔四个紧凑 JSON 请求；过长或非法输出只精简重试一次。
+6. 抽取置信度兼容数值和 `high/medium/low`，并强制收敛到 0—1，避免模型元数据使有效候选整体失败。
+7. 写作与修订提示显式携带章节字数、人物、完成条件、钩子、伏笔和禁写边界；修订稿不得压缩到下限以下。
+8. 真实审稿截断时只允许一次精简重试，不重新生成正文，也不重复抽取。
+9. 第 4 章验证了人工恢复后继续同一任务；第 1—5 章验证了两轮修订上限、revision 和正式提交边界。
 
-重要边界：
+新增/补充接口：
 
-- 第一章没有正式 commit，`currentChapter` 仍为 0。
-- 3 个正文版本只存在本机 `.data`，没有进入 Git。
-- 候选稿没有污染正式 Canon、状态快照或伏笔台账。
-- 明天必须恢复现有 run，不得新建第一章 run，也不得重新调用写作模型。
-- 第 2—5 章尚未生成；今晚按用户要求不再继续。
+- `POST /api/v1/projects/{project_id}/chapter-jobs/{job_id}/resume`
+- `POST /api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality/revalidate`
 
-## 3. 真实验收发现并修复的代码问题
+## 4. 重启与数据恢复验收
 
-### Canon 提案应用边界
+在第 1—5 章全部提交后关闭并重新启动 API，验证结果：
 
-- 原校验要求模型逐字写出“硬规则”，即使已存在“怪异规则”和 16 条结构化硬约束也会误阻断。
-- 现改为语义检查“怪异 + 规则”，结构化数量与约束仍由确定性规则检查。
-- `apply` 不再信任旧 `readiness_json` 快照；在写入边界重新执行当前校验，避免旧规则产生误接受或误拒绝。
-- 新增 stale-false 可重新通过、stale-true 必须被拒绝的回归测试。
+- `currentChapter` 仍为 5。
+- 第 1—5 章 current official commit 均可读取。
+- 没有残留 active chapter job。
+- Canon、规划、状态快照和章节 Markdown 镜像均可恢复。
+- 中断任务恢复不会创建第三轮修订，也不会重新写作已有安全候选。
 
-### 真实审稿输出截断
-
-- DeepSeek 连续性审稿首次因 `content_truncated` 安全失败；正文与正式状态均未被错误提交。
-- 原因是审稿提示携带完整未来规划，且 reviewer 输出上限偏小。
-- 已压缩 `mustNotAdvance` 为必要范围字段，将 reviewer 上限调整为 3072。
-- reviewer 截断时只允许一次精简重试；仍失败就阻断。
-- 新增测试证明只重试审稿，不重新生成正文或重复抽取。
-
-### 精确伏笔代码缺失
-
-- 真实验收发现 `FOG-OLD-HOUSE-LETTER` 未通过确定性门。
-- 原因不是正文缺少异常来信，而是 narrative extractor 从未收到契约的 `requiredForeshadows`，无法稳定输出精确 code。
-- 已把 `requiredForeshadows`、`requiredHooks` 和完成条件传给 narrative extractor，并要求命中时逐字保留契约 code。
-- v3 需要明天恢复后用新逻辑重新抽取验证。
-
-## 4. 真实模型调用记录
-
-截至停止点，该正式项目共有：
-
-- ModelRun：42 次
-- succeeded：35
-- failed：5（包含被安全拒绝的截断调用）
-- interrupted：2
-- 成功调用 Token 合计：191,978
-- 系统估算费用合计：0.124352（按 Provider 配置价格计算；不在本文假定币种）
-
-API Key 仅保存在 Windows Credential Manager，没有写入 Git、SQLite、日志或备份。用户曾在对话中粘贴过该 Key，完成验收后建议到 DeepSeek 控制台轮换。
-
-## 5. 测试状态
-
-已通过：
-
-```powershell
-uv run pytest tests/test_phase8_architecture.py -q
-# 7 passed
-
-uv run pytest tests/test_phase5.py::test_model_reviewer_retries_one_truncated_response_without_redrafting -q
-# passed
-
-uv run pytest tests/test_phase5.py::test_quality_accept_risk_and_revision_creates_new_draft `
-  tests/test_phase5.py::test_model_reviewer_retries_one_truncated_response_without_redrafting -q
-# 2 passed
-```
-
-最新全量运行：
+## 5. 最终测试结果
 
 ```text
-API：115 passed，1 failed，耗时 378.25s
+API：122 passed
+Web：3 files / 11 tests passed
+Build：passed
+Playwright：14 passed，覆盖 1440×1024 与 1280×800
+git diff --check：passed（仅 Windows LF/CRLF 提示）
 ```
 
-唯一失败来自测试假 Provider 的请求分类顺序：reviser 和 reviewer 都包含 `requiredOutput`，测试桩误把 reviser 当 reviewer，返回了空正文。测试桩已修正，失败用例与新回归用例随后均通过。因用户要求今晚停止，**修正后尚未再次跑 6 分钟 API 全量、Web test、build 与 e2e**；明天交付前必须补跑。
+已知非阻断项：
 
-## 6. 明天严格执行顺序
+- FastAPI TestClient 与 SQLite datetime adapter 存在上游 deprecation warning。
+- Vite 仍有现存 chunk-size warning；不影响当前本地试写，后续可做路由级拆包。
+- 第 5 章正文略超 3000 字，质量门将其保留为 warning，未出现 error/blocker。
 
-1. 确认 Git 工作区干净、API 未在后台自动运行。
-2. 启动 API，读取上述 run/job，确认仍为 `interrupted` 且可 `resume`。
-3. 调用现有 run 的 `/resume`；不得创建新 run。
-4. 验证直接复用 v3，不调用 `chinese_writer` 和 `reviser`，只重新执行未完成的抽取/质量阶段。
-5. 确认 narrative extraction 使用精确 `FOG-OLD-HOUSE-LETTER`。
-6. 若 v3 所有 error/blocker 清零，执行 guarded approve 和原子 commit；确认 `currentChapter=1`。
-7. 重启服务，确认第一章 commit、Canon、状态快照与费用记录恢复正确且没有重复调用。
-8. 先跑全量 API/Web/build/e2e；通过后再决定是否逐章生成第 2—5 章。
-9. 第 2—5 章必须一章一章验收，不得直接一次性放任 5 章付费运行。
+## 6. 安全与禁止事项
 
-## 7. 禁止事项
+- 不提交 `.data`、SQLite、真实正文、API Key、日志、备份 ZIP、测试临时数据库或生成导出文件。
+- 不修改或提交 `Story agent/` 与 `openclaw skill/` 两个参考目录。
+- 不绕过 Canon 锁定、revision、租约、两轮修订上限、质量门或原子提交。
+- 用户曾在对话中粘贴 DeepSeek Key；第八阶段验收完成后建议到 DeepSeek 控制台轮换该密钥。
+- 当前 PR 保持草稿状态，未经用户确认不合并 `main`。
 
-- 不修改 UI、CSS、设计令牌或视觉快照。
-- 不修改或提交 `Story agent/` 与 `openclaw skill/`。
-- 不提交 `.data`、SQLite、真实正文、API Key、日志或备份 ZIP。
-- 不绕过两轮修订上限、revision、租约、质量门或原子提交。
-- 不合并 `main`，直到第一章正式提交、重启恢复和全量测试通过。
-- 不推进导出、外部发布、短篇、短剧或 EXE 打包。
+## 7. 下一阶段
+
+第九阶段方案已写入 `docs/plans/PHASE-9-EXPORT-PUBLISHING.md`，目标是从 current official `ChapterCommit` 生成可审计的 TXT、Markdown、DOCX 和 EPUB，不直接登录或发布到番茄等外部平台。
+
+开始第九阶段前应先：
+
+1. 用户在 Canon、规划、章节工作台、质量中心和自动托管页面检查第八阶段体验。
+2. 用户阅读第 1—5 章并把问题分类为系统 Bug、模型提示问题、故事质量问题或设定缺失。
+3. 修复阻断性问题后再合并 PR #8；从最新 `main` 创建第九阶段分支。
 
 ## 8. 本地恢复点
 
-原 Canon 恢复包仍在：
+Canon 生成前恢复包：
 
 ```text
 F:\Codex\story\.data\projects\1ffdb07d-d717-42cf-8456-30e1475b2859-story\backups\20260713-121449-7b76116e-ed8b-4de5-b7d2-3a9932f3ae0e.zip
 ```
 
-今晚新增 Canon、规划与第一章候选均在当前项目 SQLite 中；Git 只保存代码、测试和交接记录。
+第 1—5 章的最新权威数据在当前项目 `story.db` 中；Git 只保存代码、测试、方案和交接记录。

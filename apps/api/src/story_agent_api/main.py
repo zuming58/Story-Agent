@@ -53,6 +53,7 @@ from .schemas import (
     ChapterDraftOut,
     ChapterJobCreate,
     ChapterJobOut,
+    ChapterQualityRevalidate,
     ChapterJobRetry,
     ChapterJobRun,
     ChapterRevisionRequest,
@@ -359,6 +360,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def retry_chapter_job(project_id: str, job_id: str, payload: ChapterJobRetry, request: Request) -> object:
         return service.phase5.retry_chapter_job(project_id, job_id, payload, request.state.request_id)
 
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/resume", response_model=ChapterJobOut)
+    def resume_chapter_job(project_id: str, job_id: str, request: Request) -> object:
+        return service.phase5.resume_chapter_job(project_id, job_id, request.state.request_id)
+
     @app.get("/api/v1/projects/{project_id}/chapters/{chapter_number}/drafts", response_model=list[ChapterDraftOut])
     def list_chapter_drafts(project_id: str, chapter_number: int) -> object:
         return service.phase5.list_chapter_drafts(project_id, chapter_number)
@@ -374,6 +379,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality", response_model=QualityReportOut)
     def get_chapter_quality(project_id: str, job_id: str) -> object:
         return service.phase5.get_quality_report(project_id, job_id)
+
+    @app.post("/api/v1/projects/{project_id}/chapter-jobs/{job_id}/quality/revalidate", response_model=ChapterJobOut)
+    def revalidate_chapter_quality(project_id: str, job_id: str, payload: ChapterQualityRevalidate, request: Request) -> object:
+        return service.phase5.revalidate_deterministic_quality(project_id, job_id, payload, request.state.request_id)
 
     @app.post("/api/v1/projects/{project_id}/quality-findings/{finding_id}/accept-risk", response_model=QualityFindingOut)
     def accept_quality_risk(project_id: str, finding_id: str, payload: QualityFindingAcceptRisk, request: Request) -> object:

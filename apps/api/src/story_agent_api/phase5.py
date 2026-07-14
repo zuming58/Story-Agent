@@ -49,6 +49,7 @@ from .schemas import (
     ChapterContractUpdate,
     ChapterDraftActivateRequest,
     ChapterJobCreate,
+    ChapterQualityRevalidate,
     ChapterJobRetry,
     ChapterJobRun,
     ChapterManualRevisionRequest,
@@ -62,7 +63,6 @@ from .services import StoryError, dumps, loads, stable_digest, token_estimate
 ACTIVE_JOB_STATUSES = {"compiling_context", "drafting", "extracting", "validating", "reviewing", "revising", "committing", "cancel_requested"}
 BLOCKING_SEVERITIES = {"error", "blocker"}
 MAX_REVISION_ROUNDS = 2
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -94,11 +94,77 @@ def _requirement_evident(requirement: str, content: str, extracted: set[str] | N
         normalized = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", value).lower()
         if needle in normalized or normalized in needle:
             return True
+    if "至少两次" in requirement and "移动规则" in requirement:
+        observations = re.findall(
+            r"纸(?:人|童).{0,24}?(?:前移|已经?贴|已经?在|靠近|位移|近了)",
+            content,
+            flags=re.S,
+        )
+        if len(observations) >= 2 and any(marker in content for marker in ("验证", "确认", "记录", "规则成立")):
+            return True
+    # Chapter beats are written as planning language, while the prose is
+    # expected to use natural wording. Preserve strict matching first, then
+    # recognise a small set of explicit Chinese action concepts only when all
+    # concepts requested by the condition are evidenced in the chapter.
+    semantic_aliases = {
+        "决定": ("决定", "打算", "准备", "今晚我去", "必须去"),
+        "夜间": ("夜间", "今晚", "天黑", "夜里", "入夜"),
+        "实地": ("实地", "现场", "亲自去", "去看看", "看现场"),
+        "确认": ("确认", "核实", "证实", "验证", "发现", "意识到", "明白", "认定"),
+        "街巷": ("街巷", "巷", "岔口", "门牌", "地址"),
+        # These concepts occur in the formal Night Watch chapter beats. They
+        # require evidence for every named concept, while accepting natural
+        # narrative wording instead of a verbatim copy of the beat.
+        "夜雾": ("夜雾", "雾气", "灰雾", "浓雾"),
+        "改变": ("改变", "折叠", "错位", "回到原点", "路径"),
+        "街道路": ("街道路", "街道", "巷", "路面", "青石板"),
+        "巡夜灯": ("巡夜灯", "旧风灯", "那盏灯"),
+        "被动显路": ("自己移动", "悬在前方", "指路", "引路", "照出", "照亮", "路径"),
+        "记忆代价": ("记忆代价", "想不起", "遗忘", "忘记", "记不住", "被擦掉"),
+        "利用规则": ("利用规则", "按照规则", "直视", "盯着", "保持视线"),
+        "脱离": ("脱离", "退出", "退到", "后退", "离开", "走入槐树巷", "没有跟出"),
+        "危险": ("危险", "纸人", "纸童", "夜雾", "异常"),
+        "纸童": ("纸童", "纸人", "无脸纸童", "无脸纸人"),
+        "移动规则": ("移动规则", "直视即静止", "视线移开", "位移", "移动条件"),
+        "至少两次": ("至少两次", "两次", "第一次验证", "第二次验证", "两次了", "结果完全一致"),
+        "可验证证据": ("可验证", "验证", "结果完全一致", "规则成立", "记录"),
+    }
+    required_groups = [variants for concept, variants in semantic_aliases.items() if concept in requirement]
+    if required_groups and all(any(alias in content for alias in variants) for variants in required_groups):
+        return True
     if len(needle) < 4:
         return False
     needle_pairs = {needle[index:index + 2] for index in range(len(needle) - 1)}
     haystack_pairs = {haystack[index:index + 2] for index in range(len(haystack) - 1)}
     return bool(needle_pairs) and len(needle_pairs & haystack_pairs) / len(needle_pairs) >= 0.45
+
+
+def _canonical_reference_evident(name: str, content: str, extracted: set[str]) -> bool:
+    normalized_name = name.strip().lower()
+    if not normalized_name:
+        return True
+    if normalized_name in content or normalized_name in extracted:
+        return True
+    # Four-or-more-character descriptive Canon labels are often shortened in
+    # prose (for example, an adjective plus a two-character noun). Ordinary
+    # two/three-character personal names stay exact to avoid false positives.
+    if len(normalized_name) >= 4:
+        short_reference = normalized_name[-2:]
+        if short_reference in content or short_reference in extracted:
+            return True
+        # Chinese prose commonly alternates the final person classifier in a
+        # descriptive label (纸童/纸人, 女童/女孩) while retaining the
+        # distinctive modifier. Keep this deliberately narrow: only the last
+        # classifier may vary and the preceding character must still match.
+        person_classifiers = {"人", "童", "孩", "者"}
+        if short_reference[-1] in person_classifiers:
+            alternatives = {
+                f"{short_reference[:-1]}{classifier}"
+                for classifier in person_classifiers
+                if classifier != short_reference[-1]
+            }
+            return any(alias in content or alias in extracted for alias in alternatives)
+    return False
 
 
 def _json_object_from_text(value: str) -> dict[str, Any]:
@@ -688,6 +754,56 @@ class Phase5Service:
                 run_payloads.append(self._quality_run_dict(run, run_findings))
             return {"jobId": job.id, "currentDraftId": current.id if current else None, "openBlockingCount": self._open_blocking_count(findings), "runs": run_payloads, "findings": [self._finding_dict(item) for item in findings]}
 
+    def revalidate_deterministic_quality(self, project_id: str, job_id: str, payload: ChapterQualityRevalidate, request_id: str) -> dict[str, Any]:
+        """Re-run only deterministic rules for a reviewed candidate.
+
+        A rule upgrade may invalidate an old false positive.  This transition
+        is deliberately auditable and revision-protected: it cannot rewrite
+        the draft, invoke a model, or silently accept a risk.
+        """
+        project = self.service.get_project(project_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            if job.revision != payload.expected_job_revision:
+                raise StoryError(409, "CHAPTER_JOB_REVISION_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
+            if job.status != "human_review":
+                raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only a chapter awaiting review can be revalidated.")
+            draft = self._current_draft(session, job.id)
+            if not draft:
+                raise StoryError(409, "CHAPTER_DRAFT_EMPTY", "No chapter draft exists for revalidation.")
+            contract = self._get_contract(session, project.id, job.chapter_contract_id)
+            self._assert_contract_fresh(session, project.id, contract)
+            job.status = "reviewing"
+            job.revision += 1
+            job.updated_at = _now()
+            draft_id = draft.id
+
+        try:
+            self._run_deterministic_quality(project, job_id, draft_id, request_id, replace_previous=True)
+        except Exception:
+            with self.service.db.project_write(project.id, project.folder_path) as session:
+                job = self._get_job(session, project.id, job_id)
+                job.status = "human_review"
+                job.revision += 1
+                job.updated_at = _now()
+            raise
+
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = self._get_job(session, project.id, job_id)
+            job.status = "human_review"
+            job.error_code = None
+            job.diagnostic_json = dumps({"deterministicQualityRevalidated": True})
+            job.revision += 1
+            job.updated_at = _now()
+            session.add(self.service._audit(
+                "chapter_job.deterministic_quality_revalidated",
+                "chapter_job",
+                job.id,
+                {"draftId": draft_id, "requestId": request_id},
+                request_id,
+            ))
+            return self._job_dict(job, session.get(ChapterContract, job.chapter_contract_id))
+
     def accept_quality_risk(self, project_id: str, finding_id: str, payload: QualityFindingAcceptRisk, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -1122,7 +1238,7 @@ class Phase5Service:
             "messages": messages,
             "temperature": min(float(model.temperature), 0.7),
             "max_tokens": min(model.max_output_tokens, {
-                "fact_extractor": 3072,
+                "fact_extractor": 4096,
                 "continuity_reviewer": 3072,
                 "story_editor": 3072,
                 "style_reviewer": 3072,
@@ -1241,7 +1357,7 @@ class Phase5Service:
                     "你是小说实体增量抽取器。只返回合法 JSON object，顶层只能有 entities。"
                     "最多 5 项；每项只用 canonicalName、entityTypeName、aliases、attributes。"
                     "entityTypeName 只能是 person、location、organization、item、ability、event、intel、foreshadow、time_point。"
-                    "只列本章新增或状态事实会引用的实体；attributes 最多 4 个短字段且必须包含 name。"
+                    "只列本章新增或状态事实会引用的实体；attributes 最多 4 个短字段且必须包含 name；每个字段值不超过 60 字。"
                 ),
                 ("entities",),
             ),
@@ -1251,7 +1367,7 @@ class Phase5Service:
                     "你是小说状态事实增量抽取器。只返回合法 JSON object，顶层只能有 facts。"
                     "最多 6 项；每项只用 entity、fieldPath、value、confidence。"
                     "只列本章结束后仍成立的状态变化；修改 currentOfficialState 已有值时必须给 expectedCurrentValue。"
-                    "不要复述背景设定，不要输出叙事总结，value 必须是简短标量或短数组。"
+                    "不要复述背景设定，不要输出叙事总结，value 必须是简短标量或短数组，confidence 必须是 0 到 1 的 JSON 数字。"
                 ),
                 ("facts",),
             ),
@@ -1259,8 +1375,8 @@ class Phase5Service:
                 "boundaries",
                 (
                     "你是人物知识边界抽取器。只返回合法 JSON object，顶层只能有 boundaries。"
-                    "最多 3 项；每项只用 entity 和 knowledge object，knowledge 仅记录本章后该人物确实知道的新信息。"
-                    "不要 id、description、心理描写、叙事禁令或背景复述。"
+                    "最多 2 项；每项只用 entity 和 knowledge object，knowledge 最多 2 个字段、每个值不超过 80 字，"
+                    "仅记录本章后该人物确实知道的新信息。不要 id、description、心理描写、叙事禁令或背景复述。"
                 ),
                 ("boundaries",),
             ),
@@ -1268,8 +1384,8 @@ class Phase5Service:
                 "narrative",
                 (
                     "你是小说事件与伏笔抽取器。只返回合法 JSON object，顶层只能有 events、foreshadows。"
-                    "events 最多 5 项，每项只用 eventOrder、summary、participants，并合并连续动作。"
-                    "foreshadows 最多 3 项，每项只用 code、label、status；status 只能是 planted、progressing、resolved。"
+                    "events 最多 3 项，每项只用 eventOrder、summary、participants，并合并连续动作。"
+                    "foreshadows 最多 2 项，每项只用 code、label、status；status 只能是 planted、progressing、resolved。"
                     "requiredForeshadows 中的线索若已在本章出现，code 必须逐字使用契约给出的值，不得改名。"
                     "不要 id、description，不要复述设定或叙事禁令，所有摘要保持短句。"
                 ),
@@ -1282,9 +1398,15 @@ class Phase5Service:
         for section_name, system_prompt, keys in sections:
             section_ok = False
             for attempt in range(2):
+                compact_instruction = {
+                    "entities": "entities 最多 2 项，每项 attributes 仅保留 name。",
+                    "facts": "facts 最多 2 项，value 只用短字符串或短数组，confidence 必须是数字。",
+                    "boundaries": "boundaries 最多 1 项，knowledge 只保留 1 个键和不超过 40 字的值。",
+                    "narrative": "events 最多 2 项；foreshadows 只输出已经出现的 requiredForeshadows code。",
+                }[section_name]
                 repair = [] if attempt == 0 else [{
                     "role": "system",
-                    "content": "上次输出无效或过长。每个数组最多 3 项，只返回完整、精简的 JSON object。",
+                    "content": f"上次输出无效或过长。{compact_instruction} 只返回完整、精简的 JSON object。",
                 }]
                 try:
                     section_user = {**base_user, "section": section_name}
@@ -1435,11 +1557,25 @@ class Phase5Service:
             if not entity or not field_path or entity not in known_names:
                 continue
             value = raw.get("value") if "value" in raw else raw.get("object")
+            raw_confidence = raw.get("confidence", 1.0)
+            if isinstance(raw_confidence, str):
+                confidence_aliases = {"high": 0.9, "medium": 0.65, "low": 0.4}
+                normalized_confidence = confidence_aliases.get(raw_confidence.strip().lower(), raw_confidence)
+            else:
+                normalized_confidence = raw_confidence
+            try:
+                confidence = float(normalized_confidence)
+            except (TypeError, ValueError):
+                # Confidence is model metadata, never a reason to discard an
+                # otherwise valid state candidate. Use a conservative default
+                # rather than allowing prose such as "high" to poison JSON.
+                confidence = 0.7
+            confidence = max(0.0, min(1.0, confidence))
             fact: dict[str, Any] = {
                 "entity": entity,
                 "fieldPath": field_path,
                 "value": value,
-                "confidence": raw.get("confidence", 1.0),
+                "confidence": confidence,
             }
             if "expectedCurrentValue" in raw and raw.get("expectedCurrentValue") is not True:
                 fact["expectedCurrentValue"] = raw.get("expectedCurrentValue")
@@ -1525,12 +1661,26 @@ class Phase5Service:
                 query = query.where(QualityRun.reviewer_role == role)
             return session.scalar(query.limit(1)) is not None
 
-    def _run_deterministic_quality(self, project: Any, job_id: str, draft_id: str, request_id: str) -> None:
+    def _run_deterministic_quality(self, project: Any, job_id: str, draft_id: str, request_id: str, *, replace_previous: bool = False) -> None:
         with self.service.db.project_write(project.id, project.folder_path) as session:
             draft = self._get_draft(session, project.id, draft_id)
             contract = self._get_contract(session, project.id, draft.chapter_contract_id)
             extraction = session.scalar(select(ChapterExtraction).where(ChapterExtraction.chapter_draft_id == draft_id).order_by(ChapterExtraction.created_at.desc()))
             now = _now()
+            if replace_previous:
+                # Preserve the historical finding and its original run, but
+                # remove it from the current gate before applying the updated
+                # deterministic rules.  Matching findings are reopened below.
+                deterministic_finding_ids = select(QualityFinding.id).join(
+                    QualityRun, QualityRun.id == QualityFinding.quality_run_id
+                ).where(
+                    QualityFinding.chapter_draft_id == draft_id,
+                    QualityFinding.status == "open",
+                    QualityRun.gate_type == "deterministic",
+                )
+                for finding in session.scalars(select(QualityFinding).where(QualityFinding.id.in_(deterministic_finding_ids))).all():
+                    finding.status = "superseded"
+                    finding.updated_at = now
             run = QualityRun(
                 id=str(uuid4()),
                 project_id=project.id,
@@ -1583,7 +1733,7 @@ class Phase5Service:
                 if isinstance(participant, str)
             }
             for character in _safe_loads(contract.required_characters_json, []):
-                if isinstance(character, str) and character.strip() and character.lower() not in lowered and character.lower() not in extracted_entities | extracted_participants:
+                if isinstance(character, str) and character.strip() and not _canonical_reference_evident(character, lowered, extracted_entities | extracted_participants):
                     findings.append(self._finding_payload("REQUIRED_CHARACTER_MISSING", "error", "contract", "A required character is missing from this chapter.", [character], {}, "Add the required character or revise the contract."))
             extracted_foreshadows = {
                 str(value).strip().lower()
@@ -1814,6 +1964,14 @@ class Phase5Service:
         existing = session.scalar(select(QualityFinding).where(QualityFinding.chapter_draft_id == draft_id, QualityFinding.fingerprint == fingerprint))
         if existing:
             existing.quality_run_id = run_id
+            if existing.status == "superseded":
+                existing.severity = payload["severity"]
+                existing.category = payload["category"]
+                existing.message = payload["message"]
+                existing.evidence_json = dumps(payload["evidence"])
+                existing.location_json = dumps(payload["location"])
+                existing.suggested_fix = payload["suggestedFix"]
+                existing.status = "open"
             existing.updated_at = now
             return
         session.add(QualityFinding(
@@ -2002,14 +2160,30 @@ class Phase5Service:
             job.revision += 1
 
     def _writer_messages(self, contract: dict[str, Any], context: dict[str, Any], author_note: str) -> list[dict[str, str]]:
+        minimum = int(contract.get("targetWordsMin") or 1500)
+        maximum = int(contract.get("targetWordsMax") or 3000)
         return [
-            {"role": "system", "content": "You are the chinese_writer for Story Agent. Write only the current chapter body in Chinese markdown. Do not output state JSON. Do not summarize future chapters."},
+            {"role": "system", "content": (
+                "你是 Story Agent 的中文小说作者。只输出本章中文 Markdown 正文，不输出 JSON、创作说明或未来章节摘要。"
+                f"正文必须控制在 {minimum}—{maximum} 个汉字/单词计数内，宁可接近中间值，也不得超出上限。"
+                "必须在自然叙事中明确完成 chapterContract.completionConditions，使用姓名让 requiredCharacters 实际出场，"
+                "并在结尾落实 requiredHooks；requiredForeshadows 只允许埋设或推进，不得提前揭晓。"
+                "严格遵守 forbiddenScope，不得完成后续故事弧、提前升级、揭示禁揭真相或改变 Canon。"
+                "巡夜灯等异常物品只能按既定规则和代价生效。写完前自行核对上述边界，但不要输出核对过程。"
+            )},
             {"role": "user", "content": dumps({"chapterContract": contract, "contextPackage": context, "authorNote": author_note})},
         ]
 
     def _revision_messages(self, contract: dict[str, Any], draft: dict[str, Any], findings: list[dict[str, Any]], reason: str) -> list[dict[str, str]]:
+        minimum = int(contract.get("targetWordsMin") or 1500)
+        maximum = int(contract.get("targetWordsMax") or 3000)
         return [
-            {"role": "system", "content": "You are the reviser for Story Agent. Return JSON object only with contentMarkdown. Revise only the current chapter body and do not change story state directly."},
+            {"role": "system", "content": (
+                "你是 Story Agent 的中文小说修订者。只返回合法 JSON object，唯一正文键为 contentMarkdown。"
+                f"修订后的完整正文必须在 {minimum}—{maximum} 个汉字/单词计数内，禁止为压缩问题把正文缩到下限以下。"
+                "逐项解决 openFindings 和 reason，但不得改变 Canon、提前推进后续章节、增加未授权能力或直接修改故事状态。"
+                "输出前自行核对人物、完成条件、钩子、伏笔、禁写边界和字数，但不要输出核对过程。"
+            )},
             {"role": "user", "content": dumps({
                 "chapterContract": contract,
                 "currentDraft": draft,

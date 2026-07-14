@@ -309,10 +309,12 @@ class StoryService:
         from .phase5 import Phase5Service
         from .phase7 import Phase7Service
         from .phase8 import Phase8Service
+        from .phase9 import Phase9Service
 
         self.phase5 = Phase5Service(self)
         self.phase7 = Phase7Service(self)
         self.phase8 = Phase8Service(self)
+        self.phase9 = Phase9Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -326,6 +328,7 @@ class StoryService:
         self.phase8.recover_interrupted_generations()
         self.phase5.recover_interrupted_jobs()
         self.phase7.recover_interrupted_automation()
+        self.phase9.recover_interrupted_exports()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -1250,6 +1253,11 @@ class StoryService:
                         "automation_run_items",
                         "automation_leases",
                         "automation_daily_reports",
+                        "export_profiles",
+                        "export_jobs",
+                        "export_job_chapters",
+                        "export_artifacts",
+                        "publication_records",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
@@ -1260,6 +1268,12 @@ class StoryService:
                     session.execute(text(
                         "UPDATE automation_runs SET policy_id = :new_id WHERE policy_id = :old_id"
                     ), {"new_id": restored.id, "old_id": old_id})
+                    # Export files are intentionally excluded from backups.
+                    # Preserve audit metadata in restored clones, but force
+                    # artifact rows into a non-downloadable missing state.
+                    session.execute(text(
+                        "UPDATE export_artifacts SET status = 'missing', relative_path = '', is_current = 0, revision = revision + 1 WHERE project_id = :new_id"
+                    ), {"new_id": restored.id})
                     # Lease rows are runtime ownership, not transferable
                     # authority. Keep them in the backup for auditability, but
                     # never let a restored clone inherit another process lease.

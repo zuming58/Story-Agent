@@ -903,6 +903,150 @@ class ChapterCommitOut(ApiModel):
     created_at: datetime
 
 
+class ExportProfileUpdate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    default_formats: list[Literal["txt", "markdown", "docx", "epub"]] | None = None
+    book_title: str | None = Field(default=None, max_length=240)
+    author_name: str | None = Field(default=None, max_length=160)
+    description: str | None = None
+    chapter_title_template: str | None = Field(default=None, min_length=1, max_length=160)
+    include_quality_summary: bool | None = None
+
+
+class ExportProfileOut(ApiModel):
+    project_id: str
+    default_formats: list[str]
+    book_title: str
+    author_name: str
+    description: str
+    chapter_title_template: str
+    include_quality_summary: bool
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExportReadinessRequest(ApiModel):
+    mode: Literal["formal", "review"] = "formal"
+    chapter_start: int = Field(ge=1, le=5000)
+    chapter_end: int = Field(ge=1, le=5000)
+    formats: list[Literal["txt", "markdown", "docx", "epub"]] | None = None
+
+
+class ExportIssue(ApiModel):
+    code: str
+    severity: Literal["blocker", "warning"] = "blocker"
+    chapter_number: int | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    suggestion: str = ""
+
+
+class ExportReadinessOut(ApiModel):
+    ready: bool
+    mode: str
+    chapter_start: int
+    chapter_end: int
+    exportable_chapter_count: int
+    formats: list[str]
+    estimated_file_names: dict[str, str]
+    issues: list[ExportIssue] = Field(default_factory=list)
+
+
+class ExportCreate(ApiModel):
+    mode: Literal["formal", "review"] = "formal"
+    chapter_start: int = Field(ge=1, le=5000)
+    chapter_end: int = Field(ge=1, le=5000)
+    formats: list[Literal["txt", "markdown", "docx", "epub"]] | None = None
+    idempotency_key: str | None = Field(default=None, max_length=120)
+
+
+class ExportArtifactOut(ApiModel):
+    id: str
+    project_id: str
+    export_job_id: str
+    format: str
+    file_name: str
+    mime_type: str
+    byte_size: int
+    sha256: str
+    status: str
+    is_current: bool
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExportJobChapterOut(ApiModel):
+    id: str
+    project_id: str
+    export_job_id: str
+    chapter_number: int
+    sequence_number: int
+    chapter_title: str
+    chapter_commit_id: str | None = None
+    approved_draft_id: str | None = None
+    source_version_id: str | None = None
+    state_snapshot_id: str | None = None
+    commit_revision: int | None = None
+    source_revision: int | None = None
+    draft_revision: int | None = None
+    snapshot_revision: int | None = None
+    commit_checksum: str
+    draft_checksum: str
+    source_checksum: str
+    quality_summary: dict[str, Any]
+    issue_summary: list[dict[str, Any]]
+    missing: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExportJobOut(ApiModel):
+    id: str
+    project_id: str
+    mode: str
+    chapter_start: int
+    chapter_end: int
+    formats: list[str]
+    idempotency_key: str | None = None
+    status: str
+    frozen_manifest: dict[str, Any]
+    readiness: dict[str, Any]
+    stop_reason: str | None = None
+    diagnostic: dict[str, Any] | None = None
+    revision: int
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime
+    chapters: list[ExportJobChapterOut] = Field(default_factory=list)
+    artifacts: list[ExportArtifactOut] = Field(default_factory=list)
+
+
+class PublicationRecordCreate(ApiModel):
+    artifact_id: str
+    platform: str = Field(min_length=1, max_length=120)
+    external_work_ref: str = Field(default="", max_length=240)
+    external_chapter_ref: str = Field(default="", max_length=240)
+    published_at: datetime | None = None
+    notes: str = ""
+
+
+class PublicationRecordOut(ApiModel):
+    id: str
+    project_id: str
+    export_job_id: str
+    artifact_id: str
+    platform: str
+    external_work_ref: str
+    external_chapter_ref: str
+    published_at: datetime
+    notes: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class AutomationPolicyUpdate(ApiModel):
     expected_revision: int = Field(ge=1)
     enabled: bool

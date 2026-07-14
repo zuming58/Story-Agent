@@ -1,3 +1,75 @@
+# Story Agent 第九阶段：作品导出与发布准备交接
+
+更新时间：2026-07-14（Codex）
+
+当前分支：`agent/export-publishing-foundation`
+
+第九阶段开始基线：`dc1eeb8`（来自 `agent/trial-ready-workbench`，未合并 main）
+
+最新提交：以 `agent/export-publishing-foundation` 分支 HEAD 为准（交付回复会给出推送后的短 hash）。
+
+状态：**第九阶段后端已实现并通过 API 全量测试；等待 GPT-5.6 完整代码审计。**
+
+## 第九阶段完成内容
+
+- 新增项目数据库迁移 `0013_export_publishing_foundation`。
+- 新增数据表：`export_profiles`、`export_jobs`、`export_job_chapters`、`export_artifacts`、`publication_records`。
+- 新增 `Phase9Service`，从冻结的 current official `ChapterCommit` 渲染 TXT、Markdown、DOCX、EPUB。
+- 正式导出只允许 current official commit；审阅导出允许缺章，但只使用已有正式正文，并加入审阅水印与问题附录。
+- 导出冻结在短 SQLite 写事务内完成；TXT/Markdown/DOCX/EPUB 渲染在事务外执行；落盘前再次校验 commit/source/draft/snapshot revision 与 checksum。
+- 导出文件先写入 `exports/.tmp`，再原子 rename 到 `exports/{export_id}/`；失败、取消、漂移不登记可下载半成品。
+- 支持状态机：`queued`、`validating`、`rendering`、`completed`、`blocked`、`failed`、`cancel_requested`、`cancelled`、`interrupted`。
+- 服务启动时将遗留 `validating`/`rendering` 收敛为 `interrupted`，将 `cancel_requested` 收敛为 `cancelled`。
+- 恢复导出复用已冻结快照；源数据漂移返回 `EXPORT_SOURCE_REVISION_CONFLICT` 并阻止继续。
+- 备份保留导出元数据和 manifest，不包含 `exports/` 实体文件；恢复为新项目时 remap project ID，并将 artifacts 标为 `missing`、不可下载。
+- 下载只通过 artifact ID，校验 project/export 归属和路径 containment，防止路径穿越与跨作品下载。
+- publication record 仅记录用户手动确认的发布结果，不调用任何外部平台。
+- 未修改 `apps/web/**`、UI、CSS、设计令牌、Playwright 用例或视觉基线。
+
+## 第九阶段 API
+
+- `GET /api/v1/projects/{project_id}/exports/profile`
+- `PUT /api/v1/projects/{project_id}/exports/profile`
+- `POST /api/v1/projects/{project_id}/exports/readiness`
+- `POST /api/v1/projects/{project_id}/exports`
+- `GET /api/v1/projects/{project_id}/exports`
+- `GET /api/v1/projects/{project_id}/exports/{export_id}`
+- `POST /api/v1/projects/{project_id}/exports/{export_id}/cancel`
+- `POST /api/v1/projects/{project_id}/exports/{export_id}/resume`
+- `GET /api/v1/projects/{project_id}/exports/{export_id}/artifacts/{artifact_id}/download`
+- `POST /api/v1/projects/{project_id}/exports/{export_id}/publication-records`
+- `GET /api/v1/projects/{project_id}/publication-records`
+
+## 第九阶段导出就绪规则
+
+- `EXPORT_CHAPTER_GAP`
+- `EXPORT_COMMIT_NOT_CURRENT`
+- `EXPORT_QUALITY_BLOCKED`
+- `EXPORT_EXTRACTION_INVALID`
+- `EXPORT_STATE_REFERENCE_BROKEN`
+- `EXPORT_RETRIEVAL_STALE`
+- `EXPORT_AUTOMATION_ISOLATED`
+- `EXPORT_SOURCE_REVISION_CONFLICT`
+
+## 第九阶段测试结果
+
+```text
+Focused Phase 9 API: 6 passed
+Full API: 128 passed, 287 warnings
+Web unit: 3 files / 11 tests passed
+npm run test: passed
+Build: passed
+Playwright e2e: 14 passed
+```
+
+已知非阻断项：
+
+- FastAPI TestClient 与 SQLite datetime adapter 仍有上游 deprecation warning。
+- `npm run test` 需要约 7 分钟；请给审计环境设置足够超时时间。
+- 第九阶段仅实现后端导出/发布准备；没有开发外部平台发布、自动发布、短剧或第十阶段功能。
+
+---
+
 # Story Agent 第八阶段重制交接
 
 更新时间：2026-07-14（GPT-5.6）

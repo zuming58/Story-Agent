@@ -60,6 +60,12 @@ from .schemas import (
     ContextCompileRequest,
     ContextPackageOut,
     ContextTraceItemOut,
+    ExportCreate,
+    ExportJobOut,
+    ExportProfileOut,
+    ExportProfileUpdate,
+    ExportReadinessOut,
+    ExportReadinessRequest,
     ForeshadowOut,
     KnowledgeBoundaryOut,
     ModelConfigCreate,
@@ -82,6 +88,8 @@ from .schemas import (
     ProposalApply,
     ProposalReject,
     ProviderConnectionTestOut,
+    PublicationRecordCreate,
+    PublicationRecordOut,
     QualityFindingAcceptRisk,
     QualityFindingOut,
     QualityReportOut,
@@ -447,6 +455,51 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/projects/{project_id}/automation/runs/{run_id}/catch-up", response_model=AutomationRunOut)
     def catch_up_automation_run(project_id: str, run_id: str, request: Request) -> object:
         return service.phase7.catch_up_run(project_id, run_id, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/exports/profile", response_model=ExportProfileOut)
+    def get_export_profile(project_id: str) -> object:
+        return service.phase9.get_profile(project_id)
+
+    @app.put("/api/v1/projects/{project_id}/exports/profile", response_model=ExportProfileOut)
+    def update_export_profile(project_id: str, payload: ExportProfileUpdate) -> object:
+        return service.phase9.update_profile(project_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/exports/readiness", response_model=ExportReadinessOut)
+    def check_export_readiness(project_id: str, payload: ExportReadinessRequest) -> object:
+        return service.phase9.readiness(project_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/exports", response_model=ExportJobOut, status_code=201)
+    def create_export(project_id: str, payload: ExportCreate, request: Request) -> object:
+        return service.phase9.create_export(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/exports", response_model=list[ExportJobOut])
+    def list_exports(project_id: str) -> object:
+        return service.phase9.list_exports(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/exports/{export_id}", response_model=ExportJobOut)
+    def get_export(project_id: str, export_id: str) -> object:
+        return service.phase9.get_export(project_id, export_id)
+
+    @app.post("/api/v1/projects/{project_id}/exports/{export_id}/cancel", response_model=ExportJobOut)
+    def cancel_export(project_id: str, export_id: str, request: Request) -> object:
+        return service.phase9.cancel_export(project_id, export_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/exports/{export_id}/resume", response_model=ExportJobOut)
+    def resume_export(project_id: str, export_id: str, request: Request) -> object:
+        return service.phase9.resume_export(project_id, export_id, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/exports/{export_id}/artifacts/{artifact_id}/download")
+    def download_export_artifact(project_id: str, export_id: str, artifact_id: str) -> FileResponse:
+        path = service.phase9.artifact_path(project_id, export_id, artifact_id)
+        return FileResponse(path, filename=path.name)
+
+    @app.post("/api/v1/projects/{project_id}/exports/{export_id}/publication-records", response_model=PublicationRecordOut, status_code=201)
+    def create_publication_record(project_id: str, export_id: str, payload: PublicationRecordCreate, request: Request) -> object:
+        return service.phase9.create_publication_record(project_id, export_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/publication-records", response_model=list[PublicationRecordOut])
+    def list_publication_records(project_id: str) -> object:
+        return service.phase9.list_publication_records(project_id)
 
     @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
     def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:

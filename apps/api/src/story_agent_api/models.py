@@ -759,6 +759,127 @@ class ChapterCommit(ProjectBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ExportProfile(ProjectBase):
+    __tablename__ = "export_profiles"
+
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    default_formats_json: Mapped[str] = mapped_column(Text, default='["txt","markdown","docx","epub"]')
+    book_title: Mapped[str] = mapped_column(String(240), default="")
+    author_name: Mapped[str] = mapped_column(String(160), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    chapter_title_template: Mapped[str] = mapped_column(String(160), default="第{chapter}章 {title}")
+    include_quality_summary: Mapped[bool] = mapped_column(Boolean, default=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ExportJob(ProjectBase):
+    __tablename__ = "export_jobs"
+    __table_args__ = (
+        Index(
+            "uq_export_jobs_idempotency",
+            "project_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    mode: Mapped[str] = mapped_column(String(20), default="formal", index=True)
+    chapter_start: Mapped[int] = mapped_column(Integer)
+    chapter_end: Mapped[int] = mapped_column(Integer)
+    formats_json: Mapped[str] = mapped_column(Text, default="[]")
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    frozen_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    readiness_json: Mapped[str] = mapped_column(Text, default="{}")
+    stop_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ExportJobChapter(ProjectBase):
+    __tablename__ = "export_job_chapters"
+    __table_args__ = (Index("uq_export_job_chapters_job_chapter", "export_job_id", "chapter_number", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    export_job_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_number: Mapped[int] = mapped_column(Integer, index=True)
+    sequence_number: Mapped[int] = mapped_column(Integer)
+    chapter_title: Mapped[str] = mapped_column(String(240), default="")
+    chapter_commit_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    approved_draft_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    state_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    commit_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    draft_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    snapshot_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    commit_checksum: Mapped[str] = mapped_column(String(64), default="")
+    draft_checksum: Mapped[str] = mapped_column(String(64), default="")
+    source_checksum: Mapped[str] = mapped_column(String(64), default="")
+    quality_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    issue_summary_json: Mapped[str] = mapped_column(Text, default="[]")
+    content_markdown: Mapped[str] = mapped_column(Text, default="")
+    missing: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ExportArtifact(ProjectBase):
+    __tablename__ = "export_artifacts"
+    __table_args__ = (
+        Index(
+            "uq_export_artifacts_current",
+            "export_job_id",
+            "format",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    export_job_id: Mapped[str] = mapped_column(String(36), index=True)
+    format: Mapped[str] = mapped_column(String(20), index=True)
+    relative_path: Mapped[str] = mapped_column(Text, default="")
+    mime_type: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    file_name: Mapped[str] = mapped_column(String(240), default="")
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="available", index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PublicationRecord(ProjectBase):
+    __tablename__ = "publication_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    export_job_id: Mapped[str] = mapped_column(String(36), index=True)
+    artifact_id: Mapped[str] = mapped_column(String(36), index=True)
+    platform: Mapped[str] = mapped_column(String(120), index=True)
+    external_work_ref: Mapped[str] = mapped_column(String(240), default="")
+    external_chapter_ref: Mapped[str] = mapped_column(String(240), default="")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class AutomationPolicy(ProjectBase):
     __tablename__ = "automation_policies"
 

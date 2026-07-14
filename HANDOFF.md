@@ -6,9 +6,11 @@
 
 第九阶段开始基线：`dc1eeb8`（来自 `agent/trial-ready-workbench`，未合并 main）
 
-最新提交：以 `agent/export-publishing-foundation` 分支 HEAD 为准（交付回复会给出推送后的短 hash）。
+第九阶段审计提交：`b71d12c`
 
-状态：**第九阶段后端已由 GPT-5.6 完整审计、修复并通过全量验证；等待推送审计提交。**
+草稿 PR：[#7](https://github.com/zuming58/Story-Agent/pull/7)（叠加在尚未合并的 PR #8 之上）
+
+状态：**第九阶段后端已由 GPT-5.6 完整审计、修复、全量验证并推送；可作为第十阶段开发基线。**
 
 ## 第九阶段完成内容
 

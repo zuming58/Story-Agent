@@ -23,6 +23,13 @@ from .schemas import (
     AutomationDailyReportOut,
     AutomationRunCreate,
     AutomationRunOut,
+    AdaptationFindingOut,
+    AdaptationProposalAction,
+    AdaptationProposalOut,
+    AdaptationReadinessOut,
+    AdaptationWorkspaceCreate,
+    AdaptationWorkspaceOut,
+    AdaptationWorkspaceUpdate,
     CanonAnalyzeRequest,
     CanonChangeRequestCreate,
     CanonChangeRequestDecision,
@@ -75,6 +82,9 @@ from .schemas import (
     EnduranceSuiteCreate,
     EnduranceSuiteOut,
     EnduranceSuiteUpdate,
+    DramaEpisodeOut,
+    DramaOutlineProposalCreate,
+    DramaScriptVersionOut,
     ForeshadowOut,
     KnowledgeBoundaryOut,
     ModelConfigCreate,
@@ -105,6 +115,9 @@ from .schemas import (
     RetrievalHit,
     RetrievalQuery,
     RetrievalStatus,
+    ScriptProposalCreate,
+    ScriptVersionApprove,
+    ShortStoryProposalCreate,
     SourceVersionOut,
     SourceVersionSupersede,
     StateCandidateCommit,
@@ -557,6 +570,58 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}/report", response_model=EnduranceReportOut)
     def get_endurance_report(project_id: str, run_id: str) -> object:
         return service.phase10.get_report(project_id, run_id)
+
+    @app.post("/api/v1/projects/{project_id}/adaptation-workspaces", response_model=AdaptationWorkspaceOut, status_code=201)
+    def create_adaptation_workspace(project_id: str, payload: AdaptationWorkspaceCreate) -> object:
+        return service.phase11.create_workspace(project_id, payload)
+
+    @app.get("/api/v1/projects/{project_id}/adaptation-workspaces", response_model=list[AdaptationWorkspaceOut])
+    def list_adaptation_workspaces(project_id: str) -> object:
+        return service.phase11.list_workspaces(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}", response_model=AdaptationWorkspaceOut)
+    def get_adaptation_workspace(project_id: str, workspace_id: str) -> object:
+        return service.phase11.get_workspace(project_id, workspace_id)
+
+    @app.put("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}", response_model=AdaptationWorkspaceOut)
+    def update_adaptation_workspace(project_id: str, workspace_id: str, payload: AdaptationWorkspaceUpdate) -> object:
+        return service.phase11.update_workspace(project_id, workspace_id, payload)
+
+    @app.get("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/readiness", response_model=AdaptationReadinessOut)
+    def get_adaptation_readiness(project_id: str, workspace_id: str) -> object:
+        return service.phase11.readiness(project_id, workspace_id)
+
+    @app.post("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/short-story-proposals", response_model=AdaptationProposalOut, status_code=201)
+    def create_short_story_proposal(project_id: str, workspace_id: str, payload: ShortStoryProposalCreate, request: Request) -> object:
+        return service.phase11.create_short_story_proposal(project_id, workspace_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/adaptation-proposals/{proposal_id}/apply", response_model=AdaptationProposalOut)
+    def apply_adaptation_proposal(proposal_id: str, payload: AdaptationProposalAction, request: Request) -> object:
+        return service.phase11.apply_proposal(proposal_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/adaptation-proposals/{proposal_id}/reject", response_model=AdaptationProposalOut)
+    def reject_adaptation_proposal(proposal_id: str, payload: AdaptationProposalAction, request: Request) -> object:
+        return service.phase11.reject_proposal(proposal_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/drama-outline-proposals", response_model=AdaptationProposalOut, status_code=201)
+    def create_drama_outline_proposal(project_id: str, workspace_id: str, payload: DramaOutlineProposalCreate, request: Request) -> object:
+        return service.phase11.create_drama_outline_proposal(project_id, workspace_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/episodes", response_model=list[DramaEpisodeOut])
+    def list_drama_episodes(project_id: str, workspace_id: str) -> object:
+        return service.phase11.list_episodes(project_id, workspace_id)
+
+    @app.post("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/episodes/{episode_id}/script-proposals", response_model=AdaptationProposalOut, status_code=201)
+    def create_script_proposal(project_id: str, workspace_id: str, episode_id: str, payload: ScriptProposalCreate, request: Request) -> object:
+        return service.phase11.create_script_proposal(project_id, workspace_id, episode_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/script-versions/{version_id}/approve", response_model=DramaScriptVersionOut)
+    def approve_script_version(project_id: str, workspace_id: str, version_id: str, payload: ScriptVersionApprove, request: Request) -> object:
+        return service.phase11.approve_script_version(project_id, workspace_id, version_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/findings", response_model=list[AdaptationFindingOut])
+    def list_adaptation_findings(project_id: str, workspace_id: str) -> object:
+        return service.phase11.list_findings(project_id, workspace_id)
 
     @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
     def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:

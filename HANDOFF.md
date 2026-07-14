@@ -1,3 +1,156 @@
+# Story Agent 当前交接：第十一阶段审计完成，范围收敛为长篇与短篇小说
+
+更新时间：2026-07-14（GPT-5.6）
+
+当前分支：`agent/shortform-adaptation-foundation`
+
+准确审计基线：`agent/longform-endurance-foundation@b20b7e2`
+
+被审计提交：`2f94b1f`
+
+状态：**第十一阶段短篇策略后端已完成 GPT-5.6 审计与修复。短剧/短视频开发暂停；当前产品范围只保留长篇小说和短篇小说。**
+
+完整审计记录：`docs/plans/PHASE-11-AUDIT.md`。
+
+下一阶段方案：`docs/plans/PHASE-12-SHORT-STORY-PRODUCTION.md`。
+
+## 本轮 GPT-5.6 修复
+
+- 严格隔离短篇与短剧 workspace/proposal 类型。
+- 给幂等请求增加请求指纹，错误复用返回 409。
+- 模型调用前后及 proposal apply 时复核 workspace revision，禁止旧结果覆盖新目标。
+- finding 指纹加入 proposalId，拒绝提案同时关闭其 findings，防止重复坏提案绕过质量门或永久阻断。
+- 短篇 workspace 缺少 active/checksum-valid strategy 时不再显示 ready，也不能锁定。
+- 锁定/归档 workspace 进入只读状态。
+- source manifest 冻结完整 Plan、PlanNode、StoryMarker 与 current official commit/draft/source/snapshot 权威链。
+- 模型合法 JSON 中的错误字段类型转成确定性 findings，不再直接触发响应 500。
+- 新增 4 个专项回归场景，第十一阶段专项由 5 项增至 9 项。
+- 未修改 `apps/web/**`、UI、CSS、设计令牌或视觉快照。
+
+## 当前验证结果
+
+```text
+Phase 11 focused API: 9 passed
+Full API: 147 passed, 298 warnings
+Web unit: 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+Playwright e2e: 14 passed（1440×1024 与 1280×800）
+```
+
+## 当前能力判断
+
+- 长篇：Canon、1000 章分层规划、章节生产、质量复核、自动托管、导出和 5/10/20/30 章耐久监控基础已经具备；真实 20—30 章付费试写仍是上线前验收项。
+- 短篇：已经能生成、校验和保存短篇压缩策略，但还不能把策略独立生产成完整短篇正文。
+- 短剧/短视频：代码作为休眠基础保留，不继续开发，不作为当前完成度或验收目标。
+
+## 下一台电脑的唯一任务
+
+只实施 `docs/plans/PHASE-12-SHORT-STORY-PRODUCTION.md` 的后端部分：让短篇策略物化为独立 `short-form` 项目，并复用现有章节生产、质量门、自动托管和导出链路。禁止修改 UI；完成后推送分支并停止，等待 GPT-5.6 审计。
+
+---
+
+# 历史交接：第十一阶段原始实现记录
+
+更新时间：2026-07-14（Codex）
+
+当前分支：`agent/shortform-adaptation-foundation`
+
+准确开发基线：`agent/longform-endurance-foundation@b20b7e2`
+
+最新提交：交付分支 HEAD 为准（最终回复给出推送后的短 hash；提交 hash 无法在同一提交内自引用）。
+
+状态：**第十一阶段“短篇策略与短剧改编桥梁”的后端基础、数据库迁移、公共类型与 API 测试已完成；未开发 UI，等待 GPT-5.6 完整代码审计。**
+
+## 第十一阶段完成内容
+
+- 新增项目数据库迁移 `0015_shortform_adaptation_foundation`。
+- 新增数据表：
+  - `adaptation_workspaces`
+  - `short_story_strategies`
+  - `adaptation_proposals`
+  - `drama_episodes`
+  - `drama_scenes`
+  - `drama_script_versions`
+  - `adaptation_findings`
+- 新增 `Phase11Service`，负责短篇/短剧 workspace、source manifest 冻结、proposal 生成/接受/拒绝、短篇 strategy 落盘、短剧 episode/scene/script candidate、script approve 与 findings。
+- 新增模型角色绑定占位：
+  - `short_story_architect`
+  - `drama_adapter`
+  - `script_writer`
+  - `adaptation_reviewer`
+- Workspace 创建会冻结 locked Canon revision/checksum、可选 Plan revision/checksum、连续 current official chapter commit manifest，或 active short story strategy checksum。
+- Proposal 生成在短事务内冻结输入，模型调用在事务外执行；JSON 非法只允许一次 repair；保存前重新校验 source manifest 漂移。
+- 所有 apply/reject/approve/update 都携带 expected revision，并做 project/workspace/proposal/episode/script 归属校验。
+- 短篇 strategy apply 不覆盖 Canon、Plan 或正式 ChapterCommit；旧 active strategy 显式 supersede。
+- 短剧 outline apply 只生成 `drama_episodes` 与 `drama_scenes`；不生成分镜图、角色图、视频、配音或外部发布。
+- Script proposal 只生成 candidate `drama_script_versions`；approve 时同 episode 只允许一个 current approved，冲突返回 `DRAMA_APPROVAL_CONFLICT`。
+- 备份恢复会 remap adaptation JSON/manifest 中的 project ID，重算 strategy/episode/scene/script/finding checksum/fingerprint，并将 copied `generating` proposal 收敛为 `interrupted`。
+- 未修改 `apps/web/**`、UI、CSS、设计令牌、Playwright 用例或视觉快照。
+- 未调用真实 DeepSeek；Phase11 API 测试使用 monkeypatch 的确定性本地模型输出。
+
+## 第十一阶段 API
+
+- `POST /api/v1/projects/{project_id}/adaptation-workspaces`
+- `GET /api/v1/projects/{project_id}/adaptation-workspaces`
+- `GET /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}`
+- `PUT /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}`
+- `GET /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/readiness`
+- `POST /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/short-story-proposals`
+- `POST /api/v1/adaptation-proposals/{proposal_id}/apply`
+- `POST /api/v1/adaptation-proposals/{proposal_id}/reject`
+- `POST /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/drama-outline-proposals`
+- `GET /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/episodes`
+- `POST /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/episodes/{episode_id}/script-proposals`
+- `POST /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/script-versions/{version_id}/approve`
+- `GET /api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/findings`
+
+## 第十一阶段确定性规则
+
+- `ADAPTATION_SOURCE_DRIFT`
+- `ADAPTATION_CANON_DEVIATION_UNDECLARED`
+- `SHORTFORM_EVENT_BUDGET_OVERFLOW`
+- `SHORTFORM_FORESHADOW_DROPPED`
+- `DRAMA_EPISODE_DURATION_OUT_OF_RANGE`
+- `DRAMA_SCENE_DURATION_OVERFLOW`
+- `DRAMA_CHARACTER_KNOWLEDGE_LEAK`
+- `DRAMA_ABILITY_RULE_BREACH`
+- `DRAMA_OPENING_HOOK_MISSING`
+- `DRAMA_ENDING_CLIFFHANGER_MISSING`
+- `DRAMA_DIALOGUE_WITHOUT_SOURCE_OR_PURPOSE`
+- `DRAMA_APPROVAL_CONFLICT`
+
+严重度支持 `info|warning|error|blocker`；open error/blocker 会阻断 proposal apply、workspace lock 或 script approve。
+
+## 第十一阶段测试结果
+
+```text
+Phase 11 focused API: 5 passed
+Full API + Web via npm run test: API 143 passed, 298 warnings; Web 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+Playwright e2e: 14 passed（1440×1024 与 1280×800）
+```
+
+## 已知限制与下一步
+
+- 本阶段只提供后端基础和 API；没有新增 UI。
+- 未调用真实 DeepSeek；真实短篇/短剧 proposal 生成需要用户配置新模型角色后再由后续审计确认。
+- 当前短篇/短剧规则为后端基础确定性检查，不包含完整多角色审稿或真实剧本质量模型评审。
+- 未实现短篇正文生成、分镜图、人物图、视频、配音、外部发布、EXE 或任何媒体资产链路。
+- FastAPI TestClient 与 SQLite datetime adapter 仍有既有上游 deprecation warning。
+- Vite 仍有既有 chunk-size warning。
+
+## 当前交给 GPT-5.6 的任务
+
+请对 `agent/shortform-adaptation-foundation` 做完整代码审计，重点检查：
+
+1. source manifest 冻结、漂移阻断与备份恢复 remap 是否完整；
+2. workspace/proposal/episode/script 的跨作品归属校验是否有遗漏；
+3. expected revision、事务边界和 proposal apply/approve 回滚语义是否足够严格；
+4. 短篇 strategy 和短剧 script candidate 是否可能反向污染 Canon、Plan 或正式 ChapterCommit；
+5. 新增 API 测试是否覆盖足够真实的 Phase11 风险。
+
+---
+
 # Story Agent 第十阶段：长篇中程耐久测试与漂移监控交接
 
 更新时间：2026-07-14（Codex）

@@ -264,6 +264,10 @@ MODEL_ROLES = [
     "style_reviewer",
     "reviser",
     "embedding",
+    "short_story_architect",
+    "drama_adapter",
+    "script_writer",
+    "adaptation_reviewer",
 ]
 
 STRUCTURED_ACTIONS = {"replan", "logic_check", "complete_dependencies"}
@@ -328,12 +332,14 @@ class StoryService:
         from .phase8 import Phase8Service
         from .phase9 import Phase9Service
         from .phase10 import Phase10Service
+        from .phase11 import Phase11Service
 
         self.phase5 = Phase5Service(self)
         self.phase7 = Phase7Service(self)
         self.phase8 = Phase8Service(self)
         self.phase9 = Phase9Service(self)
         self.phase10 = Phase10Service(self)
+        self.phase11 = Phase11Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -349,6 +355,7 @@ class StoryService:
         self.phase7.recover_interrupted_automation()
         self.phase9.recover_interrupted_exports()
         self.phase10.recover_interrupted_endurance()
+        self.phase11.recover_interrupted_adaptations()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -1286,6 +1293,13 @@ class StoryService:
                         "endurance_checkpoints",
                         "endurance_findings",
                         "endurance_reports",
+                        "adaptation_workspaces",
+                        "short_story_strategies",
+                        "adaptation_proposals",
+                        "drama_episodes",
+                        "drama_scenes",
+                        "drama_script_versions",
+                        "adaptation_findings",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
@@ -1333,6 +1347,7 @@ class StoryService:
                 self.phase7.reconcile_orphaned_automation()
                 self._repair_restored_export_metadata(restored, old_id)
                 self._repair_restored_endurance_metadata(restored, old_id)
+                self.phase11.repair_restored_metadata(restored.id, restored.folder_path, old_id)
                 return restored
             except Exception:
                 if restored is not None:

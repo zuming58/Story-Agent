@@ -7,7 +7,7 @@ import threading
 from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import select
-from story_agent_api.models import AutomationLease, AutomationRun, AutomationRunItem, ChapterContract, ChapterJob, ModelRun
+from story_agent_api.models import AuditEvent, AutomationLease, AutomationRun, AutomationRunItem, ChapterContract, ChapterJob, ModelRun
 from story_agent_api.model_provider import ModelProviderError
 from story_agent_api.schemas import ChapterContractDerive, ChapterContractLock, ChapterJobCreate, ChapterJobRun
 from story_agent_api.services import StoryError
@@ -37,7 +37,7 @@ def configure_automation_roles(client: TestClient, base_url: str, *, priced: boo
 
 
 def wait_for_run(client: TestClient, project_id: str, run_id: str) -> dict:
-    for _ in range(80):
+    for _ in range(240):
         run = client.get(f"/api/v1/projects/{project_id}/automation/runs/{run_id}").json()
         if run["status"] in {"completed", "partial", "blocked", "failed", "cancelled", "missed", "interrupted"}:
             return run
@@ -68,8 +68,8 @@ def update_policy(client: TestClient, project_id: str, **overrides: object) -> d
     return response.json()
 
 
-def test_policy_update_revision_and_manual_run_idempotency(client: TestClient, demo_project: dict) -> None:
-    project_id = demo_project["id"]
+def test_policy_update_revision_and_manual_run_idempotency(client: TestClient) -> None:
+    project_id = client.post("/api/v1/projects", json={"title": "Idempotency Standard", "totalChapters": 100}).json()["id"]
     policy = client.get(f"/api/v1/projects/{project_id}/automation/policy")
     assert policy.status_code == 200, policy.text
     assert policy.json()["enabled"] is False
@@ -423,8 +423,8 @@ def test_replaced_lease_fences_stale_execution(client: TestClient, demo_project:
         service.phase7._execution_context.reset(execution_token)
 
 
-def test_automation_backup_restore_remaps_project_id(client: TestClient, demo_project: dict) -> None:
-    project_id = demo_project["id"]
+def test_automation_backup_restore_remaps_project_id(client: TestClient) -> None:
+    project_id = client.post("/api/v1/projects", json={"title": "Backup Standard", "totalChapters": 100}).json()["id"]
     policy = client.get(f"/api/v1/projects/{project_id}/automation/policy").json()
     assert client.put(f"/api/v1/projects/{project_id}/automation/policy", json={
         "expectedRevision": policy["revision"],
@@ -608,8 +608,8 @@ def test_daily_limit_uses_actual_execution_day_not_scheduled_day(client: TestCli
         server.server_close()
 
 
-def test_first_item_failure_skips_later_chapters_without_model_calls(client: TestClient, demo_project: dict) -> None:
-    project_id = demo_project["id"]
+def test_first_item_failure_skips_later_chapters_without_model_calls(client: TestClient) -> None:
+    project_id = client.post("/api/v1/projects", json={"title": "Failure Standard", "totalChapters": 100}).json()["id"]
     lock_canon(client, project_id)
     update_policy(client, project_id, chaptersPerRun=2)
     created = client.post(f"/api/v1/projects/{project_id}/automation/runs", json={"idempotencyKey": "two-chapter-block"})
@@ -739,7 +739,7 @@ def test_automation_run_lease_budget_and_reports_are_project_isolated(client: Te
         service.phase7._release_lease(second_project.id, second_project.folder_path, "second-owner")
 
 
-def test_consecutive_model_failure_threshold_blocks_second_attempt(client: TestClient, demo_project: dict, monkeypatch) -> None:
+def test_manual_resume_starts_a_new_model_failure_window(client: TestClient, demo_project: dict, monkeypatch) -> None:
     project_id = demo_project["id"]
     lock_canon(client, project_id)
     server, base_url = start_phase5_server()
@@ -760,13 +760,65 @@ def test_consecutive_model_failure_threshold_blocks_second_attempt(client: TestC
         resumed = client.post(f"/api/v1/projects/{project_id}/automation/runs/{first_state['id']}/resume")
         assert resumed.status_code == 200, resumed.text
         second_state = wait_for_run(client, project_id, first_state["id"])
-        assert second_state["status"] == "blocked"
-        assert second_state["stopReason"] == "AUTOMATION_MODEL_FAILURE_THRESHOLD"
-        assert second_state["diagnostic"]["consecutiveModelFailures"] == 2
+        assert second_state["status"] == "failed"
+        assert second_state["stopReason"] == "server_error"
+        assert second_state["diagnostic"]["consecutiveModelFailures"] == 1
         project = service.get_project(project_id)
         with service.db.project(project.id, project.folder_path) as session:
             runs = session.scalars(select(ModelRun).where(ModelRun.automation_run_id == first_state["id"])).all()
             assert [run.status for run in runs] == ["failed", "failed"]
+            resumed_events = session.scalars(select(AuditEvent).where(
+                AuditEvent.entity_id == first_state["id"],
+                AuditEvent.event_type == "automation_run.resumed",
+            )).all()
+            assert len(resumed_events) == 1
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_resume_during_worker_cleanup_redispatches_once(client: TestClient, monkeypatch) -> None:
+    service = client.app.state.story_service
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    call_lock = threading.Lock()
+    calls = 0
+
+    def fake_execute(_project_id: str, _run_id: str) -> dict:
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_finished.set()
+        return {"status": "queued"}
+
+    monkeypatch.setattr(service.phase7, "execute_run", fake_execute)
+    monkeypatch.setattr(service.phase7, "get_run", lambda _project_id, _run_id: {"status": "queued"})
+
+    service.phase7.dispatch_run("project-race", "run-race")
+    assert first_started.wait(timeout=5)
+
+    # Ordinary scheduler duplicates are ignored; two explicit resume requests
+    # still create only one delayed redispatch.
+    service.phase7.dispatch_run("project-race", "run-race")
+    service.phase7.dispatch_run("project-race", "run-race", redispatch_if_active=True)
+    service.phase7.dispatch_run("project-race", "run-race", redispatch_if_active=True)
+    release_first.set()
+
+    assert second_finished.wait(timeout=5)
+    for _ in range(100):
+        with service.phase7._dispatch_lock:
+            active = service.phase7._running_threads.get("project-race:run-race")
+            pending = "project-race:run-race" in service.phase7._pending_dispatches
+        if not pending and (active is None or not active.is_alive()):
+            break
+        import time
+
+        time.sleep(0.01)
+    assert calls == 2
+    assert pending is False

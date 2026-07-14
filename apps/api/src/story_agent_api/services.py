@@ -55,6 +55,9 @@ from .models import (
     StoryEntity,
     StoryMarker,
     Foreshadow,
+    ExportArtifact,
+    ExportJob,
+    ExportJobChapter,
     KnowledgeBoundary,
     utc_now,
 )
@@ -81,6 +84,7 @@ from .schemas import (
     ModelProviderCreate,
     ModelProviderUpdate,
     ModelRoleBindingUpdate,
+    PlanNodeCreate,
     RetrievalHit,
     RetrievalQuery,
     RetrievalStatus,
@@ -161,6 +165,16 @@ def safe_json_loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except ValueError:
         return default
+
+
+def remap_json_identifier(value: Any, old_id: str, new_id: str) -> Any:
+    if isinstance(value, str):
+        return new_id if value == old_id else value
+    if isinstance(value, list):
+        return [remap_json_identifier(item, old_id, new_id) for item in value]
+    if isinstance(value, dict):
+        return {key: remap_json_identifier(item, old_id, new_id) for key, item in value.items()}
+    return value
 
 
 def json_schema_subset_valid(schema: Any, value: Any) -> bool:
@@ -307,9 +321,13 @@ class StoryService:
         self.phase4 = Phase4Service(self)
         from .phase5 import Phase5Service
         from .phase7 import Phase7Service
+        from .phase8 import Phase8Service
+        from .phase9 import Phase9Service
 
         self.phase5 = Phase5Service(self)
         self.phase7 = Phase7Service(self)
+        self.phase8 = Phase8Service(self)
+        self.phase9 = Phase9Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -317,11 +335,13 @@ class StoryService:
     def initialize(self) -> None:
         self._ensure_model_role_bindings()
         if self.settings.seed_demo and not self.list_projects():
-            self.create_project(ProjectCreate(title="夜巡人", mode="long-form", total_chapters=1000), seed_demo=True)
+            self.create_project(ProjectCreate(title="夜巡人·演示（从第36章开始）", mode="long-form", total_chapters=1000), seed_demo=True)
         self._recover_interrupted_model_runs()
         self.phase4.ensure_existing_projects()
+        self.phase8.recover_interrupted_generations()
         self.phase5.recover_interrupted_jobs()
         self.phase7.recover_interrupted_automation()
+        self.phase9.recover_interrupted_exports()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -408,6 +428,9 @@ class StoryService:
             if payload.api_key:
                 key_ref = provider.api_key_ref or f"model-provider:{provider.id}"
                 self._store_provider_secret(provider, key_ref, payload.api_key)
+            if changes or payload.clear_api_key or payload.api_key:
+                provider.last_test_status = None
+                provider.last_tested_at = None
             provider.updated_at = utc_now()
             session.commit()
             session.refresh(provider)
@@ -434,12 +457,22 @@ class StoryService:
                 ModelProvider.base_url == "https://api.deepseek.com",
             ))
             if existing:
-                has_current_model = session.scalar(select(ModelConfig.id).where(
+                current_model = session.scalar(select(ModelConfig).where(
                     ModelConfig.provider_id == existing.id,
                     ModelConfig.model_id == "deepseek-v4-pro",
                 ))
                 existing_id = existing.id
-                if has_current_model:
+                if current_model:
+                    changed = False
+                    if current_model.input_price_per_million is None:
+                        current_model.input_price_per_million = 0.435
+                        changed = True
+                    if current_model.output_price_per_million is None:
+                        current_model.output_price_per_million = 0.87
+                        changed = True
+                    if changed:
+                        current_model.updated_at = utc_now()
+                        session.commit()
                     return self._provider_dict(existing)
             else:
                 existing_id = None
@@ -451,6 +484,8 @@ class StoryService:
                 max_output_tokens=4096,
                 supports_reasoning=True,
                 is_enabled=True,
+                input_price_per_million=0.435,
+                output_price_per_million=0.87,
             ))
             return self.get_model_provider(existing_id)
         payload = ModelProviderCreate(name="DeepSeek 官方", base_url="https://api.deepseek.com", timeout_seconds=60, max_retries=1)
@@ -462,6 +497,8 @@ class StoryService:
             max_output_tokens=4096,
             supports_reasoning=True,
             is_enabled=True,
+            input_price_per_million=0.435,
+            output_price_per_million=0.87,
         ))
         return self.get_model_provider(provider["id"])
 
@@ -558,35 +595,45 @@ class StoryService:
             key_ref = provider.api_key_ref
             base_url = provider.base_url.rstrip("/")
             timeout_seconds = min(max(provider.timeout_seconds, 1), 5)
+
+        def finish(ok: bool, status: str, model: str | None, message: str) -> dict[str, Any]:
+            with self.db.catalog() as session:
+                current = session.get(ModelProvider, provider_id)
+                if current:
+                    current.last_test_status = status
+                    current.last_tested_at = utc_now()
+                    session.commit()
+            return self._connection_result(provider_data, ok, status, model, message)
+
         if not key_ref:
-            return self._connection_result(provider_data, False, "missing_api_key", None, "尚未保存 API Key。")
+            return finish(False, "missing_api_key", None, "尚未保存 API Key。")
         try:
             api_key = self.secret_store.get_secret(key_ref)
         except SecretStoreUnavailable:
-            return self._connection_result(provider_data, False, "credential_unavailable", None, "Credential Manager 不可用。")
+            return finish(False, "credential_unavailable", None, "Credential Manager 不可用。")
         if not api_key:
-            return self._connection_result(provider_data, False, "missing_api_key", None, "Credential Manager 中未找到密钥。")
+            return finish(False, "missing_api_key", None, "Credential Manager 中未找到密钥。")
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
                 response = client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
         except httpx.TimeoutException:
-            return self._connection_result(provider_data, False, "timeout", None, "连接测试超时。")
+            return finish(False, "timeout", None, "连接测试超时。")
         except httpx.RequestError:
-            return self._connection_result(provider_data, False, "network_error", None, "无法连接模型服务。")
+            return finish(False, "network_error", None, "无法连接模型服务。")
         if response.status_code in {401, 403}:
-            return self._connection_result(provider_data, False, "auth_failed", None, "模型服务拒绝鉴权。")
+            return finish(False, "auth_failed", None, "模型服务拒绝鉴权。")
         if response.status_code >= 400:
-            return self._connection_result(provider_data, False, "network_error", None, f"模型服务返回 HTTP {response.status_code}。")
+            return finish(False, "network_error", None, f"模型服务返回 HTTP {response.status_code}。")
         try:
             data = response.json()
         except ValueError:
-            return self._connection_result(provider_data, False, "invalid_response", None, "模型服务返回了非 JSON 响应。")
+            return finish(False, "invalid_response", None, "模型服务返回了非 JSON 响应。")
         models = data.get("data") if isinstance(data, dict) else None
         actual_model = None
         if isinstance(models, list) and models:
             first = models[0]
             actual_model = first.get("id") if isinstance(first, dict) else str(first)
-        return self._connection_result(provider_data, True, "success", actual_model, "连接测试成功。")
+        return finish(True, "success", actual_model, "连接测试成功。")
 
     def get_project(self, project_id: str, *, touch: bool = False) -> CatalogProject:
         with self.db.catalog() as session:
@@ -618,6 +665,7 @@ class StoryService:
             folder_path=str(folder),
             current_chapter=36 if seed_demo else 0,
             total_chapters=payload.total_chapters,
+            project_kind="demo" if seed_demo else "standard",
             created_at=now,
             updated_at=now,
             last_opened_at=now,
@@ -672,6 +720,7 @@ class StoryService:
             "mode": project.mode,
             "currentChapter": project.current_chapter,
             "totalChapters": project.total_chapters,
+            "projectKind": project.project_kind,
             "schemaVersion": project.schema_version,
         }
         (folder / "project.json").write_text(json.dumps(project_json, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -689,6 +738,7 @@ class StoryService:
             session.add(ProjectMeta(
                 id=project.id, title=project.title, mode=project.mode,
                 current_chapter=project.current_chapter, total_chapters=project.total_chapters,
+                project_kind=project.project_kind,
             ))
             session.add(Plan(
                 id=plan_id,
@@ -776,12 +826,53 @@ class StoryService:
                 raise StoryError(409, "REVISION_CONFLICT", "规划已被其他操作修改。", {"expectedRevision": payload.expected_revision, "currentRevision": node.revision})
             before = self._node_dict(node)
             changes = payload.model_dump(exclude_none=True, exclude={"expected_revision"})
-            json_fields = {"prerequisites": "prerequisites_json", "completion_conditions": "completion_conditions_json", "foreshadows": "foreshadows_json", "contracts": "contracts_json"}
+            json_fields = {
+                "prerequisites": "prerequisites_json",
+                "completion_conditions": "completion_conditions_json",
+                "foreshadows": "foreshadows_json",
+                "contracts": "contracts_json",
+                "chapter_beats": "chapter_beats_json",
+            }
             for key, value in changes.items():
+                if key == "chapter_beats":
+                    value = [beat.model_dump(by_alias=True) for beat in (payload.chapter_beats or [])]
                 setattr(node, json_fields.get(key, key), dumps(value) if key in json_fields else value)
             self._validate_node(node)
             node.revision += 1
             session.add(self._audit("plan_node.updated", "plan_node", node.id, {"before": before, "after": self._node_dict(node), "reversible": True}, request_id))
+            session.flush()
+            return self._node_dict(node)
+
+    def create_plan_node(self, project_id: str, payload: PlanNodeCreate, request_id: str) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        with self.db.project_write(project_id, project.folder_path) as session:
+            plan = session.scalar(select(Plan))
+            if not plan:
+                raise StoryError(404, "PLAN_NOT_FOUND", "作品规划不存在。")
+            node = PlanNode(
+                id=str(uuid4()),
+                plan_id=plan.id,
+                title=payload.title,
+                type=payload.type,
+                target_chapter=payload.target_chapter,
+                range_min=payload.range_min,
+                range_max=payload.range_max,
+                importance=payload.importance,
+                note=payload.note,
+                prerequisites_json=dumps(payload.prerequisites),
+                completion_conditions_json=dumps(payload.completion_conditions),
+                foreshadows_json=dumps(payload.foreshadows),
+                contracts_json=dumps(payload.contracts),
+                chapter_beats_json=dumps([beat.model_dump(by_alias=True) for beat in payload.chapter_beats]),
+                pace=payload.pace,
+                revision=1,
+            )
+            self._validate_node(node)
+            session.add(node)
+            session.add(self._audit("plan_node.created", "plan_node", node.id, {
+                "after": self._node_dict(node),
+                "reversible": False,
+            }, request_id))
             session.flush()
             return self._node_dict(node)
 
@@ -1103,6 +1194,7 @@ class StoryService:
                         shutil.copyfileobj(source, target)
             try:
                 source_json = json.loads((temp / "project.json").read_text(encoding="utf-8"))
+                source_project_id = str(source_json["id"])
                 source_title = str(source_json["title"])
                 source_mode = str(source_json["mode"])
                 source_total = int(source_json["totalChapters"])
@@ -1140,7 +1232,9 @@ class StoryService:
                     old_meta = session.scalar(select(ProjectMeta))
                     if not old_meta:
                         raise StoryError(422, "INVALID_BACKUP_DATABASE", "备份数据库缺少作品元数据。")
-                    old_id = old_meta.id
+                    old_id = source_project_id
+                    if old_meta.id != old_id:
+                        raise StoryError(422, "INVALID_BACKUP_DATABASE", "备份数据库与 project.json 的作品 ID 不一致。")
                     old_meta.id = restored.id
                     old_meta.title = restored.title
                     old_meta.mode = source_mode
@@ -1175,6 +1269,11 @@ class StoryService:
                         "automation_run_items",
                         "automation_leases",
                         "automation_daily_reports",
+                        "export_profiles",
+                        "export_jobs",
+                        "export_job_chapters",
+                        "export_artifacts",
+                        "publication_records",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
@@ -1185,6 +1284,12 @@ class StoryService:
                     session.execute(text(
                         "UPDATE automation_runs SET policy_id = :new_id WHERE policy_id = :old_id"
                     ), {"new_id": restored.id, "old_id": old_id})
+                    # Export files are intentionally excluded from backups.
+                    # Preserve audit metadata in restored clones, but force
+                    # artifact rows into a non-downloadable missing state.
+                    session.execute(text(
+                        "UPDATE export_artifacts SET status = 'missing', relative_path = '', is_current = 0, revision = revision + 1 WHERE project_id = :new_id"
+                    ), {"new_id": restored.id})
                     # Lease rows are runtime ownership, not transferable
                     # authority. Keep them in the backup for auditability, but
                     # never let a restored clone inherit another process lease.
@@ -1211,11 +1316,53 @@ class StoryService:
                 # With runtime leases cleared, active copied runs/jobs converge
                 # to interrupted and require an explicit resume in the clone.
                 self.phase7.reconcile_orphaned_automation()
+                self._repair_restored_export_metadata(restored, old_id)
                 return restored
             except Exception:
                 if restored is not None:
                     self._remove_failed_restore(restored)
                 raise
+
+    def _repair_restored_export_metadata(self, project: CatalogProject, source_project_id: str) -> None:
+        """Finalize project identity embedded in copied Phase 9 JSON payloads.
+
+        Bulk SQL remaps the relational scope during restore. This second short
+        transaction intentionally runs after the copied database transaction
+        has committed so ORM state or startup reconciliation cannot restore a
+        stale source project ID in an export manifest.
+        """
+        with self.db.project_write(project.id, project.folder_path) as session:
+            manifest_by_job: dict[str, dict[str, Any]] = {}
+            for export_job in session.scalars(select(ExportJob)).all():
+                export_job.project_id = project.id
+                export_job.readiness_json = dumps(remap_json_identifier(
+                    safe_json_loads(export_job.readiness_json, {}), source_project_id, project.id
+                ))
+                if export_job.diagnostic_json:
+                    export_job.diagnostic_json = dumps(remap_json_identifier(
+                        safe_json_loads(export_job.diagnostic_json, {}), source_project_id, project.id
+                    ))
+                manifest = safe_json_loads(export_job.frozen_manifest_json, {})
+                if isinstance(manifest, dict) and manifest:
+                    manifest = remap_json_identifier(manifest, source_project_id, project.id)
+                    manifest["projectId"] = project.id
+                    manifest.pop("manifestChecksum", None)
+                    manifest["manifestChecksum"] = stable_digest(manifest)
+                    export_job.frozen_manifest_json = dumps(manifest)
+                    manifest_by_job[export_job.id] = manifest
+            for artifact in session.scalars(select(ExportArtifact)).all():
+                artifact.project_id = project.id
+                manifest = manifest_by_job.get(artifact.export_job_id)
+                if manifest:
+                    artifact.manifest_json = dumps(manifest)
+            for chapter in session.scalars(select(ExportJobChapter)).all():
+                chapter.project_id = project.id
+                chapter.quality_summary_json = dumps(remap_json_identifier(
+                    safe_json_loads(chapter.quality_summary_json, {}), source_project_id, project.id
+                ))
+                chapter.issue_summary_json = dumps(remap_json_identifier(
+                    safe_json_loads(chapter.issue_summary_json, []), source_project_id, project.id
+                ))
 
     def _read_backup_manifest(self, archive: Path, *, require_checksums: bool) -> dict[str, Any]:
         if not zipfile.is_zipfile(archive):
@@ -1782,6 +1929,19 @@ class StoryService:
             raise StoryError(422, "TARGET_OUTSIDE_RANGE", "目标章节必须位于允许范围内。", {"targetChapter": node.target_chapter, "rangeMin": node.range_min, "rangeMax": node.range_max})
         if not loads(node.prerequisites_json) or not loads(node.completion_conditions_json):
             raise StoryError(422, "INCOMPLETE_MILESTONE_CONTRACT", "里程碑必须包含前置条件和完成条件。")
+        beats = loads(node.chapter_beats_json)
+        if not isinstance(beats, list):
+            raise StoryError(422, "INVALID_CHAPTER_BEATS", "章节节拍必须是列表。")
+        seen: set[int] = set()
+        for beat in beats:
+            if not isinstance(beat, dict):
+                raise StoryError(422, "INVALID_CHAPTER_BEATS", "章节节拍结构无效。")
+            chapter_number = beat.get("chapterNumber", beat.get("chapter_number"))
+            if not isinstance(chapter_number, int) or chapter_number < node.range_min or chapter_number > node.range_max:
+                raise StoryError(422, "CHAPTER_BEAT_OUTSIDE_RANGE", "章节节拍必须位于规划窗口内。", {"chapterNumber": chapter_number})
+            if chapter_number in seen:
+                raise StoryError(422, "DUPLICATE_CHAPTER_BEAT", "同一规划窗口不能包含重复章节节拍。", {"chapterNumber": chapter_number})
+            seen.add(chapter_number)
 
     def _apply_proposal_operation(self, node: PlanNode, operation: ChangeOperation) -> None:
         if operation.field not in PROPOSAL_FIELD_MAP:
@@ -1804,12 +1964,29 @@ class StoryService:
         node.completion_conditions_json = dumps(data.get("completionConditions", []))
         node.foreshadows_json = dumps(data.get("foreshadows", []))
         node.contracts_json = dumps(data.get("contracts", []))
+        node.chapter_beats_json = dumps(data.get("chapterBeats", []))
 
     def _audit(self, event_type: str, entity_type: str, entity_id: str, payload: dict[str, Any], request_id: str) -> AuditEvent:
         return AuditEvent(id=str(uuid4()), event_type=event_type, entity_type=entity_type, entity_id=entity_id, payload_json=dumps(payload), request_id=request_id)
 
     def _node_dict(self, node: PlanNode) -> dict[str, Any]:
-        return {"id": node.id, "title": node.title, "type": node.type, "targetChapter": node.target_chapter, "rangeMin": node.range_min, "rangeMax": node.range_max, "importance": node.importance, "note": node.note, "prerequisites": loads(node.prerequisites_json), "completionConditions": loads(node.completion_conditions_json), "foreshadows": loads(node.foreshadows_json), "contracts": loads(node.contracts_json), "pace": node.pace, "revision": node.revision}
+        return {
+            "id": node.id,
+            "title": node.title,
+            "type": node.type,
+            "targetChapter": node.target_chapter,
+            "rangeMin": node.range_min,
+            "rangeMax": node.range_max,
+            "importance": node.importance,
+            "note": node.note,
+            "prerequisites": loads(node.prerequisites_json),
+            "completionConditions": loads(node.completion_conditions_json),
+            "foreshadows": loads(node.foreshadows_json),
+            "contracts": loads(node.contracts_json),
+            "chapterBeats": loads(node.chapter_beats_json),
+            "pace": node.pace,
+            "revision": node.revision,
+        }
 
     def _plan_dict(self, plan: Plan) -> dict[str, Any]:
         return {"id": plan.id, "bookTitle": plan.book_title, "volumeTitle": plan.volume_title, "arcTitle": plan.arc_title, "chapterStart": plan.chapter_start, "chapterEnd": plan.chapter_end, "revision": plan.revision, "milestones": [self._node_dict(node) for node in sorted(plan.nodes, key=lambda item: item.target_chapter)], "markers": [{"id": marker.id, "kind": marker.kind, "chapter": marker.chapter, "label": marker.label} for marker in sorted(plan.markers, key=lambda item: item.chapter)]}
@@ -1855,6 +2032,8 @@ class StoryService:
             "isEnabled": item.is_enabled,
             "hasApiKey": bool(item.api_key_ref),
             "apiKeyPreview": item.api_key_preview,
+            "lastTestStatus": item.last_test_status,
+            "lastTestedAt": item.last_tested_at,
             "createdAt": item.created_at,
             "updatedAt": item.updated_at,
         }

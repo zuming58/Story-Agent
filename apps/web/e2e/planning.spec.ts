@@ -97,3 +97,39 @@ test("quality center remains usable at both desktop baselines", async ({ page },
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
 });
+
+test("canon draft persists and locks behind explicit confirmation", async ({ page }, testInfo) => {
+  await createProject(page, testInfo, "canon");
+  await page.getByRole("link", { name: /Canon/ }).click();
+  await expect(page.getByRole("heading", { name: "Canon 设定库" })).toBeVisible();
+  const editor = page.getByLabel("故事核心 Markdown");
+  await editor.fill("# 雾城守夜人\n\n午夜后不可直视纸人，林默只能使用一张黄符。\n");
+  await page.getByRole("button", { name: "保存草稿" }).click();
+  await expect(page.getByRole("status")).toContainText("故事核心草稿已保存");
+  await page.reload();
+  await expect(editor).toHaveValue(/午夜后不可直视纸人/);
+  await page.getByRole("button", { name: "锁定 Canon" }).click();
+  await expect(page.getByRole("dialog")).toContainText("权威边界");
+  await page.getByRole("button", { name: "确认锁定" }).click();
+  await expect(page.getByText("正式 Canon 已锁定")).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
+});
+
+test("automation desk exposes trial sizes, blockers and persisted policy", async ({ page }, testInfo) => {
+  await createProject(page, testInfo, "automation");
+  await page.getByRole("link", { name: /自动托管/ }).click();
+  await expect(page.getByRole("heading", { name: "自动托管控制台" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "试写就绪检查" })).toBeVisible();
+  await expect(page.getByText("每日托管策略")).toBeVisible();
+  await page.getByLabel("运行时间").fill("07:35");
+  await page.getByRole("button", { name: "保存策略" }).click();
+  await expect(page.getByRole("status")).toContainText("托管策略已保存");
+  await page.getByRole("button", { name: /短链路 3 章/ }).click();
+  await expect(page.getByRole("button", { name: /开始第 1—3 章/ })).toBeDisabled();
+  await page.reload();
+  await expect(page.getByLabel("运行时间")).toHaveValue("07:35");
+  await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
+});

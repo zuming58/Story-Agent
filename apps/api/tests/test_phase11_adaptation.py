@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from story_agent_api.models import (
     AdaptationProposal,
+    AdaptationWorkspace,
     CanonDocument,
     ChapterCommit,
     ChapterContract,
@@ -19,6 +20,7 @@ from story_agent_api.models import (
     ProjectMeta,
     SourceVersion,
     StateSnapshot,
+    ShortStoryStrategy,
     utc_now,
 )
 from story_agent_api.services import dumps, stable_digest
@@ -257,7 +259,14 @@ def test_workspace_readiness_revision_and_source_drift(client: TestClient) -> No
     workspace = created.json()
     ready = client.get(f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/readiness")
     assert ready.status_code == 200
-    assert ready.json()["ready"] is True
+    assert ready.json()["ready"] is False
+    assert "ADAPTATION_STRATEGY_READY" in {item["code"] for item in ready.json()["checks"] if item["status"] == "blocked"}
+    locked = client.put(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}",
+        json={"expectedRevision": workspace["revision"], "status": "locked"},
+    )
+    assert locked.status_code == 409
+    assert locked.json()["code"] == "SHORT_STORY_STRATEGY_REQUIRED"
 
     stale = client.put(
         f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}",
@@ -326,6 +335,14 @@ def test_short_story_proposal_repair_idempotency_apply_and_reject(client: TestCl
     rejected = client.post(f"/api/v1/adaptation-proposals/{second['id']}/reject", json={"expectedRevision": second["revision"]})
     assert rejected.status_code == 200
     assert rejected.json()["status"] == "rejected"
+
+    catalog = service.get_project(project["id"])
+    with service.db.project_write(catalog.id, catalog.folder_path) as session:
+        strategy = session.scalar(select(ShortStoryStrategy).where(ShortStoryStrategy.workspace_id == workspace["id"], ShortStoryStrategy.status == "active"))
+        strategy.compression_rules_json = dumps({"tampered": True})
+    readiness = client.get(f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/readiness").json()
+    assert readiness["ready"] is False
+    assert "ADAPTATION_STRATEGY_READY" in {item["code"] for item in readiness["checks"] if item["status"] == "blocked"}
 
 
 def test_short_story_findings_block_application(client: TestClient) -> None:
@@ -456,3 +473,116 @@ def test_chapter_range_cross_project_and_backup_restore(client: TestClient) -> N
         proposal = session.get(AdaptationProposal, "active-proposal")
         assert proposal.project_id == restored_id
         assert proposal.status == "interrupted"
+
+
+def test_short_story_kind_and_idempotency_conflicts_are_rejected(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_foundation(client, project["id"])
+    workspace = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces",
+        json={"name": "Scoped short story", "kind": "short_story", "targetWordCount": 12000, "targetChapterCount": 6},
+    ).json()
+    wrong_kind = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/drama-outline-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"], "targetEpisodeCount": 6},
+    )
+    assert wrong_kind.status_code == 409
+    assert wrong_kind.json()["code"] == "ADAPTATION_WORKSPACE_KIND_MISMATCH"
+
+    service = client.app.state.story_service
+    service.phase11._complete_role = lambda *args, **kwargs: (dumps(_valid_strategy()), "run-idempotency")
+    first = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"], "idempotencyKey": "same-key", "instructions": "version A"},
+    )
+    assert first.status_code == 201
+    conflict = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"], "idempotencyKey": "same-key", "instructions": "version B"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "ADAPTATION_IDEMPOTENCY_CONFLICT"
+
+
+def test_workspace_change_during_model_call_marks_proposal_failed(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_foundation(client, project["id"])
+    workspace = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces",
+        json={"name": "Concurrent short story", "kind": "short_story", "targetWordCount": 12000, "targetChapterCount": 6},
+    ).json()
+    service = client.app.state.story_service
+    catalog = service.get_project(project["id"])
+
+    def mutate_during_call(*args, **kwargs):
+        with service.db.project_write(catalog.id, catalog.folder_path) as session:
+            row = session.get(AdaptationWorkspace, workspace["id"])
+            row.target_word_count = 18000
+            row.revision += 1
+            row.updated_at = utc_now()
+        return dumps(_valid_strategy()), "run-concurrent"
+
+    service.phase11._complete_role = mutate_during_call
+    response = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"]},
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "failed"
+    assert response.json()["errorCode"] == "ADAPTATION_WORKSPACE_REVISION_CONFLICT"
+    current = client.get(f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}").json()
+    assert current["status"] == "ready"
+    assert current["strategy"] is None
+
+
+def test_repeated_invalid_proposals_keep_findings_proposal_scoped(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_foundation(client, project["id"])
+    workspace = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces",
+        json={"name": "Repeated invalid", "kind": "short_story", "targetWordCount": 12000, "targetChapterCount": 6},
+    ).json()
+    broken = _valid_strategy()
+    broken["chapterBudget"][0]["majorEvents"] = ["a", "b", "c"]
+    broken["chapterBudget"][0]["maxMajorEvents"] = 1
+    service = client.app.state.story_service
+    service.phase11._complete_role = lambda *args, **kwargs: (dumps(broken), "run-invalid")
+
+    first = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"]},
+    ).json()
+    assert client.post(f"/api/v1/adaptation-proposals/{first['id']}/reject", json={"expectedRevision": first["revision"]}).status_code == 200
+    workspace = client.get(f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}").json()
+    second = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"]},
+    ).json()
+    blocked = client.post(f"/api/v1/adaptation-proposals/{second['id']}/apply", json={"expectedRevision": second["revision"]})
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "ADAPTATION_FINDINGS_BLOCKING"
+
+
+def test_plan_and_chapter_source_content_drift_is_detected(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_foundation(client, project["id"])
+    _seed_official_chapter(client, project["id"], 1)
+    workspace = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces",
+        json={"name": "Authoritative source", "kind": "short_story", "sourceType": "chapter_range", "chapterStart": 1, "chapterEnd": 1, "targetChapterCount": 1},
+    ).json()
+    service = client.app.state.story_service
+    catalog = service.get_project(project["id"])
+    with service.db.project_write(catalog.id, catalog.folder_path) as session:
+        node = session.get(PlanNode, "beat-1")
+        node.note = "Changed without revision bump"
+    plan_drift = client.get(f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/readiness").json()
+    assert "ADAPTATION_SOURCE_DRIFT" in {item["code"] for item in plan_drift["checks"] if item["status"] == "blocked"}
+
+    with service.db.project_write(catalog.id, catalog.folder_path) as session:
+        commit = session.scalar(select(ChapterCommit).where(ChapterCommit.project_id == catalog.id, ChapterCommit.chapter_number == 1))
+        draft = session.get(ChapterDraft, commit.approved_draft_id)
+        draft.content_markdown = "Tampered official content"
+    chapter_drift = client.get(f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/readiness").json()
+    assert chapter_drift["ready"] is False
+    assert chapter_drift["sourceManifest"]["diagnostic"]["code"] == "ADAPTATION_SOURCE_STATE_INVALID"

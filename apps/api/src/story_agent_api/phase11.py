@@ -14,12 +14,16 @@ from .models import (
     AdaptationWorkspace,
     CanonDocument,
     ChapterCommit,
+    ChapterDraft,
     DramaEpisode,
     DramaScene,
     DramaScriptVersion,
     Plan,
     PlanNode,
     ProjectMeta,
+    SourceVersion,
+    StateSnapshot,
+    StoryMarker,
     ShortStoryStrategy,
 )
 from .schemas import (
@@ -40,6 +44,8 @@ SHORT_STORY_RULES = {
     "ADAPTATION_SOURCE_DRIFT",
     "SHORTFORM_EVENT_BUDGET_OVERFLOW",
     "SHORTFORM_FORESHADOW_DROPPED",
+    "SHORTFORM_STRATEGY_INCOMPLETE",
+    "SHORTFORM_CHAPTER_BUDGET_INVALID",
     "DRAMA_EPISODE_DURATION_OUT_OF_RANGE",
     "DRAMA_SCENE_DURATION_OVERFLOW",
     "DRAMA_CHARACTER_KNOWLEDGE_LEAK",
@@ -93,6 +99,8 @@ class Phase11Service:
         project = self.service.get_project(project_id)
         if project.project_kind != "standard":
             raise StoryError(409, "DEMO_PROJECT_WRITE_BLOCKED", "Adaptation workspaces require a standard project.")
+        if payload.kind == "short_story" and payload.source_type == "short_story_strategy":
+            raise StoryError(422, "ADAPTATION_SOURCE_KIND_INVALID", "A short story workspace cannot use another short story strategy as its source.")
         now = _now()
         with self.service.db.project_write(project.id, project.folder_path) as session:
             existing = session.scalar(select(AdaptationWorkspace).where(
@@ -150,11 +158,20 @@ class Phase11Service:
             workspace = self._get_workspace(session, project.id, workspace_id)
             self._check_workspace_revision(workspace, payload.expected_revision)
             changes = payload.model_dump(exclude_unset=True, exclude={"expected_revision"})
+            if workspace.status == "archived":
+                raise StoryError(409, "ADAPTATION_WORKSPACE_ARCHIVED", "Archived adaptation workspaces are read-only.")
+            if workspace.status == "locked" and not (set(changes) == {"status"} and changes.get("status") == "archived"):
+                raise StoryError(409, "ADAPTATION_WORKSPACE_LOCKED", "Locked adaptation workspaces are read-only; archive or create a new workspace.")
             if "platform_constraints" in changes:
                 workspace.platform_constraints_json = dumps(changes.pop("platform_constraints") or {})
             for key, value in changes.items():
                 setattr(workspace, key, value)
             if payload.status == "locked":
+                self._ensure_workspace_source_not_drifted(session, workspace)
+                if workspace.kind == "short_story":
+                    strategy = self._active_strategy(session, workspace)
+                    if not strategy or strategy.checksum != self._strategy_checksum(strategy):
+                        raise StoryError(409, "SHORT_STORY_STRATEGY_REQUIRED", "Apply a valid short story strategy before locking the workspace.")
                 blocking = self._open_blocking_findings(session, workspace.id)
                 if blocking:
                     raise StoryError(409, "ADAPTATION_FINDINGS_BLOCKING", "Open adaptation findings block locking.", {"findingCount": len(blocking)})
@@ -169,18 +186,29 @@ class Phase11Service:
         checks: list[dict[str, Any]] = []
         with self.service.db.project(project.id, project.folder_path) as session:
             workspace = self._get_workspace(session, project.id, workspace_id)
-            current = self._current_manifest_for_workspace(session, workspace)
-            drift = stable_digest(current) != stable_digest(loads(workspace.source_manifest_json) or {})
-            canon_locked = current["canon"].get("status") == "locked"
+            frozen = loads(workspace.source_manifest_json) or {}
+            try:
+                current = self._current_manifest_for_workspace(session, workspace)
+                drift = stable_digest(current) != stable_digest(frozen)
+            except StoryError as exc:
+                current = {**frozen, "diagnostic": {"code": exc.code, "message": exc.message}}
+                drift = True
+            canon_locked = current.get("canon", {}).get("status") == "locked"
             strategy_ready = True
-            if workspace.kind == "short_drama" and workspace.source_type == "short_story_strategy":
+            strategy_detail = "No strategy is required for this workspace."
+            if workspace.kind == "short_story":
+                strategy = self._active_strategy(session, workspace)
+                strategy_ready = bool(strategy and strategy.checksum == self._strategy_checksum(strategy))
+                strategy_detail = "An active, checksum-valid short story strategy exists." if strategy_ready else "Generate and apply a valid short story strategy."
+            elif workspace.kind == "short_drama" and workspace.source_type == "short_story_strategy":
                 strategy = session.get(ShortStoryStrategy, workspace.source_id)
-                strategy_ready = bool(strategy and strategy.project_id == project.id and strategy.status == "active")
+                strategy_ready = bool(strategy and strategy.project_id == project.id and strategy.status == "active" and strategy.checksum == self._strategy_checksum(strategy))
+                strategy_detail = "Strategy source is usable." if strategy_ready else "Short drama source strategy is unavailable."
             blocking = self._open_blocking_findings(session, workspace.id)
         checks.append({"code": "ADAPTATION_STANDARD_PROJECT_REQUIRED", "status": "ready" if project.project_kind == "standard" else "blocked", "title": "Standard project", "detail": "Workspace belongs to a standard project."})
         checks.append({"code": "ADAPTATION_CANON_LOCKED", "status": "ready" if canon_locked else "blocked", "title": "Canon locked", "detail": "Canon is locked." if canon_locked else "Lock Canon before adaptation."})
         checks.append({"code": "ADAPTATION_SOURCE_DRIFT", "status": "blocked" if drift else "ready", "title": "Source manifest", "detail": "Source has drifted." if drift else "Source manifest is unchanged."})
-        checks.append({"code": "ADAPTATION_STRATEGY_READY", "status": "ready" if strategy_ready else "blocked", "title": "Source strategy", "detail": "Strategy source is usable." if strategy_ready else "Short drama source strategy is unavailable."})
+        checks.append({"code": "ADAPTATION_STRATEGY_READY", "status": "ready" if strategy_ready else "blocked", "title": "Short story strategy", "detail": strategy_detail})
         checks.append({"code": "ADAPTATION_FINDINGS_CLEAR", "status": "ready" if not blocking else "blocked", "title": "Blocking findings", "detail": "No blocking findings." if not blocking else f"{len(blocking)} blocking findings are open."})
         return {
             "projectId": project.id,
@@ -262,6 +290,17 @@ class Phase11Service:
             if proposal.status != "pending":
                 raise StoryError(409, "ADAPTATION_PROPOSAL_NOT_PENDING", "Only pending adaptation proposals can be applied.")
             workspace = self._get_workspace(session, project.id, proposal.workspace_id)
+            snapshot = loads(proposal.input_snapshot_json) or {}
+            expected_ready_revision = snapshot.get("workspaceRevisionAtReady")
+            if expected_ready_revision is None and isinstance(snapshot.get("workspaceRevision"), int):
+                expected_ready_revision = snapshot["workspaceRevision"] + 2
+            if expected_ready_revision is None or workspace.revision != expected_ready_revision:
+                raise StoryError(
+                    409,
+                    "ADAPTATION_WORKSPACE_REVISION_CONFLICT",
+                    "Workspace changed after this proposal was generated; generate a new proposal.",
+                    {"currentRevision": workspace.revision, "proposalWorkspaceRevision": expected_ready_revision},
+                )
             self._ensure_workspace_source_not_drifted(session, workspace)
             blocking = self._open_blocking_findings(session, workspace.id, proposal_id=proposal.id)
             if blocking:
@@ -296,6 +335,13 @@ class Phase11Service:
             proposal.rejected_at = _now()
             proposal.revision += 1
             proposal.updated_at = _now()
+            for finding in session.scalars(select(AdaptationFinding).where(
+                AdaptationFinding.proposal_id == proposal.id,
+                AdaptationFinding.status == "open",
+            )).all():
+                finding.status = "dismissed"
+                finding.revision += 1
+                finding.updated_at = _now()
             session.add(self.service._audit("adaptation_proposal.rejected", "adaptation_proposal", proposal.id, {"requestId": request_id}, request_id))
             session.flush()
             return self._proposal_dict(proposal)
@@ -397,7 +443,7 @@ class Phase11Service:
                 finding.project_id = project_id
                 evidence = remap_json_identifier(safe_json_loads(finding.evidence_json, {}), source_project_id, project_id)
                 finding.evidence_json = dumps(evidence)
-                finding.fingerprint = stable_digest({"workspaceId": finding.workspace_id, "rule": finding.rule_code, "evidence": evidence, "episodeId": finding.episode_id, "sceneId": finding.scene_id})
+                finding.fingerprint = stable_digest({"workspaceId": finding.workspace_id, "proposalId": finding.proposal_id, "rule": finding.rule_code, "evidence": evidence, "episodeId": finding.episode_id, "sceneId": finding.scene_id})
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -417,15 +463,30 @@ class Phase11Service:
     ) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         now = _now()
+        request_fingerprint = stable_digest({
+            "workspaceId": workspace_id,
+            "workspaceRevision": expected_workspace_revision,
+            "proposalKind": proposal_kind,
+            "input": extra,
+        })
         with self.service.db.project_write(project.id, project.folder_path) as session:
             workspace = self._get_workspace(session, project.id, workspace_id)
             if idempotency_key:
                 existing = session.scalar(select(AdaptationProposal).where(AdaptationProposal.workspace_id == workspace.id, AdaptationProposal.idempotency_key == idempotency_key))
                 if existing:
+                    existing_snapshot = loads(existing.input_snapshot_json) or {}
+                    if existing.proposal_kind != proposal_kind or existing_snapshot.get("requestFingerprint") not in {None, request_fingerprint}:
+                        raise StoryError(409, "ADAPTATION_IDEMPOTENCY_CONFLICT", "The idempotency key was already used for a different adaptation request.")
                     return self._proposal_dict(existing)
             self._check_workspace_revision(workspace, expected_workspace_revision)
+            self._ensure_proposal_kind(workspace, proposal_kind)
+            if workspace.status == "analyzing":
+                raise StoryError(409, "ADAPTATION_WORKSPACE_BUSY", "Another adaptation proposal is already being generated.")
+            if workspace.status in {"locked", "archived"}:
+                raise StoryError(409, "ADAPTATION_WORKSPACE_READ_ONLY", "Locked or archived adaptation workspaces cannot generate new proposals.")
             self._ensure_workspace_source_not_drifted(session, workspace)
             snapshot = self._proposal_snapshot(session, workspace, extra)
+            snapshot["requestFingerprint"] = request_fingerprint
             proposal = AdaptationProposal(
                 id=str(uuid4()),
                 project_id=project.id,
@@ -462,7 +523,31 @@ class Phase11Service:
         with self.service.db.project_write(project.id, project.folder_path) as session:
             proposal = self._get_proposal(session, proposal_id)
             workspace = self._get_workspace(session, project.id, proposal.workspace_id)
-            self._ensure_workspace_source_not_drifted(session, workspace)
+            if workspace.status != "analyzing" or workspace.revision != expected_workspace_revision + 1:
+                proposal.status = "failed"
+                proposal.error_code = "ADAPTATION_WORKSPACE_REVISION_CONFLICT"
+                proposal.error_message = "Workspace changed while the model was generating this proposal."
+                proposal.revision += 1
+                proposal.updated_at = _now()
+                if workspace.status == "analyzing":
+                    workspace.status = "ready"
+                    workspace.revision += 1
+                    workspace.updated_at = _now()
+                session.flush()
+                return self._proposal_dict(proposal)
+            try:
+                self._ensure_workspace_source_not_drifted(session, workspace)
+            except StoryError as exc:
+                proposal.status = "failed"
+                proposal.error_code = exc.code
+                proposal.error_message = exc.message
+                proposal.revision += 1
+                proposal.updated_at = _now()
+                workspace.status = "ready"
+                workspace.revision += 1
+                workspace.updated_at = _now()
+                session.flush()
+                return self._proposal_dict(proposal)
             normalized = self._normalize_proposal_output(proposal_kind, output)
             proposal.structured_output_json = dumps(normalized)
             proposal.diff_json = dumps(self._proposal_diff(proposal_kind, normalized))
@@ -472,6 +557,9 @@ class Phase11Service:
             proposal.status = "pending"
             proposal.revision += 1
             proposal.updated_at = _now()
+            snapshot = loads(proposal.input_snapshot_json) or {}
+            snapshot["workspaceRevisionAtReady"] = workspace.revision + 1
+            proposal.input_snapshot_json = dumps(snapshot)
             workspace.status = "ready"
             workspace.revision += 1
             workspace.updated_at = _now()
@@ -514,33 +602,77 @@ class Phase11Service:
                 self._validate_script_output(session, workspace, proposal, episode, output)
 
     def _validate_short_story_strategy(self, session: Session, workspace: AdaptationWorkspace, proposal: AdaptationProposal, output: dict[str, Any]) -> None:
+        missing_fields = [field for field in ("coreHook", "openingHook", "mainConflict", "ending", "pointOfView") if not isinstance(output.get(field), str) or not output.get(field, "").strip()]
+        if missing_fields:
+            self._add_finding(session, workspace, "SHORTFORM_STRATEGY_INCOMPLETE", "error", {"missingFields": missing_fields}, "Complete all required short story strategy fields.", proposal_id=proposal.id)
         if not output.get("openingHook"):
             self._add_finding(session, workspace, "DRAMA_OPENING_HOOK_MISSING", "error", {"field": "openingHook"}, "Add an opening hook in chapter 1 or 2.", proposal_id=proposal.id)
+        target_words = self._safe_int(output.get("targetWordCount"), 0)
+        if target_words < 1000 or target_words > 300000 or (workspace.target_word_count is not None and target_words != workspace.target_word_count):
+            self._add_finding(
+                session,
+                workspace,
+                "SHORTFORM_STRATEGY_INCOMPLETE",
+                "error",
+                {"targetWordCount": output.get("targetWordCount"), "workspaceTargetWordCount": workspace.target_word_count},
+                "Use the workspace target word count and keep it within the supported range.",
+                proposal_id=proposal.id,
+            )
         chapters = output.get("chapterBudget", [])
         if not isinstance(chapters, list) or not chapters:
             self._add_finding(session, workspace, "SHORTFORM_EVENT_BUDGET_OVERFLOW", "error", {"field": "chapterBudget"}, "Provide a chapter budget for the short story.", proposal_id=proposal.id)
             return
-        target_chapters = workspace.target_chapter_count or output.get("targetChapterCount") or len(chapters)
-        if int(target_chapters) > 30:
+        target_chapters = self._safe_int(workspace.target_chapter_count or output.get("targetChapterCount") or len(chapters), 0)
+        output_target_chapters = self._safe_int(output.get("targetChapterCount", target_chapters), 0)
+        if output_target_chapters != target_chapters:
+            self._add_finding(session, workspace, "SHORTFORM_CHAPTER_BUDGET_INVALID", "error", {"targetChapterCount": output.get("targetChapterCount"), "workspaceTargetChapterCount": target_chapters}, "Use the workspace target chapter count.", proposal_id=proposal.id)
+        if target_chapters < 1 or target_chapters > 30:
             self._add_finding(session, workspace, "SHORTFORM_EVENT_BUDGET_OVERFLOW", "blocker", {"targetChapterCount": target_chapters}, "Short story strategy must stay within 30 chapters.", proposal_id=proposal.id)
+        actual_numbers = [self._safe_int(item.get("chapterNumber"), -1) for item in chapters if isinstance(item, dict)]
+        expected_numbers = list(range(1, target_chapters + 1))
+        if len(chapters) != target_chapters or actual_numbers != expected_numbers:
+            self._add_finding(
+                session,
+                workspace,
+                "SHORTFORM_CHAPTER_BUDGET_INVALID",
+                "error",
+                {"targetChapterCount": target_chapters, "chapterNumbers": actual_numbers},
+                "Chapter budgets must cover every target chapter exactly once and in order.",
+                proposal_id=proposal.id,
+            )
         for chapter in chapters:
             if not isinstance(chapter, dict):
+                self._add_finding(session, workspace, "SHORTFORM_CHAPTER_BUDGET_INVALID", "error", {"chapter": chapter}, "Every chapter budget must be an object.", proposal_id=proposal.id)
                 continue
             events = chapter.get("majorEvents", chapter.get("events", []))
-            max_events = int(chapter.get("maxMajorEvents", 3) or 3)
+            max_events = self._safe_int(chapter.get("maxMajorEvents", 3), 3)
+            if not isinstance(events, list) or not events:
+                self._add_finding(session, workspace, "SHORTFORM_CHAPTER_BUDGET_INVALID", "error", {"chapter": chapter.get("chapterNumber"), "majorEvents": events}, "Each chapter needs at least one major event.", proposal_id=proposal.id)
+                continue
             if isinstance(events, list) and len(events) > max_events:
                 self._add_finding(session, workspace, "SHORTFORM_EVENT_BUDGET_OVERFLOW", "error", {"chapter": chapter.get("chapterNumber"), "eventCount": len(events), "maxEvents": max_events}, "Reduce or split major events in this chapter.", proposal_id=proposal.id)
         foreshadow = output.get("foreshadowPlan", {})
         if isinstance(foreshadow, dict):
-            retained = set(foreshadow.get("retain", []) or [])
-            resolved = set(foreshadow.get("resolved", []) or [])
+            retained = self._reference_ids(foreshadow.get("retain", []))
+            resolved = self._reference_ids(foreshadow.get("resolved", []))
             missing = sorted(retained - resolved)
             if missing:
                 self._add_finding(session, workspace, "SHORTFORM_FORESHADOW_DROPPED", "error", {"missing": missing}, "Resolve retained foreshadows in the ending plan.", proposal_id=proposal.id)
-        for merge in output.get("characterMergePlan", []) or []:
+        else:
+            self._add_finding(session, workspace, "SHORTFORM_STRATEGY_INCOMPLETE", "error", {"field": "foreshadowPlan"}, "Foreshadow plan must be an object.", proposal_id=proposal.id)
+        merge_plan = output.get("characterMergePlan", []) or []
+        if not isinstance(merge_plan, list):
+            self._add_finding(session, workspace, "SHORTFORM_STRATEGY_INCOMPLETE", "error", {"field": "characterMergePlan"}, "Character merge plan must be a list.", proposal_id=proposal.id)
+            merge_plan = []
+        for merge in merge_plan:
             if isinstance(merge, dict) and (not merge.get("from") or not merge.get("to") or not merge.get("reason")):
                 self._add_finding(session, workspace, "ADAPTATION_CANON_DEVIATION_UNDECLARED", "warning", {"merge": merge}, "Character merges need source, target, and causal responsibility.", proposal_id=proposal.id)
         forbidden = output.get("forbiddenReveals", []) or []
+        if not isinstance(forbidden, list):
+            self._add_finding(session, workspace, "SHORTFORM_STRATEGY_INCOMPLETE", "error", {"field": "forbiddenReveals"}, "Forbidden reveals must be a list.", proposal_id=proposal.id)
+            forbidden = [forbidden]
+        if not isinstance(output.get("compressionRules", {}), dict):
+            self._add_finding(session, workspace, "SHORTFORM_STRATEGY_INCOMPLETE", "error", {"field": "compressionRules"}, "Compression rules must be an object.", proposal_id=proposal.id)
         ending = str(output.get("ending", ""))
         early = [item for item in forbidden if isinstance(item, str) and item and item in ending]
         if early:
@@ -609,6 +741,27 @@ class Phase11Service:
         strategy.checksum = self._strategy_checksum(strategy)
         session.add(strategy)
         return strategy
+
+    @staticmethod
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _reference_ids(value: Any) -> set[str]:
+        if not isinstance(value, list):
+            return set()
+        result: set[str] = set()
+        for item in value:
+            if isinstance(item, str) and item:
+                result.add(item)
+            elif isinstance(item, dict):
+                candidate = item.get("id") or item.get("key") or item.get("name")
+                if isinstance(candidate, str) and candidate:
+                    result.add(candidate)
+        return result
 
     def _apply_drama_outline(self, session: Session, workspace: AdaptationWorkspace, proposal: AdaptationProposal, output: dict[str, Any]) -> None:
         for episode_data in output.get("episodes", []) or []:
@@ -763,12 +916,36 @@ class Phase11Service:
 
     def _plan_manifest(self, session: Session, plan: Plan) -> dict[str, Any]:
         nodes = session.scalars(select(PlanNode).where(PlanNode.plan_id == plan.id).order_by(PlanNode.target_chapter)).all()
+        markers = session.scalars(select(StoryMarker).where(StoryMarker.plan_id == plan.id).order_by(StoryMarker.chapter, StoryMarker.id)).all()
         payload = {
             "id": plan.id,
             "revision": plan.revision,
+            "bookTitle": plan.book_title,
+            "volumeTitle": plan.volume_title,
+            "arcTitle": plan.arc_title,
             "chapterStart": plan.chapter_start,
             "chapterEnd": plan.chapter_end,
-            "nodes": [{"id": node.id, "revision": node.revision, "targetChapter": node.target_chapter, "rangeMin": node.range_min, "rangeMax": node.range_max} for node in nodes],
+            "nodes": [
+                {
+                    "id": node.id,
+                    "revision": node.revision,
+                    "title": node.title,
+                    "type": node.type,
+                    "targetChapter": node.target_chapter,
+                    "rangeMin": node.range_min,
+                    "rangeMax": node.range_max,
+                    "importance": node.importance,
+                    "note": node.note,
+                    "prerequisites": safe_json_loads(node.prerequisites_json, []),
+                    "completionConditions": safe_json_loads(node.completion_conditions_json, []),
+                    "foreshadows": safe_json_loads(node.foreshadows_json, []),
+                    "contracts": safe_json_loads(node.contracts_json, []),
+                    "chapterBeats": safe_json_loads(node.chapter_beats_json, []),
+                    "pace": node.pace,
+                }
+                for node in nodes
+            ],
+            "markers": [{"id": marker.id, "kind": marker.kind, "chapter": marker.chapter, "label": marker.label} for marker in markers],
         }
         return {**payload, "checksum": stable_digest(payload)}
 
@@ -783,14 +960,50 @@ class Phase11Service:
             ))
             if not commit:
                 raise StoryError(409, "ADAPTATION_SOURCE_COMMIT_MISSING", "Chapter range must use continuous current official commits.", {"chapterNumber": chapter})
-            rows.append({"projectId": project_id, "chapterNumber": chapter, "commitId": commit.id, "revision": commit.revision, "checksum": commit.checksum, "sourceVersionId": commit.source_version_id, "stateSnapshotId": commit.state_snapshot_id})
+            draft = session.get(ChapterDraft, commit.approved_draft_id)
+            source = session.get(SourceVersion, commit.source_version_id)
+            snapshot = session.get(StateSnapshot, commit.state_snapshot_id) if commit.state_snapshot_id else None
+            valid_chain = bool(
+                draft and source and snapshot
+                and draft.project_id == project_id and draft.status == "approved"
+                and source.project_id == project_id and source.status == "official"
+                and snapshot.project_id == project_id and snapshot.source_version_id == source.id
+                and stable_digest(draft.content_markdown) == draft.checksum
+            )
+            if not valid_chain:
+                raise StoryError(409, "ADAPTATION_SOURCE_STATE_INVALID", "Chapter source references are incomplete or no longer authoritative.", {"chapterNumber": chapter, "commitId": commit.id})
+            rows.append({
+                "projectId": project_id,
+                "chapterNumber": chapter,
+                "commitId": commit.id,
+                "revision": commit.revision,
+                "checksum": commit.checksum,
+                "approvedDraftId": draft.id,
+                "draftRevision": draft.revision,
+                "draftChecksum": draft.checksum,
+                "sourceVersionId": source.id,
+                "sourceRevision": source.revision,
+                "sourceChecksum": source.checksum,
+                "stateSnapshotId": snapshot.id,
+                "snapshotRevision": snapshot.revision,
+                "snapshotChecksum": snapshot.checksum,
+            })
         return rows
 
     @staticmethod
     def _normalize_proposal_output(kind: str, output: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(output)
+        if not isinstance(normalized.get("impactScope", []), list):
+            normalized["impactScope"] = []
+        else:
+            normalized["impactScope"] = [item for item in normalized.get("impactScope", []) if isinstance(item, dict)]
+        if not isinstance(normalized.get("canonDeviations", []), list):
+            normalized["canonDeviations"] = []
+        else:
+            normalized["canonDeviations"] = [item for item in normalized.get("canonDeviations", []) if isinstance(item, dict)]
         if kind == "script":
-            return {**output, "episodeId": output.get("episodeId")}
-        return output
+            normalized["episodeId"] = output.get("episodeId")
+        return normalized
 
     @staticmethod
     def _proposal_diff(kind: str, output: dict[str, Any]) -> dict[str, Any]:
@@ -809,7 +1022,7 @@ class Phase11Service:
         episode_id: str | None = None,
         scene_id: str | None = None,
     ) -> None:
-        fingerprint = stable_digest({"workspaceId": workspace.id, "rule": rule_code, "evidence": evidence, "episodeId": episode_id, "sceneId": scene_id})
+        fingerprint = stable_digest({"workspaceId": workspace.id, "proposalId": proposal_id, "rule": rule_code, "evidence": evidence, "episodeId": episode_id, "sceneId": scene_id})
         existing = session.scalar(select(AdaptationFinding).where(AdaptationFinding.workspace_id == workspace.id, AdaptationFinding.fingerprint == fingerprint))
         if existing:
             existing.status = "open"
@@ -851,6 +1064,25 @@ class Phase11Service:
         if not workspace or workspace.project_id != project_id:
             raise StoryError(404, "ADAPTATION_WORKSPACE_NOT_FOUND", "Adaptation workspace not found.")
         return workspace
+
+    @staticmethod
+    def _ensure_proposal_kind(workspace: AdaptationWorkspace, proposal_kind: str) -> None:
+        expected_kind = "short_story" if proposal_kind == "short_story_strategy" else "short_drama"
+        if workspace.kind != expected_kind:
+            raise StoryError(
+                409,
+                "ADAPTATION_WORKSPACE_KIND_MISMATCH",
+                f"{proposal_kind} proposals require a {expected_kind} workspace.",
+                {"workspaceKind": workspace.kind, "proposalKind": proposal_kind},
+            )
+
+    @staticmethod
+    def _active_strategy(session: Session, workspace: AdaptationWorkspace) -> ShortStoryStrategy | None:
+        return session.scalar(select(ShortStoryStrategy).where(
+            ShortStoryStrategy.workspace_id == workspace.id,
+            ShortStoryStrategy.project_id == workspace.project_id,
+            ShortStoryStrategy.status == "active",
+        ))
 
     def _get_proposal(self, session: Session, proposal_id: str) -> AdaptationProposal:
         proposal = session.get(AdaptationProposal, proposal_id)
@@ -905,9 +1137,15 @@ class Phase11Service:
             "coreHook": strategy.core_hook,
             "openingHook": strategy.opening_hook,
             "mainConflict": strategy.main_conflict,
+            "emotionalCurve": safe_json_loads(strategy.emotional_curve_json, []),
             "ending": strategy.ending,
+            "pointOfView": strategy.point_of_view,
+            "targetWordCount": strategy.target_word_count,
             "chapterBudget": safe_json_loads(strategy.chapter_budget_json, []),
+            "characterMergePlan": safe_json_loads(strategy.character_merge_plan_json, []),
             "foreshadowPlan": safe_json_loads(strategy.foreshadow_plan_json, {}),
+            "compressionRules": safe_json_loads(strategy.compression_rules_json, {}),
+            "forbiddenReveals": safe_json_loads(strategy.forbidden_reveals_json, []),
         })
 
     @staticmethod

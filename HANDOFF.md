@@ -1,4 +1,55 @@
-# Story Agent 第十一阶段：短篇策略与短剧改编桥梁后端基础交接
+# Story Agent 当前交接：第十一阶段审计完成，范围收敛为长篇与短篇小说
+
+更新时间：2026-07-14（GPT-5.6）
+
+当前分支：`agent/shortform-adaptation-foundation`
+
+准确审计基线：`agent/longform-endurance-foundation@b20b7e2`
+
+被审计提交：`2f94b1f`
+
+状态：**第十一阶段短篇策略后端已完成 GPT-5.6 审计与修复。短剧/短视频开发暂停；当前产品范围只保留长篇小说和短篇小说。**
+
+完整审计记录：`docs/plans/PHASE-11-AUDIT.md`。
+
+下一阶段方案：`docs/plans/PHASE-12-SHORT-STORY-PRODUCTION.md`。
+
+## 本轮 GPT-5.6 修复
+
+- 严格隔离短篇与短剧 workspace/proposal 类型。
+- 给幂等请求增加请求指纹，错误复用返回 409。
+- 模型调用前后及 proposal apply 时复核 workspace revision，禁止旧结果覆盖新目标。
+- finding 指纹加入 proposalId，拒绝提案同时关闭其 findings，防止重复坏提案绕过质量门或永久阻断。
+- 短篇 workspace 缺少 active/checksum-valid strategy 时不再显示 ready，也不能锁定。
+- 锁定/归档 workspace 进入只读状态。
+- source manifest 冻结完整 Plan、PlanNode、StoryMarker 与 current official commit/draft/source/snapshot 权威链。
+- 模型合法 JSON 中的错误字段类型转成确定性 findings，不再直接触发响应 500。
+- 新增 4 个专项回归场景，第十一阶段专项由 5 项增至 9 项。
+- 未修改 `apps/web/**`、UI、CSS、设计令牌或视觉快照。
+
+## 当前验证结果
+
+```text
+Phase 11 focused API: 9 passed
+Full API: 147 passed, 298 warnings
+Web unit: 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+Playwright e2e: 14 passed（1440×1024 与 1280×800）
+```
+
+## 当前能力判断
+
+- 长篇：Canon、1000 章分层规划、章节生产、质量复核、自动托管、导出和 5/10/20/30 章耐久监控基础已经具备；真实 20—30 章付费试写仍是上线前验收项。
+- 短篇：已经能生成、校验和保存短篇压缩策略，但还不能把策略独立生产成完整短篇正文。
+- 短剧/短视频：代码作为休眠基础保留，不继续开发，不作为当前完成度或验收目标。
+
+## 下一台电脑的唯一任务
+
+只实施 `docs/plans/PHASE-12-SHORT-STORY-PRODUCTION.md` 的后端部分：让短篇策略物化为独立 `short-form` 项目，并复用现有章节生产、质量门、自动托管和导出链路。禁止修改 UI；完成后推送分支并停止，等待 GPT-5.6 审计。
+
+---
+
+# 历史交接：第十一阶段原始实现记录
 
 更新时间：2026-07-14（Codex）
 

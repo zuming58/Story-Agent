@@ -55,6 +55,9 @@ from .models import (
     StoryEntity,
     StoryMarker,
     Foreshadow,
+    ExportArtifact,
+    ExportJob,
+    ExportJobChapter,
     KnowledgeBoundary,
     utc_now,
 )
@@ -162,6 +165,16 @@ def safe_json_loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except ValueError:
         return default
+
+
+def remap_json_identifier(value: Any, old_id: str, new_id: str) -> Any:
+    if isinstance(value, str):
+        return new_id if value == old_id else value
+    if isinstance(value, list):
+        return [remap_json_identifier(item, old_id, new_id) for item in value]
+    if isinstance(value, dict):
+        return {key: remap_json_identifier(item, old_id, new_id) for key, item in value.items()}
+    return value
 
 
 def json_schema_subset_valid(schema: Any, value: Any) -> bool:
@@ -1181,6 +1194,7 @@ class StoryService:
                         shutil.copyfileobj(source, target)
             try:
                 source_json = json.loads((temp / "project.json").read_text(encoding="utf-8"))
+                source_project_id = str(source_json["id"])
                 source_title = str(source_json["title"])
                 source_mode = str(source_json["mode"])
                 source_total = int(source_json["totalChapters"])
@@ -1218,7 +1232,9 @@ class StoryService:
                     old_meta = session.scalar(select(ProjectMeta))
                     if not old_meta:
                         raise StoryError(422, "INVALID_BACKUP_DATABASE", "备份数据库缺少作品元数据。")
-                    old_id = old_meta.id
+                    old_id = source_project_id
+                    if old_meta.id != old_id:
+                        raise StoryError(422, "INVALID_BACKUP_DATABASE", "备份数据库与 project.json 的作品 ID 不一致。")
                     old_meta.id = restored.id
                     old_meta.title = restored.title
                     old_meta.mode = source_mode
@@ -1300,11 +1316,53 @@ class StoryService:
                 # With runtime leases cleared, active copied runs/jobs converge
                 # to interrupted and require an explicit resume in the clone.
                 self.phase7.reconcile_orphaned_automation()
+                self._repair_restored_export_metadata(restored, old_id)
                 return restored
             except Exception:
                 if restored is not None:
                     self._remove_failed_restore(restored)
                 raise
+
+    def _repair_restored_export_metadata(self, project: CatalogProject, source_project_id: str) -> None:
+        """Finalize project identity embedded in copied Phase 9 JSON payloads.
+
+        Bulk SQL remaps the relational scope during restore. This second short
+        transaction intentionally runs after the copied database transaction
+        has committed so ORM state or startup reconciliation cannot restore a
+        stale source project ID in an export manifest.
+        """
+        with self.db.project_write(project.id, project.folder_path) as session:
+            manifest_by_job: dict[str, dict[str, Any]] = {}
+            for export_job in session.scalars(select(ExportJob)).all():
+                export_job.project_id = project.id
+                export_job.readiness_json = dumps(remap_json_identifier(
+                    safe_json_loads(export_job.readiness_json, {}), source_project_id, project.id
+                ))
+                if export_job.diagnostic_json:
+                    export_job.diagnostic_json = dumps(remap_json_identifier(
+                        safe_json_loads(export_job.diagnostic_json, {}), source_project_id, project.id
+                    ))
+                manifest = safe_json_loads(export_job.frozen_manifest_json, {})
+                if isinstance(manifest, dict) and manifest:
+                    manifest = remap_json_identifier(manifest, source_project_id, project.id)
+                    manifest["projectId"] = project.id
+                    manifest.pop("manifestChecksum", None)
+                    manifest["manifestChecksum"] = stable_digest(manifest)
+                    export_job.frozen_manifest_json = dumps(manifest)
+                    manifest_by_job[export_job.id] = manifest
+            for artifact in session.scalars(select(ExportArtifact)).all():
+                artifact.project_id = project.id
+                manifest = manifest_by_job.get(artifact.export_job_id)
+                if manifest:
+                    artifact.manifest_json = dumps(manifest)
+            for chapter in session.scalars(select(ExportJobChapter)).all():
+                chapter.project_id = project.id
+                chapter.quality_summary_json = dumps(remap_json_identifier(
+                    safe_json_loads(chapter.quality_summary_json, {}), source_project_id, project.id
+                ))
+                chapter.issue_summary_json = dumps(remap_json_identifier(
+                    safe_json_loads(chapter.issue_summary_json, []), source_project_id, project.id
+                ))
 
     def _read_backup_manifest(self, archive: Path, *, require_checksums: bool) -> dict[str, Any]:
         if not zipfile.is_zipfile(archive):

@@ -8,7 +8,7 @@
 
 最新提交：以 `agent/export-publishing-foundation` 分支 HEAD 为准（交付回复会给出推送后的短 hash）。
 
-状态：**第九阶段后端已实现并通过 API 全量测试；等待 GPT-5.6 完整代码审计。**
+状态：**第九阶段后端已由 GPT-5.6 完整审计、修复并通过全量验证；等待推送审计提交。**
 
 ## 第九阶段完成内容
 
@@ -54,13 +54,31 @@
 ## 第九阶段测试结果
 
 ```text
-Focused Phase 9 API: 6 passed
-Full API: 128 passed, 287 warnings
+Focused Phase 9 API: 8 passed
+Full API: 130 passed, 287 warnings
 Web unit: 3 files / 11 tests passed
 npm run test: passed
 Build: passed
 Playwright e2e: 14 passed
 ```
+
+## 第九阶段 GPT-5.6 审计修复
+
+- 补强 current official commit、approved draft、official source 与 state snapshot 的作品归属、互相引用、状态、revision、checksum 和正文实际摘要校验。
+- 断裂或非 official 的来源链在审阅模式下也不会读取候选正文冒充正式稿。
+- 修正空格式静默回退、作品总章数越界、历史隔离永久阻断和检索新鲜度判断。
+- DOCX 增加标题层级、分页、目录字段、中文字体回退与审阅附录。
+- EPUB 增加 EPUB 3 必需元数据、审阅说明和问题附录。
+- 下载和发布登记前验证文件大小及 SHA-256，篡改 artifact 不可下载或登记。
+- 恢复为新项目时 remap 导出 JSON 的 projectId 并重算 manifest checksum。
+
+完整记录：`docs/plans/PHASE-9-AUDIT.md`。
+
+## 当前交给另一台电脑的任务
+
+第十阶段方案：`docs/plans/PHASE-10-LONGFORM-ENDURANCE.md`。
+
+另一台电脑只实现“长篇中程耐久测试与漂移监控”后端基础，不修改 UI，不调用真实 DeepSeek，不操作本机正式作品数据。完成后推送 `agent/longform-endurance-foundation` 并停止，返回当前 GPT-5.6 做完整审计。
 
 已知非阻断项：
 

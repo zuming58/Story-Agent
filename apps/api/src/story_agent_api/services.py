@@ -323,11 +323,13 @@ class StoryService:
         from .phase7 import Phase7Service
         from .phase8 import Phase8Service
         from .phase9 import Phase9Service
+        from .phase10 import Phase10Service
 
         self.phase5 = Phase5Service(self)
         self.phase7 = Phase7Service(self)
         self.phase8 = Phase8Service(self)
         self.phase9 = Phase9Service(self)
+        self.phase10 = Phase10Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -342,6 +344,7 @@ class StoryService:
         self.phase5.recover_interrupted_jobs()
         self.phase7.recover_interrupted_automation()
         self.phase9.recover_interrupted_exports()
+        self.phase10.recover_interrupted_endurance()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -1274,6 +1277,11 @@ class StoryService:
                         "export_job_chapters",
                         "export_artifacts",
                         "publication_records",
+                        "endurance_suites",
+                        "endurance_runs",
+                        "endurance_checkpoints",
+                        "endurance_findings",
+                        "endurance_reports",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
@@ -1290,6 +1298,9 @@ class StoryService:
                     session.execute(text(
                         "UPDATE export_artifacts SET status = 'missing', relative_path = '', is_current = 0, revision = revision + 1 WHERE project_id = :new_id"
                     ), {"new_id": restored.id})
+                    session.execute(text(
+                        "UPDATE endurance_runs SET status = 'interrupted', stop_reason = 'backup_restore', current_automation_run_id = NULL, current_automation_run_item_id = NULL, completed_at = :now WHERE project_id = :new_id AND status IN ('queued','running','paused','cancel_requested')"
+                    ), {"new_id": restored.id, "now": utc_now()})
                     # Lease rows are runtime ownership, not transferable
                     # authority. Keep them in the backup for auditability, but
                     # never let a restored clone inherit another process lease.

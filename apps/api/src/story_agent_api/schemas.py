@@ -1172,3 +1172,162 @@ class TrialReadinessOut(ApiModel):
     ready: bool
     max_safe_chapter_count: int
     checks: list[TrialReadinessCheckOut]
+
+
+class EnduranceReadinessCheckOut(ApiModel):
+    code: str
+    status: Literal["ready", "warning", "blocked"]
+    title: str
+    detail: str
+    chapter_number: int | None = None
+
+
+class EnduranceReadinessOut(ApiModel):
+    project_id: str
+    chapter_count: Literal[5, 10, 20, 30]
+    start_chapter: int
+    end_chapter: int
+    ready: bool
+    max_safe_chapter_count: int
+    checks: list[EnduranceReadinessCheckOut]
+    updated_at: datetime
+
+
+class EnduranceSuiteCreate(ApiModel):
+    name: str = Field(default="Longform endurance", min_length=1, max_length=160)
+    start_chapter: int | None = Field(default=None, ge=1, le=5000)
+    target_chapter_count: Literal[5, 10, 20, 30] = 5
+    daily_cost_limit: float | None = Field(default=None, ge=0)
+    total_cost_limit: float | None = Field(default=None, ge=0)
+    consecutive_failure_limit: int = Field(default=2, ge=1, le=10)
+    stop_severity: Literal["error", "blocker"] = "blocker"
+    enabled_rules: list[str] = Field(default_factory=list)
+
+
+class EnduranceSuiteUpdate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    target_chapter_count: Literal[5, 10, 20, 30] | None = None
+    daily_cost_limit: float | None = Field(default=None, ge=0)
+    total_cost_limit: float | None = Field(default=None, ge=0)
+    consecutive_failure_limit: int | None = Field(default=None, ge=1, le=10)
+    stop_severity: Literal["error", "blocker"] | None = None
+    enabled_rules: list[str] | None = None
+
+
+class EnduranceSuiteOut(ApiModel):
+    id: str
+    project_id: str
+    name: str
+    start_chapter: int
+    target_chapter_count: int
+    daily_cost_limit: float | None = None
+    total_cost_limit: float | None = None
+    consecutive_failure_limit: int
+    stop_severity: str
+    enabled_rules: list[str]
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class EnduranceRunCreate(ApiModel):
+    suite_id: str
+    idempotency_key: str | None = Field(default=None, max_length=120)
+    chapter_count: Literal[5, 10, 20, 30] | None = None
+
+
+class EnduranceCheckpointOut(ApiModel):
+    id: str
+    project_id: str
+    run_id: str
+    automation_run_id: str | None = None
+    automation_run_item_id: str | None = None
+    chapter_number: int
+    chapter_commit_id: str
+    source_version_id: str
+    state_snapshot_id: str
+    commit_revision: int
+    source_revision: int
+    snapshot_revision: int
+    commit_checksum: str
+    source_checksum: str
+    snapshot_checksum: str
+    canon_revision: int
+    plan_revision: int
+    budget_summary: dict[str, Any]
+    character_knowledge: dict[str, Any]
+    ability_summary: dict[str, Any]
+    item_summary: dict[str, Any]
+    foreshadow_summary: dict[str, Any]
+    cost_summary: dict[str, Any]
+    checkpoint_checksum: str
+    validation_status: str
+    created_at: datetime
+
+
+class EnduranceFindingOut(ApiModel):
+    id: str
+    project_id: str
+    run_id: str
+    checkpoint_id: str | None = None
+    rule_code: str
+    severity: str
+    chapter_number: int | None = None
+    evidence: dict[str, Any]
+    suggestion: str
+    status: str
+    fingerprint: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class EnduranceReportOut(ApiModel):
+    id: str
+    project_id: str
+    run_id: str
+    success_count: int
+    isolated_count: int
+    failed_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost: float
+    average_revision_rounds: float
+    quality_trend: dict[str, Any]
+    drift_trend: dict[str, Any]
+    stop_reason: str | None = None
+    checksum: str
+    generated_at: datetime
+    updated_at: datetime
+
+
+class EnduranceRunOut(ApiModel):
+    id: str
+    project_id: str
+    suite_id: str
+    status: str
+    idempotency_key: str | None = None
+    start_chapter: int
+    end_chapter: int
+    target_chapter_count: int
+    completed_count: int
+    current_automation_run_id: str | None = None
+    current_automation_run_item_id: str | None = None
+    last_checkpoint_id: str | None = None
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost: float
+    stop_reason: str | None = None
+    diagnostic: dict[str, Any] | None = None
+    revision: int
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime
+    checkpoints: list[EnduranceCheckpointOut] = Field(default_factory=list)
+    findings: list[EnduranceFindingOut] = Field(default_factory=list)
+    report: EnduranceReportOut | None = None
+    available_actions: list[str] = Field(default_factory=list)

@@ -1,3 +1,88 @@
+# Story Agent 第十阶段：长篇中程耐久测试与漂移监控交接
+
+更新时间：2026-07-14（Codex）
+
+当前分支：`agent/longform-endurance-foundation`
+
+准确开发基线：`agent/export-publishing-foundation@c81be33`
+
+最新提交：以 `agent/longform-endurance-foundation` 分支 HEAD 为准（交付回复会给出推送后的短 hash）。
+
+状态：**第十阶段后端基础已实现并通过专项、API 全量、Web 单元、构建和 Playwright 回归测试；等待 GPT-5.6 完整审计。**
+
+## 第十阶段完成内容
+
+- 新增项目数据库迁移 `0014_longform_endurance_foundation`。
+- 新增数据表：
+  - `endurance_suites`
+  - `endurance_runs`
+  - `endurance_checkpoints`
+  - `endurance_findings`
+  - `endurance_reports`
+- 新增 `Phase10Service`，作为 Phase 7 自动托管和 Phase 5 章节流水线之上的监督层。
+- Endurance run 通过 Phase 7 `create_manual_run` 派发批次，不复制章节生成、抽取、质量复核、修订或正式提交逻辑。
+- 每个 checkpoint 只在 current official `ChapterCommit`、official `SourceVersion`、`StateSnapshot` 和 approved draft 链路完整时创建。
+- Checkpoint 冻结 commit/source/snapshot revision 与 checksum、Canon/Plan revision、预算摘要、人物知识、能力、物品、伏笔和费用摘要。
+- 服务启动时将 active endurance run 收敛为 `interrupted`，将 `cancel_requested` 收敛为 `cancelled`，不会自动继续消耗模型费用。
+- Resume 会校验最后 checkpoint 与当前 official 状态一致；漂移返回 `ENDURANCE_CHECKPOINT_DRIFT`。
+- Cancel 会标记 endurance run，并沿用 Phase 7 cancel 语义取消当前 automation run。
+- 备份恢复会 remap endurance 表 project ID，并将 active endurance run 标为 `interrupted`、清除当前 automation 指针。
+- 未修改 `apps/web/**`、UI、CSS、设计令牌、Playwright 用例或视觉快照。
+- 未调用真实 DeepSeek；专项测试使用 fake Phase 7 派发与确定性本地数据。
+
+## 第十阶段 API
+
+- `GET /api/v1/projects/{project_id}/endurance/readiness?chapterCount=5|10|20|30`
+- `POST /api/v1/projects/{project_id}/endurance/suites`
+- `GET /api/v1/projects/{project_id}/endurance/suites`
+- `PUT /api/v1/projects/{project_id}/endurance/suites/{suite_id}`
+- `POST /api/v1/projects/{project_id}/endurance/runs`
+- `GET /api/v1/projects/{project_id}/endurance/runs`
+- `GET /api/v1/projects/{project_id}/endurance/runs/{run_id}`
+- `POST /api/v1/projects/{project_id}/endurance/runs/{run_id}/cancel`
+- `POST /api/v1/projects/{project_id}/endurance/runs/{run_id}/resume`
+- `POST /api/v1/projects/{project_id}/endurance/runs/{run_id}/evaluate`
+- `GET /api/v1/projects/{project_id}/endurance/runs/{run_id}/findings`
+- `GET /api/v1/projects/{project_id}/endurance/runs/{run_id}/report`
+
+## 第十阶段确定性规则
+
+- `ENDURANCE_COMMIT_SEQUENCE_GAP`
+- `ENDURANCE_DUPLICATE_CURRENT_COMMIT`
+- `ENDURANCE_STATE_NON_ATOMIC`
+- `ENDURANCE_PACING_EARLY`
+- `ENDURANCE_PACING_LATE`
+- `ENDURANCE_CHARACTER_EARLY`
+- `ENDURANCE_ABILITY_WINDOW`
+- `ENDURANCE_ITEM_STATE_DRIFT`
+- `ENDURANCE_KNOWLEDGE_LEAK`
+- `ENDURANCE_FORESHADOW_MISSED`
+- `ENDURANCE_REVISION_LIMIT_BREACH`
+- `ENDURANCE_COST_LIMIT`
+- `ENDURANCE_RESTART_DUPLICATION`
+
+严重度支持 `info|warning|error|blocker`；suite 的 `stopSeverity` 控制 error/blocker 是否阻断后续运行。
+
+## 第十阶段测试结果
+
+```text
+Phase 10 focused API: 5 passed
+Full API: 135 passed, 295 warnings
+Web unit: 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+Playwright e2e: 14 passed（1440×1024 与 1280×800）
+```
+
+## 已知限制与审计重点
+
+- 本阶段只提供后端基础和 API；没有新增 UI。
+- `POST /endurance/runs` 会派发 Phase 7 批次；审计和真实 20—30 章运行前必须确认模型费用和本地 Provider 配置。
+- 当前规则主要读取 structured source payload、Canon 约束、PlanNode 预算、Foreshadow、KnowledgeBoundary、AutomationRunItem 和 ChapterJob revision；真实长篇运行后应由 GPT-5.6 结合实际正文/抽取结构继续补强规则精度。
+- Git 传输在本轮开始时无法 fetch，但 GitHub API 可访问；本地用远端 patch 和 commit 元数据精确重建了 `c81be33`，当前分支 HEAD 的父链包含该 hash。
+- FastAPI TestClient 与 SQLite datetime adapter 仍有上游 deprecation warning。
+
+---
+
 # Story Agent 第九阶段：作品导出与发布准备交接
 
 更新时间：2026-07-14（Codex）

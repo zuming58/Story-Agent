@@ -1004,3 +1004,138 @@ class AutomationDailyReport(ProjectBase):
     status_summary_json: Mapped[str] = mapped_column(Text, default="{}")
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EnduranceSuite(ProjectBase):
+    __tablename__ = "endurance_suites"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    start_chapter: Mapped[int] = mapped_column(Integer, default=1)
+    target_chapter_count: Mapped[int] = mapped_column(Integer, default=5)
+    daily_cost_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_cost_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    consecutive_failure_limit: Mapped[int] = mapped_column(Integer, default=2)
+    stop_severity: Mapped[str] = mapped_column(String(20), default="blocker")
+    enabled_rules_json: Mapped[str] = mapped_column(Text, default="[]")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EnduranceRun(ProjectBase):
+    __tablename__ = "endurance_runs"
+    __table_args__ = (
+        Index(
+            "uq_endurance_runs_active",
+            "project_id",
+            unique=True,
+            sqlite_where=text("status IN ('queued','running','paused','cancel_requested')"),
+        ),
+        Index(
+            "uq_endurance_runs_idempotency",
+            "project_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    suite_id: Mapped[str] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    start_chapter: Mapped[int] = mapped_column(Integer)
+    end_chapter: Mapped[int] = mapped_column(Integer)
+    target_chapter_count: Mapped[int] = mapped_column(Integer, default=5)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0)
+    current_automation_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    current_automation_run_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    last_checkpoint_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    stop_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EnduranceCheckpoint(ProjectBase):
+    __tablename__ = "endurance_checkpoints"
+    __table_args__ = (Index("uq_endurance_checkpoints_run_chapter", "run_id", "chapter_number", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    automation_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    automation_run_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    chapter_number: Mapped[int] = mapped_column(Integer, index=True)
+    chapter_commit_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_version_id: Mapped[str] = mapped_column(String(36), index=True)
+    state_snapshot_id: Mapped[str] = mapped_column(String(36), index=True)
+    commit_revision: Mapped[int] = mapped_column(Integer)
+    source_revision: Mapped[int] = mapped_column(Integer)
+    snapshot_revision: Mapped[int] = mapped_column(Integer)
+    commit_checksum: Mapped[str] = mapped_column(String(64), default="")
+    source_checksum: Mapped[str] = mapped_column(String(64), default="")
+    snapshot_checksum: Mapped[str] = mapped_column(String(64), default="")
+    canon_revision: Mapped[int] = mapped_column(Integer, default=0)
+    plan_revision: Mapped[int] = mapped_column(Integer, default=0)
+    budget_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    character_knowledge_json: Mapped[str] = mapped_column(Text, default="{}")
+    ability_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    item_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    foreshadow_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    cost_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    checkpoint_checksum: Mapped[str] = mapped_column(String(64), default="")
+    validation_status: Mapped[str] = mapped_column(String(20), default="validated", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EnduranceFinding(ProjectBase):
+    __tablename__ = "endurance_findings"
+    __table_args__ = (Index("uq_endurance_findings_run_fingerprint", "run_id", "fingerprint", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    checkpoint_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    rule_code: Mapped[str] = mapped_column(String(120), index=True)
+    severity: Mapped[str] = mapped_column(String(20), index=True)
+    chapter_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    suggestion: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EnduranceReport(ProjectBase):
+    __tablename__ = "endurance_reports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    run_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    isolated_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    average_revision_rounds: Mapped[float] = mapped_column(Float, default=0.0)
+    quality_trend_json: Mapped[str] = mapped_column(Text, default="{}")
+    drift_trend_json: Mapped[str] = mapped_column(Text, default="{}")
+    stop_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

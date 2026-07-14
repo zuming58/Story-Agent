@@ -66,6 +66,14 @@ from .schemas import (
     ExportProfileUpdate,
     ExportReadinessOut,
     ExportReadinessRequest,
+    EnduranceFindingOut,
+    EnduranceReadinessOut,
+    EnduranceReportOut,
+    EnduranceRunCreate,
+    EnduranceRunOut,
+    EnduranceSuiteCreate,
+    EnduranceSuiteOut,
+    EnduranceSuiteUpdate,
     ForeshadowOut,
     KnowledgeBoundaryOut,
     ModelConfigCreate,
@@ -500,6 +508,54 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/publication-records", response_model=list[PublicationRecordOut])
     def list_publication_records(project_id: str) -> object:
         return service.phase9.list_publication_records(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/readiness", response_model=EnduranceReadinessOut)
+    def get_endurance_readiness(project_id: str, chapter_count: int = Query(default=5, alias="chapterCount")) -> object:
+        return service.phase10.readiness(project_id, chapter_count)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/suites", response_model=EnduranceSuiteOut, status_code=201)
+    def create_endurance_suite(project_id: str, payload: EnduranceSuiteCreate) -> object:
+        return service.phase10.create_suite(project_id, payload)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/suites", response_model=list[EnduranceSuiteOut])
+    def list_endurance_suites(project_id: str) -> object:
+        return service.phase10.list_suites(project_id)
+
+    @app.put("/api/v1/projects/{project_id}/endurance/suites/{suite_id}", response_model=EnduranceSuiteOut)
+    def update_endurance_suite(project_id: str, suite_id: str, payload: EnduranceSuiteUpdate) -> object:
+        return service.phase10.update_suite(project_id, suite_id, payload)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs", response_model=EnduranceRunOut, status_code=201)
+    def create_endurance_run(project_id: str, payload: EnduranceRunCreate, request: Request) -> object:
+        return service.phase10.create_run(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs", response_model=list[EnduranceRunOut])
+    def list_endurance_runs(project_id: str) -> object:
+        return service.phase10.list_runs(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}", response_model=EnduranceRunOut)
+    def get_endurance_run(project_id: str, run_id: str) -> object:
+        return service.phase10.get_run(project_id, run_id)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/cancel", response_model=EnduranceRunOut)
+    def cancel_endurance_run(project_id: str, run_id: str, request: Request) -> object:
+        return service.phase10.cancel_run(project_id, run_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/resume", response_model=EnduranceRunOut)
+    def resume_endurance_run(project_id: str, run_id: str, request: Request) -> object:
+        return service.phase10.resume_run(project_id, run_id, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/endurance/runs/{run_id}/evaluate", response_model=EnduranceRunOut)
+    def evaluate_endurance_run(project_id: str, run_id: str, request: Request) -> object:
+        return service.phase10.evaluate_run(project_id, run_id, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}/findings", response_model=list[EnduranceFindingOut])
+    def list_endurance_findings(project_id: str, run_id: str) -> object:
+        return service.phase10.list_findings(project_id, run_id)
+
+    @app.get("/api/v1/projects/{project_id}/endurance/runs/{run_id}/report", response_model=EnduranceReportOut)
+    def get_endurance_report(project_id: str, run_id: str) -> object:
+        return service.phase10.get_report(project_id, run_id)
 
     @app.patch("/api/v1/projects/{project_id}/plan/nodes/{node_id}", response_model=PlanNodeOut)
     def update_plan_node(project_id: str, node_id: str, payload: PlanNodeUpdate, request: Request) -> object:

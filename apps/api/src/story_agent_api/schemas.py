@@ -39,6 +39,13 @@ class ProjectOut(ApiModel):
     last_opened_at: datetime
 
 
+class ChapterPaceBudget(ApiModel):
+    max_major_events: int = Field(ge=1, le=100)
+    major_events: list[str] = Field(default_factory=list)
+    target_words_min: int = Field(ge=1, le=200000)
+    target_words_max: int = Field(ge=1, le=200000)
+
+
 class ChapterBeat(ApiModel):
     chapter_number: int = Field(ge=1, le=5000)
     title: str = Field(min_length=1, max_length=240)
@@ -48,6 +55,12 @@ class ChapterBeat(ApiModel):
     foreshadows: list[str] = Field(default_factory=list)
     required_characters: list[str] = Field(default_factory=list)
     forbidden: list[str] = Field(default_factory=list)
+    knowledge_boundaries: list[dict[str, Any] | str] = Field(default_factory=list)
+    allowed_abilities: list[str] = Field(default_factory=list)
+    forbidden_abilities: list[str] = Field(default_factory=list)
+    allowed_items: list[str] = Field(default_factory=list)
+    forbidden_items: list[str] = Field(default_factory=list)
+    pace_budget: ChapterPaceBudget | None = None
 
 
 class PlanNodeCreate(ApiModel):

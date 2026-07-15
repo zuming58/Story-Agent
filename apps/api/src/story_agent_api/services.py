@@ -717,6 +717,8 @@ class StoryService:
             raise StoryError(422, "SHORT_STORY_CHAPTER_RANGE", "Short-form projects must have 1-30 chapters.", {"totalChapters": changes["total_chapters"]})
         if "total_chapters" in changes and changes["total_chapters"] < project.current_chapter:
             raise StoryError(422, "PROJECT_TOTAL_BELOW_PROGRESS", "Total chapters cannot be lower than current progress.", {"currentChapter": project.current_chapter})
+        if "total_chapters" in changes:
+            self.phase12.assert_total_chapter_update(project, changes["total_chapters"])
         with self.db.catalog() as session:
             row = session.get(CatalogProject, project_id)
             assert row

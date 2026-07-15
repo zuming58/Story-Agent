@@ -10,6 +10,17 @@
 
 状态：**第十二阶段后端、项目数据库迁移、公共 API 类型与专项测试已完成并通过全量回归；未修改 Web，已停止继续开发，等待 GPT-5.6 完整代码审计。**
 
+## Codex 自审修复
+
+- 物化前严格校验并规范化 `maxMajorEvents`，非法类型、范围或事件溢出在创建目标项目前返回确定性 409，不再产生 500 或多余项目。
+- `targetWordCount` 覆盖值现在统一驱动源/目标 origin、目标 Plan、章节契约与自动托管字数预算。
+- 已完成物化的目标项目总章数不可通过普通项目更新缩短或扩展；readiness 同时核对 origin、Plan 范围、重复/缺失/越界 Beat 和每章事件预算。
+- 公共 `ChapterBeat` 新增 `paceBudget`、知识边界、允许/禁止能力与物品边界，Plan GET/PATCH 往返不再静默删除短篇预算。
+- completed 幂等请求先匹配冻结请求，即使 workspace 后续合法修改，原请求仍返回同一目标；新请求指纹包含 sourceProjectId。
+- 来源项目恢复为克隆时，旧外部目标链接转为 `detached` 历史记录并释放幂等键；恢复后的来源只能物化新的独立目标，不能认领原目标。
+- 短篇 Canon freshness 冲突明确返回 `SHORT_STORY_CANON_DRIFT`，并与其他 stale contract 一样阻止重检/提交。
+- 新增非法预算、字数覆盖、Plan round-trip、章数不可变、来源恢复、staged 恢复、最终章停止及短篇质量门回归测试。
+
 ## 第十二阶段完成内容
 
 - 新增项目数据库迁移 `0016_short_story_production_foundation`。
@@ -39,8 +50,8 @@
 ## 第十二阶段验证结果
 
 ```text
-Phase 12 focused API: 5 passed
-Full API: 152 passed
+Phase 12 focused API: 9 passed
+Full API: 156 passed
 Web unit: 3 files / 11 tests passed
 Build: passed（仅既有 Vite chunk-size warning）
 Playwright e2e: 14 passed（1440×1024 与 1280×800）

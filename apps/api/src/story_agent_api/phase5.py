@@ -257,6 +257,13 @@ class Phase5Service:
                 beat_foreshadows = self._beat_strings(chapter_beat, "foreshadows")
                 beat_characters = self._beat_strings(chapter_beat, "requiredCharacters", "required_characters")
                 beat_forbidden = self._beat_strings(chapter_beat, "forbidden")
+                beat_allowed_abilities = self._beat_strings(chapter_beat, "allowedAbilities", "allowed_abilities")
+                beat_forbidden_abilities = self._beat_strings(chapter_beat, "forbiddenAbilities", "forbidden_abilities")
+                beat_allowed_items = self._beat_strings(chapter_beat, "allowedItems", "allowed_items")
+                beat_forbidden_items = self._beat_strings(chapter_beat, "forbiddenItems", "forbidden_items")
+                beat_knowledge_boundaries = chapter_beat.get("knowledgeBoundaries", chapter_beat.get("knowledge_boundaries", []))
+                if not isinstance(beat_knowledge_boundaries, list):
+                    beat_knowledge_boundaries = []
                 must_advance: dict[str, Any] = {
                     "chapterNumber": payload.chapter_number,
                     "title": chapter_beat.get("title"),
@@ -281,6 +288,11 @@ class Phase5Service:
                 required_foreshadows = self._strings_from_payload(node, "foreshadows_json")
                 required_characters = []
                 beat_forbidden = []
+                beat_allowed_abilities = []
+                beat_forbidden_abilities = []
+                beat_allowed_items = []
+                beat_forbidden_items = []
+                beat_knowledge_boundaries = []
             objective = {
                 "mustAdvance": must_advance,
                 "authorNote": payload.author_note,
@@ -291,8 +303,13 @@ class Phase5Service:
                 "mayAdvance": may_advance,
                 "completionConditions": completion_conditions,
             }
-            if chapter_beat is not None and isinstance(chapter_beat.get("paceBudget"), dict):
-                allowed_scope["paceBudget"] = chapter_beat["paceBudget"]
+            chapter_pace_budget = chapter_beat.get("paceBudget", chapter_beat.get("pace_budget")) if chapter_beat is not None else None
+            if isinstance(chapter_pace_budget, dict):
+                allowed_scope["paceBudget"] = chapter_pace_budget
+            if chapter_beat is not None:
+                allowed_scope["knowledgeBoundaries"] = beat_knowledge_boundaries
+                allowed_scope["allowedAbilities"] = beat_allowed_abilities
+                allowed_scope["allowedItems"] = beat_allowed_items
             if project.mode == "short-form":
                 origin = session.scalar(select(ShortStoryOrigin).where(
                     ShortStoryOrigin.project_id == project.id,
@@ -330,6 +347,8 @@ class Phase5Service:
                     *beat_forbidden,
                     *[item.get("title", "") for item in future_nodes if item.get("title") and (not node or item.get("id") != node.id)],
                 ],
+                "forbiddenAbilities": beat_forbidden_abilities,
+                "forbiddenItems": beat_forbidden_items,
             }
             now = _now()
             item = ChapterContract(
@@ -1205,7 +1224,7 @@ class Phase5Service:
                         job.updated_at = _now()
                     session.add(self.service._audit("chapter.state_conflict_detected", "chapter_job", job_id, {**exc.details, "requestId": request_id}, request_id))
                 raise StoryError(409, "CHAPTER_STATE_CONFLICT", "Chapter state conflicts with current facts.", exc.details) from exc
-            if exc.code in {"CHAPTER_COMMIT_CONFLICT", "CHAPTER_CONTEXT_STALE"}:
+            if exc.code in {"CHAPTER_COMMIT_CONFLICT", "CHAPTER_CONTEXT_STALE", "SHORT_STORY_CANON_DRIFT"}:
                 with self.service.db.project_write(project.id, project.folder_path) as session:
                     job = session.get(ChapterJob, job_id)
                     if job:
@@ -2162,7 +2181,9 @@ class Phase5Service:
 
     def _assert_contract_fresh(self, session: Session, project_id: str, contract: ChapterContract) -> None:
         if self._current_canon_digest(session) != contract.canon_revision_digest:
-            raise StoryError(409, "CHAPTER_CONTEXT_STALE", "Locked Canon changed after the chapter contract was derived.", {"reason": "canon_revision_changed"})
+            meta = session.get(ProjectMeta, project_id)
+            code = "SHORT_STORY_CANON_DRIFT" if meta and meta.mode == "short-form" else "CHAPTER_CONTEXT_STALE"
+            raise StoryError(409, code, "Locked Canon changed after the chapter contract was derived.", {"reason": "canon_revision_changed"})
         if self._latest_official_snapshot_id(session, project_id) != contract.state_snapshot_id:
             raise StoryError(409, "CHAPTER_CONTEXT_STALE", "Official story state changed after the chapter contract was derived.", {"reason": "state_snapshot_changed"})
         if contract.plan_node_id:

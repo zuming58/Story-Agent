@@ -50,32 +50,37 @@ class Phase12Service:
         staged_target_project_id: str | None = None
         with self.service.db.project_write(source_project.id, source_project.folder_path) as session:
             workspace = self.service.phase11._get_workspace(session, source_project.id, workspace_id)
+            existing = None
+            if payload.idempotency_key:
+                existing = session.scalar(select(ShortStoryOrigin).where(
+                    ShortStoryOrigin.project_id == source_project.id,
+                    ShortStoryOrigin.idempotency_key == payload.idempotency_key,
+                ))
+                if existing and existing.status == "completed":
+                    if not self._completed_request_matches(existing, source_project.id, workspace.id, payload):
+                        raise StoryError(409, "SHORT_STORY_MATERIALIZE_IDEMPOTENCY_CONFLICT", "The idempotency key was already used for a different materialization request.")
+                    return self._materialize_result(existing)
             self.service.phase11._check_workspace_revision(workspace, payload.expected_workspace_revision)
             strategy = self._validated_source_strategy(session, workspace)
             budget = self._validated_chapter_budget(strategy, payload.target_chapter_count or workspace.target_chapter_count)
             target_chapter_count = len(budget)
             target_word_count = payload.target_word_count or strategy.target_word_count
             target_title = payload.target_title or f"{source_project.title} · 短篇版"
-            request_fingerprint = stable_digest({
-                "workspaceId": workspace.id,
-                "workspaceRevision": payload.expected_workspace_revision,
-                "strategyId": strategy.id,
-                "strategyRevision": strategy.revision,
-                "strategyChecksum": strategy.checksum,
-                "targetTitle": target_title,
-                "targetChapterCount": target_chapter_count,
-                "targetWordCount": target_word_count,
-            })
+            request_fingerprint = self._request_fingerprint(
+                source_project.id,
+                workspace.id,
+                payload.expected_workspace_revision,
+                strategy.id,
+                strategy.revision,
+                strategy.checksum,
+                target_title,
+                target_chapter_count,
+                target_word_count,
+            )
             if payload.idempotency_key:
-                existing = session.scalar(select(ShortStoryOrigin).where(
-                    ShortStoryOrigin.project_id == source_project.id,
-                    ShortStoryOrigin.idempotency_key == payload.idempotency_key,
-                ))
                 if existing:
                     if existing.request_fingerprint != request_fingerprint:
                         raise StoryError(409, "SHORT_STORY_MATERIALIZE_IDEMPOTENCY_CONFLICT", "The idempotency key was already used for a different materialization request.")
-                    if existing.status == "completed":
-                        return self._materialize_result(existing)
                     origin = existing
                     staged_target_project_id = origin.target_project_id
                     origin.status = "creating"
@@ -115,7 +120,7 @@ class Phase12Service:
                     origin.status = "staged"
                     origin.revision += 1
                     origin.updated_at = utc_now()
-            self._populate_target_project(target_project, source_snapshot, origin_id, payload.idempotency_key, request_fingerprint)
+            self._populate_target_project(target_project, source_snapshot, origin_id, payload.idempotency_key, request_fingerprint, target_word_count)
             with self.service.db.project_write(source_project.id, source_project.folder_path) as session:
                 origin = session.get(ShortStoryOrigin, origin_id)
                 assert origin
@@ -146,6 +151,19 @@ class Phase12Service:
                 raise StoryError(404, "SHORT_STORY_ORIGIN_NOT_FOUND", "Short story origin not found.")
             return self._origin_dict(origin)
 
+    def assert_total_chapter_update(self, project: Any, total_chapters: int) -> None:
+        if project.mode != "short-form":
+            return
+        with self.service.db.project(project.id, project.folder_path) as session:
+            origin = self._origin_for_project(session, project.id)
+            if origin and origin.status == "completed" and total_chapters != origin.target_chapter_count:
+                raise StoryError(
+                    409,
+                    "SHORT_STORY_TOTAL_IMMUTABLE",
+                    "Materialized short-story chapter count is immutable.",
+                    {"currentTotalChapters": project.total_chapters, "originTargetChapterCount": origin.target_chapter_count},
+                )
+
     def readiness(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         checks: list[dict[str, Any]] = []
@@ -161,11 +179,12 @@ class Phase12Service:
             canon = session.get(CanonDocument, "story-core")
             plan = session.scalar(select(Plan))
             nodes = session.scalars(select(PlanNode).order_by(PlanNode.target_chapter)).all()
-            beat_numbers: set[int] = set()
+            beats: list[dict[str, Any]] = []
             for node in nodes:
                 for beat in safe_json_loads(node.chapter_beats_json, []):
-                    if isinstance(beat, dict) and isinstance(beat.get("chapterNumber"), int):
-                        beat_numbers.add(beat["chapterNumber"])
+                    if isinstance(beat, dict):
+                        beats.append(beat)
+            beat_numbers = [beat.get("chapterNumber", beat.get("chapter_number")) for beat in beats]
             current_commits = set(session.scalars(select(ChapterCommit.chapter_number).where(
                 ChapterCommit.project_id == project.id,
                 ChapterCommit.is_current.is_(True),
@@ -176,8 +195,58 @@ class Phase12Service:
         add("SHORT_STORY_CHAPTER_RANGE", "ready" if 1 <= total <= 30 else "blocked", "Chapter range", f"Short story has {total} planned chapters." if 1 <= total <= 30 else "Short stories must have 1-30 chapters.")
         add("SHORT_STORY_CURRENT_PROGRESS", "ready" if 0 <= current <= total else "blocked", "Current progress", f"Current chapter is {current}." if 0 <= current <= total else "Current chapter is outside the planned range.")
         add("SHORT_STORY_CANON_LOCKED", "ready" if canon and canon.status == "locked" else "blocked", "Canon locked", "Target Canon is locked." if canon and canon.status == "locked" else "Lock target Canon before production.")
-        missing = [chapter for chapter in range(1, total + 1) if chapter not in beat_numbers]
-        add("SHORT_STORY_PLAN_READY", "ready" if plan and not missing else "blocked", "Chapter beats", "Every chapter has a short-story beat." if plan and not missing else "Missing chapter beats: " + "、".join(map(str, missing)), missing[0] if missing else None)
+        missing = [chapter for chapter in range(1, total + 1) if beat_numbers.count(chapter) == 0]
+        duplicates = sorted({chapter for chapter in beat_numbers if isinstance(chapter, int) and beat_numbers.count(chapter) > 1})
+        extras = [chapter for chapter in beat_numbers if not isinstance(chapter, int) or chapter < 1 or chapter > total]
+        plan_range_ready = bool(plan and plan.chapter_start == 1 and plan.chapter_end == total)
+        plan_ready = bool(plan and plan_range_ready and not missing and not duplicates and not extras and len(beats) == total)
+        plan_detail = "Every chapter has exactly one short-story beat."
+        if not plan_ready:
+            plan_detail = f"Plan range or beats are inconsistent; missing={missing}, duplicates={duplicates}, extras={extras}."
+        add("SHORT_STORY_PLAN_READY", "ready" if plan_ready else "blocked", "Chapter beats", plan_detail, missing[0] if missing else None)
+        budget_errors: list[int] = []
+        strategy_budget = safe_json_loads(origin.strategy_snapshot_json, {}).get("chapterBudget", []) if origin else []
+        expected_by_chapter = {
+            item.get("chapterNumber"): item
+            for item in strategy_budget
+            if isinstance(item, dict) and isinstance(item.get("chapterNumber"), int)
+        }
+        for beat in beats:
+            chapter = beat.get("chapterNumber", beat.get("chapter_number"))
+            pace_budget = beat.get("paceBudget", beat.get("pace_budget"))
+            if not isinstance(chapter, int) or not isinstance(pace_budget, dict):
+                if isinstance(chapter, int):
+                    budget_errors.append(chapter)
+                continue
+            events = pace_budget.get("majorEvents", pace_budget.get("major_events"))
+            maximum = pace_budget.get("maxMajorEvents", pace_budget.get("max_major_events"))
+            target_min = pace_budget.get("targetWordsMin", pace_budget.get("target_words_min"))
+            target_max = pace_budget.get("targetWordsMax", pace_budget.get("target_words_max"))
+            if (
+                not isinstance(events, list)
+                or not events
+                or not isinstance(maximum, int)
+                or isinstance(maximum, bool)
+                or maximum < len(events)
+                or not isinstance(target_min, int)
+                or isinstance(target_min, bool)
+                or not isinstance(target_max, int)
+                or isinstance(target_max, bool)
+                or target_min < 1
+                or target_max < target_min
+            ):
+                budget_errors.append(chapter)
+                continue
+            expected = expected_by_chapter.get(chapter)
+            if expected and (events != expected.get("majorEvents") or maximum != expected.get("maxMajorEvents")):
+                budget_errors.append(chapter)
+        origin_ready = not origin or (
+            origin.status == "completed"
+            and origin.target_project_id == project.id
+            and origin.target_chapter_count == total
+        )
+        add("SHORT_STORY_ORIGIN_READY", "ready" if origin_ready else "blocked", "Materialization origin", "Origin matches the target project." if origin_ready else "Origin status or target chapter count does not match this project.")
+        add("SHORT_STORY_PLAN_BUDGET", "ready" if not budget_errors and len(beats) == total else "blocked", "Chapter budgets", "Every chapter retains its event and word budget." if not budget_errors and len(beats) == total else "Invalid chapter budgets: " + "、".join(map(str, sorted(set(budget_errors)))), min(budget_errors) if budget_errors else None)
         extra_commits = [chapter for chapter in current_commits if chapter > total or chapter > 30]
         add("SHORT_STORY_COMMIT_RANGE", "ready" if not extra_commits else "blocked", "Official commit range", "Official commits are within range." if not extra_commits else "Out-of-range commits: " + "、".join(map(str, sorted(extra_commits))), min(extra_commits) if extra_commits else None)
         return {
@@ -194,8 +263,25 @@ class Phase12Service:
         with self.service.db.project_write(project_id, folder_path) as session:
             for origin in session.scalars(select(ShortStoryOrigin)).all():
                 origin.project_id = project_id
+                external_target = bool(
+                    origin.source_project_id == source_project_id
+                    and origin.target_project_id
+                    and origin.target_project_id != source_project_id
+                )
+                if external_target:
+                    origin.status = "detached"
+                    origin.idempotency_key = None
+                    origin.diagnostic_json = dumps({
+                        "recovered": "backup_restore_source_clone",
+                        "originalSourceProjectId": source_project_id,
+                        "originalTargetProjectId": origin.target_project_id,
+                    })
+                    origin.revision += 1
+                    origin.updated_at = utc_now()
+                    continue
                 if origin.source_project_id == source_project_id:
                     origin.source_project_id = project_id
+                    origin.idempotency_key = None
                 if origin.target_project_id == source_project_id:
                     origin.target_project_id = project_id
                 origin.source_manifest_json = dumps(remap_json_identifier(safe_json_loads(origin.source_manifest_json, {}), source_project_id, project_id))
@@ -238,8 +324,18 @@ class Phase12Service:
             events = item.get("majorEvents", item.get("events", []))
             if not isinstance(events, list) or not events or not all(isinstance(event, str) and event.strip() for event in events):
                 raise StoryError(409, "SHORT_STORY_CHAPTER_BUDGET_EMPTY_EVENTS", "Every short story chapter needs at least one major event.", {"chapterNumber": chapter})
+            max_events = item.get("maxMajorEvents", max(1, len(events)))
+            if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1 or max_events > 100:
+                raise StoryError(409, "SHORT_STORY_EVENT_BUDGET_INVALID", "maxMajorEvents must be an integer within 1-100.", {"chapterNumber": chapter, "maxMajorEvents": max_events})
+            if len(events) > max_events:
+                raise StoryError(409, "SHORT_STORY_EVENT_BUDGET", "Chapter major events exceed maxMajorEvents.", {"chapterNumber": chapter, "eventCount": len(events), "maxMajorEvents": max_events})
             seen.add(chapter)
-            budget.append({**item, "chapterNumber": chapter, "majorEvents": [event.strip() for event in events]})
+            budget.append({
+                **item,
+                "chapterNumber": chapter,
+                "majorEvents": [event.strip() for event in events],
+                "maxMajorEvents": max_events,
+            })
         budget.sort(key=lambda value: value["chapterNumber"])
         expected = list(range(1, len(budget) + 1))
         actual = [item["chapterNumber"] for item in budget]
@@ -336,11 +432,69 @@ class Phase12Service:
             "forbiddenReveals": safe_json_loads(strategy.forbidden_reveals_json, []),
         }
 
-    def _populate_target_project(self, target_project: Any, source_snapshot: dict[str, Any], origin_id: str, idempotency_key: str | None, request_fingerprint: str) -> None:
+    @staticmethod
+    def _request_fingerprint(
+        source_project_id: str,
+        workspace_id: str,
+        workspace_revision: int,
+        strategy_id: str,
+        strategy_revision: int,
+        strategy_checksum: str,
+        target_title: str,
+        target_chapter_count: int,
+        target_word_count: int,
+        *,
+        include_source_project: bool = True,
+    ) -> str:
+        value = {
+            "workspaceId": workspace_id,
+            "workspaceRevision": workspace_revision,
+            "strategyId": strategy_id,
+            "strategyRevision": strategy_revision,
+            "strategyChecksum": strategy_checksum,
+            "targetTitle": target_title,
+            "targetChapterCount": target_chapter_count,
+            "targetWordCount": target_word_count,
+        }
+        if include_source_project:
+            value["sourceProjectId"] = source_project_id
+        return stable_digest(value)
+
+    def _completed_request_matches(
+        self,
+        origin: ShortStoryOrigin,
+        source_project_id: str,
+        workspace_id: str,
+        payload: ShortStoryMaterializeCreate,
+    ) -> bool:
+        values = (
+            source_project_id,
+            workspace_id,
+            payload.expected_workspace_revision,
+            origin.source_strategy_id,
+            origin.source_strategy_revision,
+            origin.source_strategy_checksum,
+            payload.target_title or origin.target_title,
+            payload.target_chapter_count or origin.target_chapter_count,
+            payload.target_word_count or origin.target_word_count,
+        )
+        current = self._request_fingerprint(*values)
+        legacy = self._request_fingerprint(*values, include_source_project=False)
+        return origin.request_fingerprint in {current, legacy}
+
+    def _populate_target_project(
+        self,
+        target_project: Any,
+        source_snapshot: dict[str, Any],
+        origin_id: str,
+        idempotency_key: str | None,
+        request_fingerprint: str,
+        target_word_count: int,
+    ) -> None:
         strategy = source_snapshot["strategy"]
         budget = strategy["chapterBudget"]
         now = utc_now()
-        average_words = max(1000, int(strategy.get("targetWordCount", 10000) / max(1, len(budget))))
+        average_words = max(1000, int(target_word_count / max(1, len(budget))))
         target_min = max(500, int(average_words * 0.7))
         target_max = max(target_min, int(average_words * 1.3))
         with self.service.db.project_write(target_project.id, target_project.folder_path) as session:
@@ -376,7 +530,7 @@ class Phase12Service:
             origin.target_project_id = target_project.id
             origin.target_title = target_project.title
             origin.target_chapter_count = len(budget)
-            origin.target_word_count = strategy.get("targetWordCount", 10000)
+            origin.target_word_count = target_word_count
             origin.status = "completed"
             origin.idempotency_key = idempotency_key
             origin.request_fingerprint = request_fingerprint
@@ -524,6 +678,11 @@ class Phase12Service:
             completion_conditions = [str(value) for value in item.get("completionConditions", major_events) if isinstance(value, str)]
             if chapter == len(strategy["chapterBudget"]) and strategy.get("ending"):
                 completion_conditions.append(str(strategy["ending"]))
+            knowledge_boundaries = [
+                value
+                for value in item.get("knowledgeBoundaries", [])
+                if isinstance(value, (dict, str))
+            ] if isinstance(item.get("knowledgeBoundaries", []), list) else []
             beat = {
                 "chapterNumber": chapter,
                 "title": str(item.get("title") or f"短篇第 {chapter} 章"),
@@ -533,8 +692,13 @@ class Phase12Service:
                 "foreshadows": foreshadows,
                 "requiredCharacters": [str(value) for value in item.get("requiredCharacters", []) if isinstance(value, str)],
                 "forbidden": forbidden_reveals,
+                "knowledgeBoundaries": knowledge_boundaries,
+                "allowedAbilities": self._string_values(item.get("allowedAbilities", [])),
+                "forbiddenAbilities": self._string_values(item.get("forbiddenAbilities", [])),
+                "allowedItems": self._string_values(item.get("allowedItems", [])),
+                "forbiddenItems": self._string_values(item.get("forbiddenItems", [])),
                 "paceBudget": {
-                    "maxMajorEvents": int(item.get("maxMajorEvents", max(1, len(major_events)))),
+                    "maxMajorEvents": item["maxMajorEvents"],
                     "majorEvents": major_events,
                     "targetWordsMin": target_min,
                     "targetWordsMax": target_max,

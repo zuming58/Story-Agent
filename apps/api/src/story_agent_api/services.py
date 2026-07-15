@@ -333,6 +333,7 @@ class StoryService:
         from .phase9 import Phase9Service
         from .phase10 import Phase10Service
         from .phase11 import Phase11Service
+        from .phase12 import Phase12Service
 
         self.phase5 = Phase5Service(self)
         self.phase7 = Phase7Service(self)
@@ -340,6 +341,7 @@ class StoryService:
         self.phase9 = Phase9Service(self)
         self.phase10 = Phase10Service(self)
         self.phase11 = Phase11Service(self)
+        self.phase12 = Phase12Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -356,6 +358,7 @@ class StoryService:
         self.phase9.recover_interrupted_exports()
         self.phase10.recover_interrupted_endurance()
         self.phase11.recover_interrupted_adaptations()
+        self.phase12.recover_interrupted_short_story_origins()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -661,6 +664,8 @@ class StoryService:
             return project
 
     def create_project(self, payload: ProjectCreate, *, seed_demo: bool = False) -> CatalogProject:
+        if payload.mode == "short-form" and payload.total_chapters > 30:
+            raise StoryError(422, "SHORT_STORY_CHAPTER_RANGE", "Short-form projects must have 1-30 chapters.", {"totalChapters": payload.total_chapters})
         project_id = str(uuid4())
         folder = (self.settings.projects_dir / f"{project_id}-{slugify(payload.title)}").resolve()
         if self.settings.projects_dir.resolve() not in folder.parents:
@@ -708,6 +713,10 @@ class StoryService:
     def update_project(self, project_id: str, payload: ProjectUpdate) -> CatalogProject:
         project = self.get_project(project_id)
         changes = payload.model_dump(exclude_none=True)
+        if project.mode == "short-form" and "total_chapters" in changes and changes["total_chapters"] > 30:
+            raise StoryError(422, "SHORT_STORY_CHAPTER_RANGE", "Short-form projects must have 1-30 chapters.", {"totalChapters": changes["total_chapters"]})
+        if "total_chapters" in changes and changes["total_chapters"] < project.current_chapter:
+            raise StoryError(422, "PROJECT_TOTAL_BELOW_PROGRESS", "Total chapters cannot be lower than current progress.", {"currentChapter": project.current_chapter})
         with self.db.catalog() as session:
             row = session.get(CatalogProject, project_id)
             assert row
@@ -1300,6 +1309,7 @@ class StoryService:
                         "drama_scenes",
                         "drama_script_versions",
                         "adaptation_findings",
+                        "short_story_origins",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
@@ -1348,6 +1358,7 @@ class StoryService:
                 self._repair_restored_export_metadata(restored, old_id)
                 self._repair_restored_endurance_metadata(restored, old_id)
                 self.phase11.repair_restored_metadata(restored.id, restored.folder_path, old_id)
+                self.phase12.repair_restored_metadata(restored.id, restored.folder_path, old_id)
                 return restored
             except Exception:
                 if restored is not None:

@@ -117,7 +117,11 @@ from .schemas import (
     RetrievalStatus,
     ScriptProposalCreate,
     ScriptVersionApprove,
+    ShortStoryMaterializeCreate,
+    ShortStoryMaterializeOut,
+    ShortStoryOriginOut,
     ShortStoryProposalCreate,
+    ShortStoryReadinessOut,
     SourceVersionOut,
     SourceVersionSupersede,
     StateCandidateCommit,
@@ -594,6 +598,22 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/short-story-proposals", response_model=AdaptationProposalOut, status_code=201)
     def create_short_story_proposal(project_id: str, workspace_id: str, payload: ShortStoryProposalCreate, request: Request) -> object:
         return service.phase11.create_short_story_proposal(project_id, workspace_id, payload, request.state.request_id)
+
+    @app.post(
+        "/api/v1/projects/{project_id}/adaptation-workspaces/{workspace_id}/materialize-short-story",
+        response_model=ShortStoryMaterializeOut,
+        status_code=201,
+    )
+    def materialize_short_story(project_id: str, workspace_id: str, payload: ShortStoryMaterializeCreate, request: Request) -> object:
+        return service.phase12.materialize_short_story(project_id, workspace_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/short-story/origin", response_model=ShortStoryOriginOut)
+    def get_short_story_origin(project_id: str) -> object:
+        return service.phase12.get_origin(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/short-story/readiness", response_model=ShortStoryReadinessOut)
+    def get_short_story_readiness(project_id: str) -> object:
+        return service.phase12.readiness(project_id)
 
     @app.post("/api/v1/adaptation-proposals/{proposal_id}/apply", response_model=AdaptationProposalOut)
     def apply_adaptation_proposal(proposal_id: str, payload: AdaptationProposalAction, request: Request) -> object:

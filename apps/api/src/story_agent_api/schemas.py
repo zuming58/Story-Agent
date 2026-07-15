@@ -1563,3 +1563,58 @@ class AdaptationFindingOut(ApiModel):
     revision: int
     created_at: datetime
     updated_at: datetime
+
+
+class ShortStoryMaterializeCreate(ApiModel):
+    expected_workspace_revision: int = Field(ge=1)
+    idempotency_key: str | None = Field(default=None, max_length=120)
+    target_title: str | None = Field(default=None, min_length=1, max_length=200)
+    target_chapter_count: int | None = Field(default=None, ge=1, le=30)
+    target_word_count: int | None = Field(default=None, ge=1000, le=300000)
+
+
+class ShortStoryOriginOut(ApiModel):
+    id: str
+    project_id: str
+    source_project_id: str
+    source_workspace_id: str
+    source_strategy_id: str
+    source_strategy_revision: int
+    source_strategy_checksum: str
+    source_manifest: dict[str, Any]
+    strategy_snapshot: dict[str, Any]
+    target_project_id: str | None = None
+    target_title: str
+    target_chapter_count: int
+    target_word_count: int
+    status: str
+    idempotency_key: str | None = None
+    request_fingerprint: str
+    diagnostic: dict[str, Any] | None = None
+    revision: int
+    created_at: datetime
+    completed_at: datetime | None = None
+    updated_at: datetime
+
+
+class ShortStoryMaterializeOut(ApiModel):
+    origin: ShortStoryOriginOut
+    target_project: ProjectOut | None = None
+
+
+class ShortStoryReadinessCheckOut(ApiModel):
+    code: str
+    status: Literal["ready", "warning", "blocked"]
+    title: str
+    detail: str
+    chapter_number: int | None = None
+
+
+class ShortStoryReadinessOut(ApiModel):
+    project_id: str
+    ready: bool
+    total_chapters: int
+    current_chapter: int
+    origin: ShortStoryOriginOut | None = None
+    checks: list[ShortStoryReadinessCheckOut]
+    updated_at: datetime

@@ -34,6 +34,7 @@ from .models import (
     ProjectMeta,
     QualityFinding,
     QualityRun,
+    ShortStoryOrigin,
     SourceVersion,
     StateDelta,
     StateFact,
@@ -212,8 +213,11 @@ class Phase5Service:
         if payload.target_words_min > payload.target_words_max:
             raise StoryError(422, "INVALID_CHAPTER_WORD_TARGET", "targetWordsMin must not exceed targetWordsMax.")
         project = self.service.get_project(project_id)
+        if project.mode == "short-form" and payload.chapter_number > 30:
+            raise StoryError(422, "SHORT_STORY_CHAPTER_RANGE", "Short-form chapter contracts are limited to chapters 1-30.", {"chapterNumber": payload.chapter_number})
         if payload.chapter_number > project.total_chapters:
-            raise StoryError(422, "CHAPTER_NUMBER_OUT_OF_RANGE", "Chapter number exceeds the project's planned chapter count.", {"totalChapters": project.total_chapters})
+            code = "SHORT_STORY_CHAPTER_RANGE" if project.mode == "short-form" else "CHAPTER_NUMBER_OUT_OF_RANGE"
+            raise StoryError(422, code, "Chapter number exceeds the project's planned chapter count.", {"totalChapters": project.total_chapters})
         with self.service.db.project_write(project.id, project.folder_path) as session:
             phase7 = getattr(self.service, "phase7", None)
             if phase7 is not None:
@@ -287,6 +291,38 @@ class Phase5Service:
                 "mayAdvance": may_advance,
                 "completionConditions": completion_conditions,
             }
+            if chapter_beat is not None and isinstance(chapter_beat.get("paceBudget"), dict):
+                allowed_scope["paceBudget"] = chapter_beat["paceBudget"]
+            if project.mode == "short-form":
+                origin = session.scalar(select(ShortStoryOrigin).where(
+                    ShortStoryOrigin.project_id == project.id,
+                    ShortStoryOrigin.target_project_id == project.id,
+                    ShortStoryOrigin.status == "completed",
+                ))
+                committed_words = sum(session.scalars(
+                    select(ChapterDraft.word_count)
+                    .join(ChapterCommit, ChapterCommit.approved_draft_id == ChapterDraft.id)
+                    .where(
+                        ChapterCommit.project_id == project.id,
+                        ChapterCommit.is_current.is_(True),
+                        ChapterCommit.status == "official",
+                        ChapterCommit.chapter_number < payload.chapter_number,
+                    )
+                ).all())
+                strategy = _safe_loads(origin.strategy_snapshot_json, {}) if origin else {}
+                target_total_words = origin.target_word_count if origin else None
+                allowed_scope["shortStory"] = {
+                    "mode": "short-form",
+                    "targetChapterCount": project.total_chapters,
+                    "currentChapterNumber": payload.chapter_number,
+                    "remainingChapterCount": project.total_chapters - payload.chapter_number + 1,
+                    "targetTotalWords": target_total_words,
+                    "committedWords": committed_words,
+                    "remainingWordsBeforeChapter": max(0, target_total_words - committed_words) if target_total_words else None,
+                    "strategyChecksum": origin.source_strategy_checksum if origin else None,
+                    "coreHook": strategy.get("coreHook"),
+                    "ending": strategy.get("ending"),
+                }
             forbidden_scope = {
                 "mustNotAdvance": [item for item in future_nodes if not node or item.get("id") != node.id],
                 "mustNotComplete": beat_forbidden or ([node_payload] if node and not node_is_due else []),
@@ -1696,6 +1732,13 @@ class Phase5Service:
             session.add(run)
             findings: list[dict[str, Any]] = []
             content = draft.content_markdown.strip()
+            is_short_story = project.mode == "short-form"
+            origin = session.scalar(select(ShortStoryOrigin).where(
+                ShortStoryOrigin.project_id == project.id,
+                ShortStoryOrigin.target_project_id == project.id,
+                ShortStoryOrigin.status == "completed",
+            )) if is_short_story else None
+            strategy = _safe_loads(origin.strategy_snapshot_json, {}) if origin else {}
             if not content:
                 findings.append(self._finding_payload("CHAPTER_DRAFT_EMPTY", "blocker", "mechanical", "Chapter draft is empty.", [], {}, "Generate a non-empty chapter body."))
             if re.search(r"TODO|待补|\[[^\]]*(?:xxx|TODO)[^\]]*\]", content, flags=re.I):
@@ -1708,7 +1751,8 @@ class Phase5Service:
             forbidden = _safe_loads(contract.forbidden_scope_json, {})
             for keyword in forbidden.get("futureKeywords", []) if isinstance(forbidden, dict) else []:
                 if isinstance(keyword, str) and keyword and keyword.lower() in lowered:
-                    findings.append(self._finding_payload("SCOPE_FUTURE_NODE_CONSUMED", "blocker", "scope", "Draft appears to consume a future plan node.", [keyword], {}, "Remove future-node payoff from this chapter."))
+                    code = "SHORT_STORY_REVEAL_EARLY" if is_short_story else "SCOPE_FUTURE_NODE_CONSUMED"
+                    findings.append(self._finding_payload(code, "blocker", "scope", "Draft appears to consume a future plan node.", [keyword], {}, "Remove future-node payoff from this chapter."))
             for condition in _safe_loads(contract.completion_conditions_json, []):
                 if isinstance(condition, str) and condition.strip() and not _requirement_evident(condition, content):
                     findings.append(self._finding_payload("REQUIRED_CONDITION_MISSING", "error", "contract", "A required completion condition is not evident in the draft.", [condition], {}, "Add clear evidence for this completion condition."))
@@ -1735,6 +1779,10 @@ class Phase5Service:
             for character in _safe_loads(contract.required_characters_json, []):
                 if isinstance(character, str) and character.strip() and not _canonical_reference_evident(character, lowered, extracted_entities | extracted_participants):
                     findings.append(self._finding_payload("REQUIRED_CHARACTER_MISSING", "error", "contract", "A required character is missing from this chapter.", [character], {}, "Add the required character or revise the contract."))
+            if is_short_story:
+                for hook in _safe_loads(contract.required_hooks_json, []):
+                    if isinstance(hook, str) and hook.strip() and not _requirement_evident(hook, content):
+                        findings.append(self._finding_payload("SHORT_STORY_HOOK_MISSING", "error", "hook", "A required chapter hook is not evident in the draft.", [hook], {}, "Add the required hook or revise the locked contract."))
             extracted_foreshadows = {
                 str(value).strip().lower()
                 for item in extraction_payload.get("foreshadows", [])
@@ -1759,7 +1807,55 @@ class Phase5Service:
             pace_budget = _safe_loads(contract.allowed_scope_json, {}).get("paceBudget", {})
             max_events = pace_budget.get("maxMajorEvents") if isinstance(pace_budget, dict) else None
             if isinstance(max_events, int) and not isinstance(max_events, bool) and len(extraction_payload.get("events", [])) > max_events:
-                findings.append(self._finding_payload("PACE_MAJOR_EVENT_OVERFLOW", "blocker", "pace", "The extraction contains more major events than the chapter pace budget allows.", [{"eventCount": len(extraction_payload.get("events", [])), "maximum": max_events}], {}, "Move excess major events to later chapters."))
+                code = "SHORT_STORY_EVENT_BUDGET" if is_short_story else "PACE_MAJOR_EVENT_OVERFLOW"
+                findings.append(self._finding_payload(code, "blocker", "pace", "The extraction contains more major events than the chapter pace budget allows.", [{"eventCount": len(extraction_payload.get("events", [])), "maximum": max_events}], {}, "Move excess major events to later chapters."))
+
+            if is_short_story:
+                if contract.chapter_number < 1 or contract.chapter_number > min(30, project.total_chapters):
+                    findings.append(self._finding_payload("SHORT_STORY_CHAPTER_RANGE", "blocker", "scope", "Chapter is outside the short-story range.", [contract.chapter_number], {}, "Use a chapter within the locked short-story plan."))
+                canon = session.get(CanonDocument, "story-core")
+                if not canon or canon.status != "locked":
+                    findings.append(self._finding_payload("SHORT_STORY_CANON_DRIFT", "blocker", "canon", "Target short-story Canon is no longer locked.", [], {}, "Resolve Canon changes and lock the target Canon before writing."))
+                if origin and origin.target_word_count > 0:
+                    committed_words = sum(session.scalars(
+                        select(ChapterDraft.word_count)
+                        .join(ChapterCommit, ChapterCommit.approved_draft_id == ChapterDraft.id)
+                        .where(
+                            ChapterCommit.project_id == project.id,
+                            ChapterCommit.is_current.is_(True),
+                            ChapterCommit.status == "official",
+                            ChapterCommit.chapter_number != contract.chapter_number,
+                        )
+                    ).all())
+                    projected_words = committed_words + draft.word_count
+                    upper = int(origin.target_word_count * 1.3)
+                    lower = int(origin.target_word_count * 0.7)
+                    if projected_words > upper or (contract.chapter_number == project.total_chapters and projected_words < lower):
+                        findings.append(self._finding_payload(
+                            "SHORT_STORY_TOTAL_WORD_BUDGET",
+                            "error",
+                            "pace",
+                            "Projected full-story word count is outside the accepted short-story budget.",
+                            [{"projectedWords": projected_words, "targetWords": origin.target_word_count}],
+                            {},
+                            "Rebalance this chapter against the remaining full-story word budget.",
+                        ))
+                if contract.chapter_number == project.total_chapters:
+                    ending = str(strategy.get("ending") or "").strip()
+                    if ending and not _requirement_evident(ending, content):
+                        findings.append(self._finding_payload("SHORT_STORY_ENDING_INCOMPLETE", "blocker", "ending", "The final chapter does not evidence the locked short-story ending.", [ending], {}, "Complete the main conflict, cost, and emotional closure."))
+                    foreshadow_plan = strategy.get("foreshadowPlan", {})
+                    expected_resolutions = foreshadow_plan.get("resolved", []) if isinstance(foreshadow_plan, dict) else []
+                    resolved_foreshadows = {
+                        str(value).strip().lower()
+                        for item in extraction_payload.get("foreshadows", [])
+                        if isinstance(item, dict) and item.get("status") == "resolved"
+                        for value in (item.get("code"), item.get("label"), item.get("name"))
+                        if isinstance(value, str) and value.strip()
+                    }
+                    for expected in expected_resolutions if isinstance(expected_resolutions, list) else []:
+                        if isinstance(expected, str) and expected.strip() and not _requirement_evident(expected, content, resolved_foreshadows):
+                            findings.append(self._finding_payload("SHORT_STORY_FORESHADOW_DROPPED", "blocker", "foreshadow", "A required final foreshadow payoff is missing.", [expected], {}, "Resolve the retained foreshadow before the ending closes."))
 
             for fact in extraction_payload.get("facts", []):
                 if not isinstance(fact, dict):

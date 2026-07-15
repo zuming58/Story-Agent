@@ -1,4 +1,68 @@
-# Story Agent 当前交接：第十一阶段审计完成，范围收敛为长篇与短篇小说
+# Story Agent 当前交接：第十二阶段短篇正文生产后端基础完成
+
+更新时间：2026-07-15（Codex）
+
+当前分支：`agent/short-story-production-foundation`
+
+准确开发基线：`agent/shortform-adaptation-foundation@356689b`
+
+最新提交：以 `agent/short-story-production-foundation` 分支 HEAD 为准（交付回复给出推送后的准确短 hash；提交不能在自身内容中记录自身 hash）。
+
+状态：**第十二阶段后端、项目数据库迁移、公共 API 类型与专项测试已完成并通过全量回归；未修改 Web，已停止继续开发，等待 GPT-5.6 完整代码审计。**
+
+## 第十二阶段完成内容
+
+- 新增项目数据库迁移 `0016_short_story_production_foundation`。
+- 新增 `short_story_origins` 表，保存来源项目/workspace/strategy、strategy revision/checksum、冻结 source manifest、策略快照、目标项目、幂等指纹、创建状态、失败诊断和时间戳。
+- 新增 `Phase12Service`，将已确认且 checksum 有效的短篇 strategy 物化为新的独立 `mode=short-form` 标准项目。
+- 物化前复核 workspace 类型/状态/revision、active strategy checksum、open error/blocker 和 Canon/Plan/current official commit source manifest 漂移。
+- 物化采用 `creating -> staged -> completed|failed` 状态，不跨两个 SQLite 假装原子事务；目标创建后立即回写 ID，失败保留诊断，同幂等键重试复用原目标项目。
+- 来源长篇与目标短篇使用不同项目目录和 SQLite；目标 Canon/Plan/ChapterBeat 从冻结快照复制，来源长篇进度、ChapterCommit、状态、检索与费用不被写入。
+- Canon 类型、实体、关系和规则按目标自然键映射并重连目标 UUID，避免引用来源数据库主键或与目标系统默认类型冲突。
+- `short-form` 项目限制为 1-30 章且从第 0 章开始；项目更新和章节契约均拒绝超出范围。
+- 连续 1-N `ChapterBeat` 写入目标 Plan；缺号、重号、越界、空重大事件和请求章数冲突会阻断物化。
+- Phase 5 契约注入当前章事件/字数预算、全篇剩余预算、strategy checksum、核心钩子与结局边界；继续复用候选稿、事实抽取、多角色复核、两轮修订和原子正式提交。
+- 新增短篇确定性质量规则：`SHORT_STORY_CHAPTER_RANGE`、`SHORT_STORY_EVENT_BUDGET`、`SHORT_STORY_TOTAL_WORD_BUDGET`、`SHORT_STORY_HOOK_MISSING`、`SHORT_STORY_REVEAL_EARLY`、`SHORT_STORY_FORESHADOW_DROPPED`、`SHORT_STORY_ENDING_INCOMPLETE`、`SHORT_STORY_CANON_DRIFT`。
+- Phase 7 继续使用既有 `min(totalChapters, requestedEnd)` 批次边界，最终章后 readiness 阻止额外批次；Phase 9 正式短篇导出要求完整 1-N 范围并只读取 current official commits。
+- 备份恢复会 remap 目标 origin 的 `projectId/targetProjectId` 和快照内项目 ID；外部来源长篇 ID 保持为独立溯源引用。
+- 未新增短剧、短视频、分镜、图片、配音、视频发布或 EXE 能力。
+- 未修改 `apps/web/**`、UI、CSS、设计令牌、Playwright 用例或视觉快照。
+
+## 第十二阶段 API
+
+- `POST /api/v1/projects/{source_project_id}/adaptation-workspaces/{workspace_id}/materialize-short-story`
+- `GET /api/v1/projects/{project_id}/short-story/origin`
+- `GET /api/v1/projects/{project_id}/short-story/readiness`
+
+公共请求/响应类型：`ShortStoryMaterializeCreate`、`ShortStoryMaterializeOut`、`ShortStoryOriginOut`、`ShortStoryReadinessOut`。
+
+## 第十二阶段验证结果
+
+```text
+Phase 12 focused API: 5 passed
+Full API: 152 passed
+Web unit: 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+Playwright e2e: 14 passed（1440×1024 与 1280×800）
+python compileall: passed
+git diff --check: passed（仅 Windows LF/CRLF 提示）
+```
+
+所有短篇 strategy/物化测试使用确定性本地替身，没有调用真实 DeepSeek，没有读取或修改用户 `.data`、正式正文、API Key、日志或备份。
+
+## 已知限制与审计重点
+
+- 本阶段只提供后端与 API；原生短篇仍通过既有 Canon/Plan API 建立生产基础，没有新增 UI。
+- 失败的 staged 目标项目不会被静默删除；它保持 readiness blocked 和来源侧失败诊断，同幂等键可安全重试复用，需审计这一补偿语义是否满足产品期望。
+- 短篇字数、钩子、提前揭示、伏笔与结局规则是确定性基础门；真实作品质量仍需后续本地 Provider 验收，不应把测试替身结果视为真实成稿验收。
+- FastAPI TestClient、Python SQLite datetime adapter 和 Vite chunk-size 仍有既有非阻断 warning。
+- GPT-5.6 应重点审计双 SQLite staged/retry、来源 manifest 不可变性、Canon 自然键映射、备份 remap、质量门误报/漏报以及 Phase 7 最终章停止语义。
+
+下一步只做 GPT-5.6 完整代码审计；不要继续开发，不要合并任何分支。
+
+---
+
+# Story Agent 第十一阶段审计交接：范围收敛为长篇与短篇小说
 
 更新时间：2026-07-14（GPT-5.6）
 

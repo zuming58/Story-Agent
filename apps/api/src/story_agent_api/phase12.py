@@ -65,6 +65,18 @@ class Phase12Service:
             budget = self._validated_chapter_budget(strategy, payload.target_chapter_count or workspace.target_chapter_count)
             target_chapter_count = len(budget)
             target_word_count = payload.target_word_count or strategy.target_word_count
+            minimum_viable_words = target_chapter_count * 500
+            if target_word_count < minimum_viable_words:
+                raise StoryError(
+                    422,
+                    "SHORT_STORY_WORD_BUDGET_INVALID",
+                    "Target word count is too small for the selected chapter count.",
+                    {
+                        "targetWordCount": target_word_count,
+                        "targetChapterCount": target_chapter_count,
+                        "minimumTargetWordCount": minimum_viable_words,
+                    },
+                )
             target_title = payload.target_title or f"{source_project.title} · 短篇版"
             request_fingerprint = self._request_fingerprint(
                 source_project.id,
@@ -494,8 +506,8 @@ class Phase12Service:
         strategy = source_snapshot["strategy"]
         budget = strategy["chapterBudget"]
         now = utc_now()
-        average_words = max(1000, int(target_word_count / max(1, len(budget))))
-        target_min = max(500, int(average_words * 0.7))
+        average_words = int(target_word_count / max(1, len(budget)))
+        target_min = max(350, int(average_words * 0.7))
         target_max = max(target_min, int(average_words * 1.3))
         with self.service.db.project_write(target_project.id, target_project.folder_path) as session:
             meta = session.get(ProjectMeta, target_project.id)

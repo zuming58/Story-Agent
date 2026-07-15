@@ -311,6 +311,11 @@ def test_short_story_proposal_repair_idempotency_apply_and_reject(client: TestCl
     proposal = created.json()
     assert proposal["status"] == "pending"
     assert len(calls) == 2
+    source_context = proposal["inputSnapshot"]["sourceContext"]
+    assert source_context["canon"]["contentMarkdown"] == "Locked canon"
+    assert source_context["canon"]["truncated"] is False
+    assert source_context["plan"]["nodes"]
+    assert source_context["plan"]["checksum"]
 
     duplicate = client.post(
         f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
@@ -586,3 +591,39 @@ def test_plan_and_chapter_source_content_drift_is_detected(client: TestClient) -
     chapter_drift = client.get(f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/readiness").json()
     assert chapter_drift["ready"] is False
     assert chapter_drift["sourceManifest"]["diagnostic"]["code"] == "ADAPTATION_SOURCE_STATE_INVALID"
+
+
+def test_chapter_range_proposal_receives_official_story_content(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_foundation(client, project["id"])
+    _seed_official_chapter(client, project["id"], 1)
+    workspace = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces",
+        json={
+            "name": "Content source",
+            "kind": "short_story",
+            "sourceType": "chapter_range",
+            "chapterStart": 1,
+            "chapterEnd": 1,
+            "targetWordCount": 12000,
+            "targetChapterCount": 6,
+        },
+    ).json()
+    service = client.app.state.story_service
+    service.phase11._complete_role = lambda *args, **kwargs: (dumps(_valid_strategy()), "run-source-context")
+
+    response = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"]},
+    )
+    assert response.status_code == 201, response.text
+    source_context = response.json()["inputSnapshot"]["sourceContext"]
+    assert source_context["canon"]["contentMarkdown"] == "Locked canon"
+    assert source_context["chapters"] == [{
+        "chapterNumber": 1,
+        "summary": "chapter 1",
+        "extractedState": {"summary": "chapter 1", "entities": [], "facts": [], "events": [], "foreshadows": []},
+        "contentExcerpt": "Official chapter 1",
+        "excerptTruncated": False,
+        "sourceChecksum": source_context["chapters"][0]["sourceChecksum"],
+    }]

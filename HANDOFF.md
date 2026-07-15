@@ -1,3 +1,53 @@
+# 2026-07-16 夜间审计检查点（GPT-5.6）
+
+当前分支：`agent/short-story-production-foundation`
+
+被审计基线：`356689b`
+
+另一台电脑交付提交：`ce1583c`
+
+状态：**第十二阶段最终审计尚未全部结束；今晚已完成一个独立修复步骤并安全暂停。不能把本检查点视为最终验收通过。**
+
+## 今晚已经完成
+
+- 确认分支、远端 HEAD、工作区和第十二阶段差异范围。
+- 阅读 Phase 11/12 的数据模型、迁移、短篇策略、物化流程、章节契约、质量门、备份恢复与专项测试。
+- 发现真实模型验收的关键缺口：此前短篇策略模型只收到 checksum/manifest，没有收到可用于改编的实际 Canon 和正式章节内容；模拟模型测试无法发现这个问题。
+- `Phase11Service` 现会给模型提供有长度上限且可审计的 `sourceContext`：锁定 Canon Markdown、完整规划 manifest、正式章节摘要、抽取状态和正文摘录；`short_story_strategy` 来源会携带活动策略快照。
+- 修正短篇总字数与章节数不可能同时满足的情况：少于每章 500 字的总预算在创建目标项目之前返回 `SHORT_STORY_WORD_BUDGET_INVALID`。
+- 物化项目的每章字数预算现在直接由总字数平均值生成，不再强制把平均值抬到 1000 字而造成总预算失真。
+- 短篇章节契约的字数上下限以已锁定的 ChapterBeat `paceBudget` 为权威，调用方不能用随意参数绕过规划预算。
+- 新增 Canon/Plan/正式章节真实上下文、非法总字数预算以及契约字数权威性的回归覆盖。
+
+## 今晚验证结果
+
+第一次运行 Phase 11 + Phase 12 合并专项时有 1 条新增断言依赖种子标题而失败；该断言已改为验证结构和 checksum，不属于产品代码失败。
+
+修正后，与今晚变更直接相关的 5 条回归全部通过：
+
+```text
+5 passed
+```
+
+本检查点已运行 `git diff --check` 并通过（仅 Windows LF/CRLF 提示）；**尚未运行**完整 API、Web、Build、Playwright 和 compileall，这些是明天第一项工作。
+
+## 明天从这里继续
+
+1. 继续审计完成态 origin、双 SQLite staged/retry、source manifest、Canon 映射、最终章节停止、备份 remap、正式导出与跨作品隔离。
+2. 运行 Phase 11 + Phase 12 全部专项，确认不再有遗漏。
+3. 运行完整 API、Web 单测、Build、Playwright、compileall 和 `git diff --check`。
+4. 若发现明显问题，直接修复并补回归；随后更新本文件为最终审计结论。
+5. 全量验证通过后，才判断可以开始哪一级测试：API 技术测试、真实 DeepSeek 短篇生成冒烟，或普通用户 UI 试用。
+
+## 当前限制
+
+- 本轮没有修改 `apps/web/**` 或 UI 风格。
+- 第十二阶段仍只有后端/API，普通用户尚无短篇策略和物化向导 UI。
+- 今晚没有调用真实 DeepSeek，没有读取或写入用户正式作品与 `.data`。
+- 不提交 API Key、SQLite、日志、备份 ZIP、临时文件或生成正文。
+
+---
+
 # Story Agent 当前交接：第十二阶段短篇正文生产后端基础完成
 
 更新时间：2026-07-15（Codex）

@@ -306,6 +306,20 @@ class Phase5Service:
             chapter_pace_budget = chapter_beat.get("paceBudget", chapter_beat.get("pace_budget")) if chapter_beat is not None else None
             if isinstance(chapter_pace_budget, dict):
                 allowed_scope["paceBudget"] = chapter_pace_budget
+            contract_target_words_min = payload.target_words_min
+            contract_target_words_max = payload.target_words_max
+            if project.mode == "short-form" and isinstance(chapter_pace_budget, dict):
+                planned_min = chapter_pace_budget.get("targetWordsMin", chapter_pace_budget.get("target_words_min"))
+                planned_max = chapter_pace_budget.get("targetWordsMax", chapter_pace_budget.get("target_words_max"))
+                if (
+                    isinstance(planned_min, int)
+                    and not isinstance(planned_min, bool)
+                    and isinstance(planned_max, int)
+                    and not isinstance(planned_max, bool)
+                    and 1 <= planned_min <= planned_max
+                ):
+                    contract_target_words_min = planned_min
+                    contract_target_words_max = planned_max
             if chapter_beat is not None:
                 allowed_scope["knowledgeBoundaries"] = beat_knowledge_boundaries
                 allowed_scope["allowedAbilities"] = beat_allowed_abilities
@@ -368,8 +382,8 @@ class Phase5Service:
                 required_hooks_json=dumps(required_hooks),
                 completion_conditions_json=dumps(completion_conditions),
                 pov=payload.pov,
-                target_words_min=payload.target_words_min,
-                target_words_max=payload.target_words_max,
+                target_words_min=contract_target_words_min,
+                target_words_max=contract_target_words_max,
                 pace=node.pace if node else "smooth",
                 status="draft",
                 revision=1,

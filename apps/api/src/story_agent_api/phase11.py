@@ -55,6 +55,9 @@ SHORT_STORY_RULES = {
     "DRAMA_DIALOGUE_WITHOUT_SOURCE_OR_PURPOSE",
 }
 OPEN_BLOCKING_SEVERITIES = {"error", "blocker"}
+CANON_CONTEXT_LIMIT = 60_000
+CHAPTER_CONTEXT_LIMIT = 80_000
+CHAPTER_EXCERPT_LIMIT = 6_000
 
 
 def _now() -> datetime:
@@ -884,6 +887,7 @@ class Phase11Service:
         return self._freeze_source_manifest(session, workspace.project_id, payload)
 
     def _proposal_snapshot(self, session: Session, workspace: AdaptationWorkspace, extra: dict[str, Any]) -> dict[str, Any]:
+        source_manifest = loads(workspace.source_manifest_json) or {}
         return {
             "projectId": workspace.project_id,
             "workspaceId": workspace.id,
@@ -893,9 +897,71 @@ class Phase11Service:
             "targetChapterCount": workspace.target_chapter_count,
             "targetEpisodeCount": workspace.target_episode_count,
             "unitDurationSeconds": workspace.unit_duration_seconds,
-            "sourceManifest": loads(workspace.source_manifest_json) or {},
+            "sourceManifest": source_manifest,
+            "sourceContext": self._proposal_source_context(session, workspace, source_manifest),
             **extra,
         }
+
+    def _proposal_source_context(
+        self,
+        session: Session,
+        workspace: AdaptationWorkspace,
+        source_manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a bounded, authoritative story snapshot for the model."""
+        canon = self._locked_canon(session)
+        canon_markdown, canon_truncated = self._bounded_text(
+            canon.content_markdown or "",
+            CANON_CONTEXT_LIMIT,
+        )
+        context: dict[str, Any] = {
+            "sourceType": workspace.source_type,
+            "canon": {
+                "id": canon.id,
+                "revision": canon.revision,
+                "contentMarkdown": canon_markdown,
+                "truncated": canon_truncated,
+            },
+            "plan": source_manifest.get("plan"),
+            "chapters": [],
+        }
+
+        if workspace.source_type == "chapter_range":
+            remaining = CHAPTER_CONTEXT_LIMIT
+            chapters: list[dict[str, Any]] = []
+            frozen_commits = source_manifest.get("commits", [])
+            for frozen in frozen_commits:
+                if not isinstance(frozen, dict) or remaining <= 0:
+                    break
+                source = session.get(SourceVersion, frozen.get("sourceVersionId"))
+                draft = session.get(ChapterDraft, frozen.get("approvedDraftId"))
+                if not source or not draft:
+                    continue
+                excerpt_limit = min(CHAPTER_EXCERPT_LIMIT, remaining)
+                excerpt, truncated = self._bounded_text(draft.content_markdown or "", excerpt_limit)
+                remaining -= len(excerpt)
+                chapters.append({
+                    "chapterNumber": frozen.get("chapterNumber"),
+                    "summary": source.summary,
+                    "extractedState": safe_json_loads(source.payload_json, {}),
+                    "contentExcerpt": excerpt,
+                    "excerptTruncated": truncated,
+                    "sourceChecksum": source.checksum,
+                })
+            context["chapters"] = chapters
+            context["chapterContextTruncated"] = len(chapters) < len(frozen_commits) or remaining <= 0
+        elif workspace.source_type == "short_story_strategy":
+            strategy_manifest = source_manifest.get("strategy") or {}
+            strategy = session.get(ShortStoryStrategy, strategy_manifest.get("id"))
+            if strategy and strategy.project_id == workspace.project_id:
+                context["shortStoryStrategy"] = self._strategy_dict(strategy)
+        return context
+
+    @staticmethod
+    def _bounded_text(value: str, limit: int) -> tuple[str, bool]:
+        if len(value) <= limit:
+            return value, False
+        return value[:limit], True
 
     def _ensure_workspace_source_not_drifted(self, session: Session, workspace: AdaptationWorkspace) -> None:
         current = self._current_manifest_for_workspace(session, workspace)

@@ -104,6 +104,8 @@ def test_materialization_is_isolated_idempotent_and_reuses_pipeline_contracts(cl
     assert contract.status_code == 200, contract.text
     assert contract.json()["allowedScope"]["paceBudget"]["majorEvents"] == ["hook"]
     assert contract.json()["allowedScope"]["shortStory"]["targetTotalWords"] == 12000
+    assert contract.json()["targetWordsMin"] == 1400
+    assert contract.json()["targetWordsMax"] == 2600
 
     round_trip = client.patch(
         f"/api/v1/projects/{target['id']}/plan/nodes/{plan['milestones'][0]['id']}",
@@ -213,6 +215,21 @@ def test_materialization_blocks_source_drift_invalid_budget_and_cross_project_ac
     )
     assert invalid_limit.status_code == 409
     assert invalid_limit.json()["code"] == "SHORT_STORY_EVENT_BUDGET_INVALID"
+    assert len(client.get("/api/v1/projects").json()) == project_count
+
+    source4, workspace4 = _ready_short_story_strategy(client)
+    project_count = len(client.get("/api/v1/projects").json())
+    invalid_words = client.post(
+        f"/api/v1/projects/{source4['id']}/adaptation-workspaces/{workspace4['id']}/materialize-short-story",
+        json={
+            "expectedWorkspaceRevision": workspace4["revision"],
+            "idempotencyKey": "invalid-word-budget",
+            "targetWordCount": 2000,
+        },
+    )
+    assert invalid_words.status_code == 422
+    assert invalid_words.json()["code"] == "SHORT_STORY_WORD_BUDGET_INVALID"
+    assert invalid_words.json()["details"]["minimumTargetWordCount"] == 3000
     assert len(client.get("/api/v1/projects").json()) == project_count
 
 

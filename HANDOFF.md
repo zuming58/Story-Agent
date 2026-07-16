@@ -1,3 +1,45 @@
+# 2026-07-16 第十三阶段后端开发交接（等待另一台电脑实施）
+
+当前分支：`agent/general-story-incubator-foundation`
+
+准确基线：`agent/short-story-production-foundation@7120d2f`
+
+完整方案：`docs/plans/PHASE-13-GENERAL-STORY-INCUBATOR.md`
+
+执行清单：`docs/plans/PHASE-13-BACKEND-HANDOFF.md`
+
+状态：**交接准备完成，尚未实施第十三阶段产品代码。下一台电脑只开发后端，完成并推送后必须停止；当前电脑随后负责完整审计、修复和 UI。用户在第十三阶段全部完成前暂不进行正式测试，避免版本与反馈混杂。**
+
+## 下一台电脑唯一任务
+
+完整执行 `PHASE-13-BACKEND-HANDOFF.md`：
+
+- 持久化创意会话、消息、StoryBrief 版本和修改提案。
+- 提供多轮构思、固化 StoryBrief、接受/拒绝和版本查询 API。
+- 将 Phase 8 的夜巡人固定逻辑重构为可选模板，生产默认路径改为通用长篇/短篇架构器。
+- 通用 Canon 校验按作品实际体系启用；没有等级、法宝或怪异规则时不得强行生成。
+- 根据作品形态、目标章节和总字数动态生成分层规划与下一批 5 章节拍。
+- 补齐作品归档、复制等书库后端能力。
+- 不修改任何 UI，不调用真实 DeepSeek，不碰 `.data` 和用户正式作品。
+
+## 严格禁止
+
+- 禁止修改 `apps/web/**`、CSS、设计令牌、Playwright 视觉基线。
+- 禁止提交 API Key、SQLite、日志、备份 ZIP、测试临时目录或生成正文。
+- 禁止把夜巡人、沈砚、雾城、1000 章、七卷、六阶能力作为通用默认值。
+- 禁止模型回复直接修改正式 StoryBrief、Canon 或 Plan；必须经过提案确认和 revision 校验。
+- 禁止模型调用期间持有 SQLite 长事务。
+- 禁止合并任何分支或提前进入第十四阶段。
+
+## 完成后必须
+
+1. 运行 Phase 13 专项、API 全量、Web 单测、Build 和 Playwright。
+2. 更新本文件，记录迁移、表、API、测试、已知限制和准确提交。
+3. 提交并推送 `agent/general-story-incubator-foundation`。
+4. 停止开发，等待当前电脑 GPT-5.6 审计和 UI 实施。
+
+---
+
 # 2026-07-16 第十二阶段最终审计与产品入口交接（GPT-5.6）
 
 当前分支：`agent/short-story-production-foundation`

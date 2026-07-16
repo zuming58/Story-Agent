@@ -217,6 +217,8 @@ class Phase12Service:
             plan_detail = f"Plan range or beats are inconsistent; missing={missing}, duplicates={duplicates}, extras={extras}."
         add("SHORT_STORY_PLAN_READY", "ready" if plan_ready else "blocked", "Chapter beats", plan_detail, missing[0] if missing else None)
         budget_errors: list[int] = []
+        planned_word_minimum = 0
+        planned_word_maximum = 0
         strategy_budget = safe_json_loads(origin.strategy_snapshot_json, {}).get("chapterBudget", []) if origin else []
         expected_by_chapter = {
             item.get("chapterNumber"): item
@@ -249,6 +251,8 @@ class Phase12Service:
             ):
                 budget_errors.append(chapter)
                 continue
+            planned_word_minimum += target_min
+            planned_word_maximum += target_max
             expected = expected_by_chapter.get(chapter)
             if expected and (events != expected.get("majorEvents") or maximum != expected.get("maxMajorEvents")):
                 budget_errors.append(chapter)
@@ -259,6 +263,22 @@ class Phase12Service:
         )
         add("SHORT_STORY_ORIGIN_READY", "ready" if origin_ready else "blocked", "Materialization origin", "Origin matches the target project." if origin_ready else "Origin status or target chapter count does not match this project.")
         add("SHORT_STORY_PLAN_BUDGET", "ready" if not budget_errors and len(beats) == total else "blocked", "Chapter budgets", "Every chapter retains its event and word budget." if not budget_errors and len(beats) == total else "Invalid chapter budgets: " + "、".join(map(str, sorted(set(budget_errors)))), min(budget_errors) if budget_errors else None)
+        total_word_plan_ready = bool(
+            not budget_errors
+            and origin
+            and planned_word_minimum <= origin.target_word_count <= planned_word_maximum
+        ) if origin else not budget_errors
+        add(
+            "SHORT_STORY_TOTAL_WORD_PLAN",
+            "ready" if total_word_plan_ready else "blocked",
+            "Total word plan",
+            (
+                f"Target {origin.target_word_count} is covered by the chapter envelope "
+                f"{planned_word_minimum}-{planned_word_maximum}."
+                if total_word_plan_ready and origin
+                else "Chapter word budgets do not cover the locked total target."
+            ),
+        )
         extra_commits = [chapter for chapter in current_commits if chapter > total or chapter > 30]
         add("SHORT_STORY_COMMIT_RANGE", "ready" if not extra_commits else "blocked", "Official commit range", "Official commits are within range." if not extra_commits else "Out-of-range commits: " + "、".join(map(str, sorted(extra_commits))), min(extra_commits) if extra_commits else None)
         return {
@@ -410,7 +430,7 @@ class Phase12Service:
                     "kind": canon.kind,
                     "contentMarkdown": canon.content_markdown,
                     "revision": canon.revision,
-                    "checksum": self.service.phase11._canon_manifest(canon)["checksum"],
+                    "checksum": self.service.phase11._canon_manifest(session, canon)["checksum"],
                 },
                 "entityTypes": [self._row_payload(row, ["id", "name", "display_name", "schema_json", "is_system", "status", "revision", "source_document_id"]) for row in entity_types],
                 "entities": [self._row_payload(row, ["id", "entity_type_id", "canonical_name", "aliases_json", "attributes_json", "status", "revision", "source_document_id"]) for row in entities],

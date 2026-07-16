@@ -1,3 +1,64 @@
+# 2026-07-16 第十二阶段最终审计与产品入口交接（GPT-5.6）
+
+当前分支：`agent/short-story-production-foundation`
+
+审计基线：`356689b`
+
+另一台电脑交付：`ce1583c`
+
+前一审计检查点：`3207135`
+
+状态：**第十二阶段已经完成 GPT-5.6 最终审计、直接修复和全量验证，可以推送交付。短篇生产后端可进入真实 Provider 冒烟准备；普通用户短篇 UI 和通用故事孵化器仍属于第十三阶段，不能误报为已完成。**
+
+## 本轮审计修复
+
+- 短篇策略模型现在收到有界的真实 Canon、结构化实体/关系/规则、规划摘要和正式章节上下文，不再只收到无法用于改编的 checksum。
+- 模型请求剥离重复的完整 source manifest，只保留可审计 checksum 台账，避免 1000 章规划重复占用上下文；数据库仍保存完整冻结快照。
+- 结构化 Canon 在 workspace 创建后发生变化会触发 source drift，不能用旧策略覆盖新设定。
+- 非法“总字数/章节数”组合在创建目标项目前阻断；readiness 同时核对所有 ChapterBeat 字数区间总和。
+- 章节契约会把同一规划窗口内未来 ChapterBeat 的边界和关键词加入禁止提前消费范围，避免第 1 章提前写完第 2—5 章内容。
+- 保留 Phase 12 双 SQLite staged/retry、自然键 Canon 映射、备份 remap、最终章停止和正式提交原子边界。
+
+## 产品入口与本地运行
+
+- 多作品目录库已经存在：每本小说使用独立目录和 `story.db`，可在作品总览创建、切换并重启恢复。
+- 新建作品现在进入 Canon/构思入口，不再直接跳到规划页。
+- 新增根目录 `START-STORY-AGENT.cmd`：双击后分别启动 API/Web 并打开作品总览。
+- 启动已有环境直接使用 `apps/api/.venv`，不依赖 PATH 中的 `uv`；首次初始化才需要安装 `uv`。
+- `F:\Cache\uv` 当前保存的是 uv 下载缓存和 receipt，不是 `uv.exe` 安装目录；脚本只将其作为 `UV_CACHE_DIR` 使用。
+- Playwright 也改用项目 `.venv` 的 Python，避免用户移动 uv 缓存后测试无法启动。
+- 本机当前 Node 为 v25.2.1，构建和测试通过；长期项目运行时仍应按既定基线切换到 Node 24 LTS。
+
+## 重要产品结论
+
+- `Canon` 通常读作“卡农”，在本项目中表示作品的正式权威设定，不是普通 note。
+- 当前 Canon 页面有故事架构器和右侧 AI 对话，但生产逻辑仍带有夜巡人、1000 章、七卷、沈砚、雾城等固定决策。
+- 因此当前可以测试既有“夜巡人”长篇链路和多作品存储，但**不能把任意题材的多轮构思 → StoryBrief → 通用 Canon/规划宣称为已完成**。
+- Phase 11/12 短篇生产后端已经具备，普通用户短篇策略/物化向导 UI 尚未补齐。
+- 下一阶段固定为 `docs/plans/PHASE-13-GENERAL-STORY-INCUBATOR.md`：通用故事孵化器、多作品书库完善、移除夜巡人硬编码，并补齐短篇 UI。
+
+## 当前验证结果
+
+```text
+API full: 159 passed
+Web unit: 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+python compileall: passed
+Playwright failed-case rerun: 2 passed（desktop-1280）
+Playwright full: 14 passed（1440×1024 与 1280×800）
+START-STORY-AGENT.cmd: API 200、Web 200、重复启动路径通过
+git diff --check: passed（仅 Windows LF/CRLF 提示）
+```
+
+## 下一步
+
+1. 提交并推送当前分支，建立以 Phase 11 分支为 base 的草稿 PR，不合并 `main`。
+2. 当前“夜巡人”可以做既有长篇链路和多作品保存/切换测试。
+3. 任意新题材的真实付费生成应等 Phase 13 移除夜巡人硬编码后再开放。
+4. 当前电脑下一阶段实现 Phase 13 的通用创意工作室 UI；另一台电脑只可接后端任务，不得修改 UI。
+
+---
+
 # 2026-07-16 夜间审计检查点（GPT-5.6）
 
 当前分支：`agent/short-story-production-foundation`

@@ -106,6 +106,8 @@ def test_materialization_is_isolated_idempotent_and_reuses_pipeline_contracts(cl
     assert contract.json()["allowedScope"]["shortStory"]["targetTotalWords"] == 12000
     assert contract.json()["targetWordsMin"] == 1400
     assert contract.json()["targetWordsMax"] == 2600
+    assert "choice" in contract.json()["forbiddenScope"]["futureKeywords"]
+    assert contract.json()["forbiddenScope"]["mustNotAdvance"][0]["chapterNumber"] == 2
 
     round_trip = client.patch(
         f"/api/v1/projects/{target['id']}/plan/nodes/{plan['milestones'][0]['id']}",
@@ -249,6 +251,22 @@ def test_target_word_override_is_consistent_across_origin_plan_and_contract(clie
     assert contract.json()["allowedScope"]["shortStory"]["targetTotalWords"] == 18000
     assert contract.json()["allowedScope"]["paceBudget"]["targetWordsMin"] == 2100
     assert contract.json()["allowedScope"]["paceBudget"]["targetWordsMax"] == 3900
+    plan = client.get(f"/api/v1/projects/{target['id']}/plan").json()
+    node = plan["milestones"][0]
+    inconsistent_beats = node["chapterBeats"]
+    for beat in inconsistent_beats:
+        beat["paceBudget"]["targetWordsMin"] = 100
+        beat["paceBudget"]["targetWordsMax"] = 200
+    changed = client.patch(
+        f"/api/v1/projects/{target['id']}/plan/nodes/{node['id']}",
+        json={"expectedRevision": node["revision"], "chapterBeats": inconsistent_beats},
+    )
+    assert changed.status_code == 200, changed.text
+    readiness = client.get(f"/api/v1/projects/{target['id']}/short-story/readiness")
+    assert readiness.status_code == 200, readiness.text
+    assert "SHORT_STORY_TOTAL_WORD_PLAN" in {
+        item["code"] for item in readiness.json()["checks"] if item["status"] == "blocked"
+    }
 
 
 def test_short_story_backup_restore_remaps_target_origin(client: TestClient) -> None:

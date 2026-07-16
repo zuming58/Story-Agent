@@ -13,6 +13,10 @@ from .models import (
     AdaptationProposal,
     AdaptationWorkspace,
     CanonDocument,
+    CanonEntity,
+    CanonEntityType,
+    CanonRelation,
+    CanonRule,
     ChapterCommit,
     ChapterDraft,
     DramaEpisode,
@@ -55,9 +59,11 @@ SHORT_STORY_RULES = {
     "DRAMA_DIALOGUE_WITHOUT_SOURCE_OR_PURPOSE",
 }
 OPEN_BLOCKING_SEVERITIES = {"error", "blocker"}
-CANON_CONTEXT_LIMIT = 60_000
-CHAPTER_CONTEXT_LIMIT = 80_000
-CHAPTER_EXCERPT_LIMIT = 6_000
+CANON_CONTEXT_LIMIT = 24_000
+CHAPTER_CONTEXT_LIMIT = 24_000
+CHAPTER_EXCERPT_LIMIT = 3_000
+PLAN_CONTEXT_LIMIT = 16_000
+STRUCTURED_CANON_CONTEXT_LIMIT = 16_000
 
 
 def _now() -> datetime:
@@ -572,9 +578,10 @@ class Phase11Service:
         return result if materialize else result
 
     def _model_json_with_repair(self, project: Any, role: str, proposal_kind: str, snapshot: dict[str, Any], request_id: str) -> tuple[dict[str, Any], str | None]:
+        model_snapshot = self._model_input_snapshot(snapshot)
         messages = [
             {"role": "system", "content": f"You are {role}. Return exactly one JSON object for {proposal_kind}; no markdown."},
-            {"role": "user", "content": dumps(snapshot)},
+            {"role": "user", "content": dumps(model_snapshot)},
         ]
         try:
             text, run_id = self._complete_role(project, role, messages, request_id, response_json=True, run_role=f"{role}:{proposal_kind}")
@@ -582,7 +589,7 @@ class Phase11Service:
         except (ValueError, json.JSONDecodeError):
             repair_messages = [
                 {"role": "system", "content": "Repair the previous output into one valid JSON object only."},
-                {"role": "user", "content": dumps({"proposalKind": proposal_kind, "snapshot": snapshot})},
+                {"role": "user", "content": dumps({"proposalKind": proposal_kind, "snapshot": model_snapshot})},
             ]
             text, run_id = self._complete_role(project, role, repair_messages, request_id, response_json=True, run_role=f"{role}:{proposal_kind}:repair")
             try:
@@ -627,6 +634,20 @@ class Phase11Service:
             return
         target_chapters = self._safe_int(workspace.target_chapter_count or output.get("targetChapterCount") or len(chapters), 0)
         output_target_chapters = self._safe_int(output.get("targetChapterCount", target_chapters), 0)
+        if target_chapters > 0 and target_words < target_chapters * 500:
+            self._add_finding(
+                session,
+                workspace,
+                "SHORTFORM_STRATEGY_INCOMPLETE",
+                "error",
+                {
+                    "targetWordCount": target_words,
+                    "targetChapterCount": target_chapters,
+                    "minimumTargetWordCount": target_chapters * 500,
+                },
+                "Increase the total word target or reduce the target chapter count.",
+                proposal_id=proposal.id,
+            )
         if output_target_chapters != target_chapters:
             self._add_finding(session, workspace, "SHORTFORM_CHAPTER_BUDGET_INVALID", "error", {"targetChapterCount": output.get("targetChapterCount"), "workspaceTargetChapterCount": target_chapters}, "Use the workspace target chapter count.", proposal_id=proposal.id)
         if target_chapters < 1 or target_chapters > 30:
@@ -848,7 +869,7 @@ class Phase11Service:
             "projectId": project_id,
             "sourceType": payload.source_type,
             "sourceId": payload.source_id,
-            "canon": self._canon_manifest(canon),
+            "canon": self._canon_manifest(session, canon),
             "plan": self._plan_manifest(session, plan) if plan else None,
             "commits": [],
         }
@@ -921,8 +942,9 @@ class Phase11Service:
                 "revision": canon.revision,
                 "contentMarkdown": canon_markdown,
                 "truncated": canon_truncated,
+                "structured": self._canon_structured_snapshot(session, STRUCTURED_CANON_CONTEXT_LIMIT),
             },
-            "plan": source_manifest.get("plan"),
+            "plan": self._compact_plan_context(source_manifest.get("plan")),
             "chapters": [],
         }
 
@@ -958,6 +980,105 @@ class Phase11Service:
         return context
 
     @staticmethod
+    def _model_input_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Remove bulky audit-only ledger details from the model request.
+
+        The unmodified snapshot is still persisted on the proposal for drift
+        checks and audit.  Models receive checksums plus the bounded creative
+        sourceContext instead of a duplicate full 1000-chapter ledger.
+        """
+        result = dict(snapshot)
+        manifest = snapshot.get("sourceManifest")
+        if isinstance(manifest, dict):
+            plan = manifest.get("plan")
+            compact_plan = None
+            if isinstance(plan, dict):
+                compact_plan = {
+                    key: plan.get(key)
+                    for key in ("id", "revision", "chapterStart", "chapterEnd", "checksum")
+                    if key in plan
+                }
+            commits = manifest.get("commits", [])
+            result["sourceManifest"] = {
+                "projectId": manifest.get("projectId"),
+                "sourceType": manifest.get("sourceType"),
+                "sourceId": manifest.get("sourceId"),
+                "canon": manifest.get("canon"),
+                "plan": compact_plan,
+                "commits": [
+                    {
+                        "chapterNumber": item.get("chapterNumber"),
+                        "checksum": item.get("checksum"),
+                        "sourceChecksum": item.get("sourceChecksum"),
+                    }
+                    for item in commits
+                    if isinstance(item, dict)
+                ],
+                "strategy": manifest.get("strategy"),
+            }
+        return result
+
+    @staticmethod
+    def _compact_plan_context(plan: Any) -> dict[str, Any] | None:
+        if not isinstance(plan, dict):
+            return None
+        result: dict[str, Any] = {
+            key: plan.get(key)
+            for key in (
+                "id", "revision", "bookTitle", "volumeTitle", "arcTitle",
+                "chapterStart", "chapterEnd", "checksum",
+            )
+            if key in plan
+        }
+        result["nodes"] = []
+        nodes = plan.get("nodes", [])
+        summaries: list[dict[str, Any]] = []
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict):
+                continue
+            beats = node.get("chapterBeats", [])
+            beat_summaries = []
+            if isinstance(beats, list):
+                selected_beats = beats if len(beats) <= 6 else [*beats[:3], *beats[-3:]]
+                beat_summaries = [
+                    {
+                        key: beat.get(key)
+                        for key in ("chapterNumber", "title", "objective", "completionConditions", "hooks", "foreshadows")
+                        if key in beat
+                    }
+                    for beat in selected_beats
+                    if isinstance(beat, dict)
+                ]
+            summaries.append({
+                key: value
+                for key, value in {
+                    "id": node.get("id"),
+                    "title": node.get("title"),
+                    "type": node.get("type"),
+                    "targetChapter": node.get("targetChapter"),
+                    "rangeMin": node.get("rangeMin"),
+                    "rangeMax": node.get("rangeMax"),
+                    "importance": node.get("importance"),
+                    "note": node.get("note"),
+                    "completionConditions": node.get("completionConditions"),
+                    "foreshadows": node.get("foreshadows"),
+                    "contracts": node.get("contracts"),
+                    "chapterBeatCount": len(beats) if isinstance(beats, list) else 0,
+                    "chapterBeatSamples": beat_summaries,
+                }.items()
+                if value not in (None, [], "")
+            })
+        summaries.sort(key=lambda item: (item.get("type") in {"chapter", "章节"}, item.get("targetChapter") or 0))
+        for summary in summaries:
+            candidate = {**result, "nodes": [*result["nodes"], summary]}
+            if len(dumps(candidate)) > PLAN_CONTEXT_LIMIT:
+                break
+            result["nodes"].append(summary)
+        result["nodeCount"] = len(summaries)
+        result["nodesTruncated"] = len(result["nodes"]) < len(summaries)
+        return result
+
+    @staticmethod
     def _bounded_text(value: str, limit: int) -> tuple[str, bool]:
         if len(value) <= limit:
             return value, False
@@ -971,8 +1092,85 @@ class Phase11Service:
             raise StoryError(409, "ADAPTATION_SOURCE_DRIFT", "Adaptation source manifest has drifted.")
 
     @staticmethod
-    def _canon_manifest(canon: CanonDocument) -> dict[str, Any]:
-        return {"id": canon.id, "revision": canon.revision, "status": canon.status, "checksum": stable_digest({"revision": canon.revision, "content": canon.content_markdown})}
+    def _canon_manifest(session: Session, canon: CanonDocument) -> dict[str, Any]:
+        structured = Phase11Service._canon_structured_snapshot(session)
+        structured_checksum = stable_digest(structured)
+        return {
+            "id": canon.id,
+            "revision": canon.revision,
+            "status": canon.status,
+            "structuredChecksum": structured_checksum,
+            "checksum": stable_digest({
+                "revision": canon.revision,
+                "content": canon.content_markdown,
+                "structuredChecksum": structured_checksum,
+            }),
+        }
+
+    @staticmethod
+    def _canon_structured_snapshot(session: Session, limit: int | None = None) -> dict[str, Any]:
+        collections: dict[str, list[dict[str, Any]]] = {
+            "entityTypes": [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "displayName": item.display_name,
+                    "schema": safe_json_loads(item.schema_json, {}),
+                    "status": item.status,
+                    "revision": item.revision,
+                }
+                for item in session.scalars(select(CanonEntityType).order_by(CanonEntityType.id)).all()
+            ],
+            "entities": [
+                {
+                    "id": item.id,
+                    "entityTypeId": item.entity_type_id,
+                    "canonicalName": item.canonical_name,
+                    "aliases": safe_json_loads(item.aliases_json, []),
+                    "attributes": safe_json_loads(item.attributes_json, {}),
+                    "status": item.status,
+                    "revision": item.revision,
+                }
+                for item in session.scalars(select(CanonEntity).order_by(CanonEntity.id)).all()
+            ],
+            "relations": [
+                {
+                    "id": item.id,
+                    "subjectEntityId": item.subject_entity_id,
+                    "predicate": item.predicate,
+                    "objectEntityId": item.object_entity_id,
+                    "objectValue": safe_json_loads(item.object_value_json, None),
+                    "status": item.status,
+                    "revision": item.revision,
+                }
+                for item in session.scalars(select(CanonRelation).order_by(CanonRelation.id)).all()
+            ],
+            "rules": [
+                {
+                    "id": item.id,
+                    "ruleCode": item.rule_code,
+                    "category": item.category,
+                    "statement": item.statement,
+                    "severity": item.severity,
+                    "constraint": safe_json_loads(item.constraint_json, {}),
+                    "status": item.status,
+                    "revision": item.revision,
+                }
+                for item in session.scalars(select(CanonRule).order_by(CanonRule.id)).all()
+            ],
+        }
+        if limit is None:
+            return collections
+        result: dict[str, Any] = {key: [] for key in collections}
+        result["truncated"] = False
+        for key, items in collections.items():
+            for item in items:
+                candidate = {**result, key: [*result[key], item]}
+                if len(dumps(candidate)) > limit:
+                    result["truncated"] = True
+                    return result
+                result[key].append(item)
+        return result
 
     def _locked_canon(self, session: Session) -> CanonDocument:
         canon = session.get(CanonDocument, "story-core")

@@ -242,6 +242,14 @@ class Phase5Service:
                 ]
             node_payload = self.service._node_dict(node) if node else {}
             chapter_beat = self._chapter_beat(node, payload.chapter_number)
+            future_chapter_beats: list[dict[str, Any]] = []
+            if node:
+                for candidate in _safe_loads(node.chapter_beats_json, []):
+                    if not isinstance(candidate, dict):
+                        continue
+                    candidate_chapter = candidate.get("chapterNumber", candidate.get("chapter_number"))
+                    if isinstance(candidate_chapter, int) and candidate_chapter > payload.chapter_number:
+                        future_chapter_beats.append(candidate)
             if node and node.type == "章节窗口" and chapter_beat is None:
                 raise StoryError(
                     409,
@@ -354,11 +362,49 @@ class Phase5Service:
                     "coreHook": strategy.get("coreHook"),
                     "ending": strategy.get("ending"),
                 }
+            future_beat_boundaries = [
+                {
+                    "chapterNumber": beat.get("chapterNumber", beat.get("chapter_number")),
+                    "title": beat.get("title"),
+                    "objective": beat.get("objective"),
+                    "majorEvents": (
+                        beat.get("paceBudget", beat.get("pace_budget", {})).get(
+                            "majorEvents",
+                            beat.get("paceBudget", beat.get("pace_budget", {})).get("major_events", []),
+                        )
+                        if isinstance(beat.get("paceBudget", beat.get("pace_budget", {})), dict)
+                        else []
+                    ),
+                }
+                for beat in future_chapter_beats
+            ]
+            future_beat_keywords = [
+                value.strip()
+                for beat in future_chapter_beats
+                for value in [
+                    beat.get("title"),
+                    beat.get("objective"),
+                    *self._beat_strings(beat, "completionConditions", "completion_conditions"),
+                    *(
+                        beat.get("paceBudget", beat.get("pace_budget", {})).get(
+                            "majorEvents",
+                            beat.get("paceBudget", beat.get("pace_budget", {})).get("major_events", []),
+                        )
+                        if isinstance(beat.get("paceBudget", beat.get("pace_budget", {})), dict)
+                        else []
+                    ),
+                ]
+                if isinstance(value, str) and value.strip()
+            ]
             forbidden_scope = {
-                "mustNotAdvance": [item for item in future_nodes if not node or item.get("id") != node.id],
+                "mustNotAdvance": [
+                    *future_beat_boundaries,
+                    *[item for item in future_nodes if not node or item.get("id") != node.id],
+                ],
                 "mustNotComplete": beat_forbidden or ([node_payload] if node and not node_is_due else []),
                 "futureKeywords": [
                     *beat_forbidden,
+                    *future_beat_keywords,
                     *[item.get("title", "") for item in future_nodes if item.get("title") and (not node or item.get("id") != node.id)],
                 ],
                 "forbiddenAbilities": beat_forbidden_abilities,

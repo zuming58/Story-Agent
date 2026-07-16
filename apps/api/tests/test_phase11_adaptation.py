@@ -10,6 +10,7 @@ from story_agent_api.models import (
     AdaptationProposal,
     AdaptationWorkspace,
     CanonDocument,
+    CanonRule,
     ChapterCommit,
     ChapterContract,
     ChapterDraft,
@@ -23,7 +24,7 @@ from story_agent_api.models import (
     ShortStoryStrategy,
     utc_now,
 )
-from story_agent_api.services import dumps, stable_digest
+from story_agent_api.services import dumps, loads, stable_digest
 
 
 def _project(client: TestClient, title: str = "Adaptation Story") -> dict:
@@ -295,9 +296,11 @@ def test_short_story_proposal_repair_idempotency_apply_and_reject(client: TestCl
     ).json()
     service = client.app.state.story_service
     calls: list[str] = []
+    model_inputs: list[dict] = []
 
     def fake_role(project_obj, role, messages, request_id, *, response_json=False, run_role=None):
         calls.append(run_role or role)
+        model_inputs.append(loads(messages[-1]["content"]))
         if len(calls) == 1:
             return "not json", "run-bad"
         return dumps(_valid_strategy()), "run-good"
@@ -314,8 +317,12 @@ def test_short_story_proposal_repair_idempotency_apply_and_reject(client: TestCl
     source_context = proposal["inputSnapshot"]["sourceContext"]
     assert source_context["canon"]["contentMarkdown"] == "Locked canon"
     assert source_context["canon"]["truncated"] is False
+    assert source_context["canon"]["structured"]["entityTypes"]
+    assert source_context["canon"]["structured"]["truncated"] is False
     assert source_context["plan"]["nodes"]
     assert source_context["plan"]["checksum"]
+    assert "nodes" not in model_inputs[0]["sourceManifest"]["plan"]
+    assert model_inputs[0]["sourceContext"]["plan"]["nodes"]
 
     duplicate = client.post(
         f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
@@ -370,6 +377,38 @@ def test_short_story_findings_block_application(client: TestClient) -> None:
     assert "SHORTFORM_EVENT_BUDGET_OVERFLOW" in {item["ruleCode"] for item in findings}
     applied = client.post(f"/api/v1/adaptation-proposals/{proposal['id']}/apply", json={"expectedRevision": proposal["revision"]})
     assert applied.status_code == 409
+
+
+def test_short_story_strategy_rejects_impossible_word_and_chapter_budget(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_foundation(client, project["id"])
+    workspace = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces",
+        json={"name": "Impossible word budget", "kind": "short_story", "targetWordCount": 1000, "targetChapterCount": 6},
+    ).json()
+    output = _valid_strategy()
+    output["targetWordCount"] = 1000
+    service = client.app.state.story_service
+    service.phase11._complete_role = lambda *args, **kwargs: (dumps(output), "run-impossible-budget")
+    proposal = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/short-story-proposals",
+        json={"expectedWorkspaceRevision": workspace["revision"]},
+    )
+    assert proposal.status_code == 201, proposal.text
+    findings = client.get(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/findings"
+    ).json()
+    assert any(
+        item["ruleCode"] == "SHORTFORM_STRATEGY_INCOMPLETE"
+        and item["evidence"].get("minimumTargetWordCount") == 3000
+        for item in findings
+    )
+    applied = client.post(
+        f"/api/v1/adaptation-proposals/{proposal.json()['id']}/apply",
+        json={"expectedRevision": proposal.json()["revision"]},
+    )
+    assert applied.status_code == 409
+    assert applied.json()["code"] == "ADAPTATION_FINDINGS_BLOCKING"
 
 
 def test_drama_outline_script_candidate_and_approval_conflict(client: TestClient) -> None:
@@ -627,3 +666,53 @@ def test_chapter_range_proposal_receives_official_story_content(client: TestClie
         "excerptTruncated": False,
         "sourceChecksum": source_context["chapters"][0]["sourceChecksum"],
     }]
+
+
+def test_structured_canon_change_after_workspace_creation_is_source_drift(client: TestClient) -> None:
+    project = _project(client)
+    _ensure_foundation(client, project["id"])
+    service = client.app.state.story_service
+    catalog = service.get_project(project["id"])
+    with service.db.project_write(catalog.id, catalog.folder_path) as session:
+        session.add(CanonRule(
+            id="adaptation-rule",
+            rule_code="ADAPTATION-RULE",
+            category="world",
+            statement="The locked source rule.",
+            severity="high",
+            constraint_json=dumps({"cost": "memory"}),
+            status="locked",
+            revision=1,
+            source_document_id="story-core",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            locked_at=utc_now(),
+        ))
+    workspace = client.post(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces",
+        json={"name": "Structured Canon source", "kind": "short_story", "targetWordCount": 12000, "targetChapterCount": 6},
+    ).json()
+    change = client.post(
+        f"/api/v1/projects/{project['id']}/canon/change-requests",
+        json={
+            "projectId": project["id"],
+            "targetKind": "rule",
+            "targetId": "adaptation-rule",
+            "reason": "Update the locked rule",
+            "afterJson": {"statement": "The rule now requires a visible cost."},
+        },
+    )
+    assert change.status_code == 200, change.text
+    applied = client.post(
+        f"/api/v1/canon/change-requests/{change.json()['id']}/apply",
+        json={"projectId": project["id"], "expectedRevision": change.json()["revision"]},
+    )
+    assert applied.status_code == 200, applied.text
+
+    readiness = client.get(
+        f"/api/v1/projects/{project['id']}/adaptation-workspaces/{workspace['id']}/readiness"
+    )
+    assert readiness.status_code == 200, readiness.text
+    assert "ADAPTATION_SOURCE_DRIFT" in {
+        item["code"] for item in readiness.json()["checks"] if item["status"] == "blocked"
+    }

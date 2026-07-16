@@ -7,12 +7,13 @@ async function createProject(page: Page, testInfo: TestInfo, suffix: string) {
   await page.getByRole("button", { name: "新建作品" }).click();
   const title = `E2E-${testInfo.project.name}-${suffix}-${Date.now()}`;
   await page.getByLabel("作品名称").fill(title);
-  await page.getByRole("button", { name: "创建作品" }).click();
+  await page.getByRole("button", { name: "创建并开始构思" }).click();
   // Project creation initializes and migrates an isolated SQLite database.
   // A cold Windows filesystem/antivirus scan can take more than 15 seconds;
   // keep the test above the measured cold-start envelope so Playwright never
   // kills the API halfway through an Alembic migration.
-  await expect(page).toHaveURL(/\/planning$/, { timeout: 45_000 });
+  await expect(page).toHaveURL(/\/canon$/, { timeout: 45_000 });
+  await page.goto("/planning");
   await expect(page.getByRole("heading", { name: "故事规划中心" })).toBeVisible();
   const projects = await (await page.request.get("/api/v1/projects")).json();
   return projects.find((project: { title: string }) => project.title === title) as { id: string; title: string };

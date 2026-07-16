@@ -8,17 +8,33 @@
 
 执行清单：`docs/plans/PHASE-13-BACKEND-HANDOFF.md`
 
-状态：**第十三阶段交接文档与分支已准备，但按用户决定暂停开发，不交给另一台电脑执行。当前优先进行夜巡人连续写作测试；测试准备检查发现第 6—10 章缺少精确 ChapterBeat，而 trial-readiness 误判为 ready。正文测试暂时阻断，等待用户决定是否允许只修复这个试写前缺口。**
+状态：**第十三阶段交接文档与分支已准备，但按用户决定暂停开发，不交给另一台电脑执行。当前优先进行夜巡人连续写作测试。试写前缺口已修复：trial-readiness 现在会对任何规划节点缺失精确 ChapterBeat 的情况返回 blocked；本机正式项目已补齐并核对第 6—10 章 Beat，可先单章测试第 6 章，通过后连续测试第 7—9 章。**
 
-## 夜巡人试写前阻断（新发现）
+## 夜巡人试写准备（已完成）
 
-- 本机正式项目当前 `currentChapter=5`，Canon 已锁定，模型角色和流水线检查通过。
-- `trial-readiness?chapterCount=1|3` 返回 ready，并声称可从第 6 章开始。
-- 实际 Plan 中第 6—10 章没有任何精确 `ChapterBeat`。
-- Phase 5 章节契约要求章节窗口内必须存在当前章精确 Beat，因此直接试写第 6 章会在契约阶段失败。
-- 当前不得点击“单章试写”“连续 3 章”或“连续 5 章”，避免无效运行和误导。
-- 最小修复范围仅包括：让 readiness 对缺失精确 Beat 返回 blocked；增加滚动生成/确认下一批 5 章节拍的能力；生成并核对第 6—10 章 Beat。不得顺带实施 Phase 13。
-- 测试方案记录在 `docs/testing/PHASE-12-NIGHT-WATCH-TRIAL.md`。
+- 本机正式项目 `夜巡人·正式试写` 的项目 ID 为 `1ffdb07d-d717-42cf-8456-30e1475b2859`，当前 `currentChapter=5`，Canon 已锁定。
+- 修复前已创建项目备份 `afa35e54-c2de-45ff-988b-e7fe812c6c7c`；备份 ZIP 位于项目本地 `.data`，不进入 Git。
+- `Phase7Service.trial_readiness` 现在对故事弧、章节窗口或其他覆盖节点统一要求当前章存在精确 Beat；缺失时不再同时返回 `TRIAL_PLAN_READY`，安全批次上限也不会越过缺失章节。
+- 回归测试将缺 Beat 的节点明确设置为 `故事弧`，并验证 ready=false、`TRIAL_CHAPTER_BEAT_MISSING` 与不存在伪就绪状态。
+- 正式项目现有规划节点已通过真实 Plan API 增加第 6—10 章唯一精确 Beat，节点 revision 从 1 更新到 2；第 1—5 章 Beat 保持不变。
+- 第 6—10 章标题依次为《地底的第四声铃》《空白值夜表》《借钉之前》《归还时间写在明天》《见雾者登记》；升级、法器、知识和揭示边界均已写入 Beat。
+- 实际 API 检查结果：`chapterCount=1` 对应第 6 章、`chapterCount=3` 对应第 6—8 章、`chapterCount=5` 对应第 6—10 章，三者均 ready=true，`maxSafeChapterCount=5`。
+- 当前可以开始第一轮“单章试写”第 6 章；不要直接从连续 5 章开始。详细步骤见 `docs/testing/PHASE-12-NIGHT-WATCH-TRIAL.md`。
+- 本次没有生成或提交正文，没有实施 Phase 13，也没有把 `.data`、备份、密钥或模型输出加入 Git。
+
+## 本轮验证结果
+
+```text
+Phase 8 trial-readiness focused: 7 passed
+API full: passed
+Web unit: 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+Playwright: 14 passed（1440×1024 与 1280×800）
+python compileall: passed
+git diff --check: passed（仅 Windows LF/CRLF 提示）
+```
+
+根目录 `npm run test` 仍依赖系统 PATH 中的 `uv`；本机清理 C 盘后 PATH 无 `uv`，因此本轮使用项目自带 `apps/api/.venv/Scripts/python.exe` 执行相同的完整 API 测试。产品运行与测试本身均通过。
 
 ## 下一台电脑唯一任务
 

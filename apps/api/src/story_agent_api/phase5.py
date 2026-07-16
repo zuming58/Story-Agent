@@ -84,6 +84,29 @@ def _word_count(value: str) -> int:
     return len(ascii_words) + len(cjk_chars)
 
 
+def _major_event_classification(events: Any) -> tuple[int, int]:
+    """Return explicit major-event count and unclassified event count.
+
+    Event extraction records scene/state events for the story ledger.  Those
+    events are not automatically equivalent to the smaller set of major plot
+    events governed by a chapter pace budget.  Only an explicit JSON boolean
+    may promote an extracted event to a major event.
+    """
+    if not isinstance(events, list):
+        return 0, 0
+    major_count = 0
+    unclassified_count = 0
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        marker = event.get("isMajor", event.get("is_major"))
+        if isinstance(marker, bool):
+            major_count += int(marker)
+        else:
+            unclassified_count += 1
+    return major_count, unclassified_count
+
+
 def _requirement_evident(requirement: str, content: str, extracted: set[str] | None = None) -> bool:
     needle = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", requirement).lower()
     haystack = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", content).lower()
@@ -1499,7 +1522,9 @@ class Phase5Service:
                 "narrative",
                 (
                     "你是小说事件与伏笔抽取器。只返回合法 JSON object，顶层只能有 events、foreshadows。"
-                    "events 最多 3 项，每项只用 eventOrder、summary、participants，并合并连续动作。"
+                    "events 最多 3 项，每项只用 eventOrder、summary、participants、isMajor，并合并连续动作。"
+                    "isMajor 必须是 JSON boolean；只有独立完成或实质推进 paceBudget.majorEvents 中一项才为 true，"
+                    "同一调查目标内的移动、开门、观察和记录过程必须合并或标为 false。"
                     "foreshadows 最多 2 项，每项只用 code、label、status；status 只能是 planted、progressing、resolved。"
                     "requiredForeshadows 中的线索若已在本章出现，code 必须逐字使用契约给出的值，不得改名。"
                     "不要 id、description，不要复述设定或叙事禁令，所有摘要保持短句。"
@@ -1517,7 +1542,7 @@ class Phase5Service:
                     "entities": "entities 最多 2 项，每项 attributes 仅保留 name。",
                     "facts": "facts 最多 2 项，value 只用短字符串或短数组，confidence 必须是数字。",
                     "boundaries": "boundaries 最多 1 项，knowledge 只保留 1 个键和不超过 40 字的值。",
-                    "narrative": "events 最多 2 项；foreshadows 只输出已经出现的 requiredForeshadows code。",
+                    "narrative": "events 最多 2 项且必须保留 isMajor boolean；foreshadows 只输出已经出现的 requiredForeshadows code。",
                 }[section_name]
                 repair = [] if attempt == 0 else [{
                     "role": "system",
@@ -1529,6 +1554,8 @@ class Phase5Service:
                         section_user["requiredForeshadows"] = contract_payload["requiredForeshadows"]
                         section_user["requiredHooks"] = contract_payload["requiredHooks"]
                         section_user["completionConditions"] = contract_payload["completionConditions"]
+                        allowed_scope = contract_payload.get("allowedScope")
+                        section_user["paceBudget"] = allowed_scope.get("paceBudget", {}) if isinstance(allowed_scope, dict) else {}
                     text, final_run_id = self._complete_role_text(
                         project,
                         "fact_extractor",
@@ -1568,7 +1595,7 @@ class Phase5Service:
                     chapter_draft_id=draft_id,
                     model_run_id=final_run_id,
                     payload_json=dumps(payload),
-                    schema_version=1,
+                    schema_version=2,
                     status="candidate",
                     validation_errors_json="[]",
                     checksum=stable_digest(payload),
@@ -1711,7 +1738,11 @@ class Phase5Service:
             except (TypeError, ValueError):
                 order = index
             participants = raw.get("participants") if isinstance(raw.get("participants"), list) else []
-            events.append({"eventOrder": order, "summary": summary, "participants": [item for item in participants if isinstance(item, str)]})
+            event = {"eventOrder": order, "summary": summary, "participants": [item for item in participants if isinstance(item, str)]}
+            is_major = raw.get("isMajor", raw.get("is_major"))
+            if isinstance(is_major, bool):
+                event["isMajor"] = is_major
+            events.append(event)
 
         foreshadows: list[dict[str, Any]] = []
         for raw in data.get("foreshadows", []) if isinstance(data.get("foreshadows"), list) else []:
@@ -1885,9 +1916,21 @@ class Phase5Service:
 
             pace_budget = _safe_loads(contract.allowed_scope_json, {}).get("paceBudget", {})
             max_events = pace_budget.get("maxMajorEvents") if isinstance(pace_budget, dict) else None
-            if isinstance(max_events, int) and not isinstance(max_events, bool) and len(extraction_payload.get("events", [])) > max_events:
-                code = "SHORT_STORY_EVENT_BUDGET" if is_short_story else "PACE_MAJOR_EVENT_OVERFLOW"
-                findings.append(self._finding_payload(code, "blocker", "pace", "The extraction contains more major events than the chapter pace budget allows.", [{"eventCount": len(extraction_payload.get("events", [])), "maximum": max_events}], {}, "Move excess major events to later chapters."))
+            major_event_count, unclassified_event_count = _major_event_classification(extraction_payload.get("events", []))
+            if isinstance(max_events, int) and not isinstance(max_events, bool):
+                if major_event_count > max_events:
+                    code = "SHORT_STORY_EVENT_BUDGET" if is_short_story else "PACE_MAJOR_EVENT_OVERFLOW"
+                    findings.append(self._finding_payload(code, "blocker", "pace", "抽取结果中明确标记的重大事件超过本章节奏预算。", [{"majorEventCount": major_event_count, "maximum": max_events}], {}, "把超出预算的重大事件移到后续章节。"))
+                if unclassified_event_count:
+                    findings.append(self._finding_payload(
+                        "PACE_MAJOR_EVENT_CLASSIFICATION_MISSING",
+                        "warning",
+                        "pace",
+                        "旧版事件抽取结果缺少重大事件标记；已降级为提示，不阻止现有正文复核。",
+                        [{"unclassifiedEventCount": unclassified_event_count}],
+                        {},
+                        "可以保留现有候选稿；后续新抽取会自动记录重大事件分类。",
+                    ))
 
             if is_short_story:
                 if contract.chapter_number < 1 or contract.chapter_number > min(30, project.total_chapters):

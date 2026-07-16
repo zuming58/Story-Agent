@@ -67,7 +67,7 @@ class Phase5OpenAIHandler(BaseHTTPRequestHandler):
                     "attributes": {"name": "Lin Mo"},
                 }],
                 "facts": [{"entity": "Lin Mo", "fieldPath": "location", "value": "old house", "confidence": 0.9}],
-                "events": [{"eventOrder": 1, "summary": "Lin Mo enters the old house.", "participants": ["Lin Mo"]}],
+                "events": [{"eventOrder": 1, "summary": "Lin Mo enters the old house.", "participants": ["Lin Mo"], "isMajor": True}],
                 "foreshadows": [],
                 "boundaries": [{"entity": "Lin Mo", "knowledge": {"knows": ["old house"]}}],
             })
@@ -833,7 +833,7 @@ def test_extraction_normalizes_common_model_shape_without_promoting_narrative_bo
             {"subject": "Lin Mo", "predicate": "location", "object": "archive", "confidence": "high", "expectedCurrentValue": True, "stateChanging": True},
             {"description": "ambient observation", "stateChanging": False},
         ],
-        "events": [{"sequence": 1, "description": "Lin Mo enters the archive."}],
+        "events": [{"sequence": 1, "description": "Lin Mo enters the archive.", "isMajor": False}],
         "foreshadows": [{"id": "f1", "description": "A fourth bell rings."}],
         "boundaries": [{"type": "narrative_restriction", "description": "Do not reveal the culprit."}],
     })
@@ -847,10 +847,21 @@ def test_extraction_normalizes_common_model_shape_without_promoting_narrative_bo
         "confidence": 0.9,
     }]
     assert payload["events"][0]["eventOrder"] == 1
+    assert payload["events"][0]["isMajor"] is False
     assert payload["foreshadows"][0]["code"] == "f1"
     assert payload["boundaries"] == []
     with service.db.project(project.id, project.folder_path) as session:
         service.phase4._validate_state_payload(session, project.id, payload)
+
+
+def test_major_event_classification_does_not_promote_scene_steps() -> None:
+    major, unclassified = phase5_module._major_event_classification([
+        {"summary": "The bell source is identified.", "isMajor": True},
+        {"summary": "The group walks downstairs.", "isMajor": False},
+        {"summary": "Legacy extraction without classification."},
+    ])
+    assert major == 1
+    assert unclassified == 1
 
 
 def test_requirement_evidence_accepts_explicit_chapter_beat_synonyms() -> None:

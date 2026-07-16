@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Story Agent 作者操作说明</title>
+  <style>
+    :root { --ink:#10263a; --muted:#617284; --paper:#f4f7f9; --card:#fff; --line:#d9e2e8; --blue:#156eaa; --blue-dark:#0d456d; --gold:#bd8b35; --gold-bg:#fff8e9; --green:#147a5b; --red:#b43c3c; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font-family:"Microsoft YaHei","Noto Sans SC",Arial,sans-serif; font-size:17px; line-height:1.75; }
+    .hero { background:linear-gradient(135deg,#09263b,#11567f 62%,#207a9d); color:#fff; padding:52px 20px 58px; }
+    .wrap { width:min(1100px,calc(100% - 32px)); margin:auto; }
+    h1,h2,h3 { line-height:1.3; margin:0; }
+    h1 { font-size:clamp(30px,5vw,48px); letter-spacing:.03em; }
+    h2 { font-size:27px; margin:44px 0 16px; padding-left:15px; border-left:5px solid var(--gold); }
+    h3 { font-size:19px; margin:0 0 9px; }
+    .hero p { margin:14px 0 0; font-size:20px; opacity:.91; }
+    .hero .tip { display:inline-block; margin-top:24px; padding:9px 15px; background:rgba(255,255,255,.13); border:1px solid rgba(255,255,255,.24); border-radius:8px; }
+    main { padding:30px 0 70px; }
+    .notice { margin:0 0 24px; padding:17px 20px; background:var(--gold-bg); border:1px solid #ead39e; border-left:5px solid var(--gold); border-radius:8px; }
+    .notice strong { color:#7d5512; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:24px; box-shadow:0 3px 12px rgba(20,50,70,.05); }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .book { padding:18px; border-radius:10px; border:1px solid var(--line); }
+    .book.demo { background:#f7f8fa; }
+    .book.official { background:#edf8f4; border-color:#9ccdbd; }
+    .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:13px; font-weight:700; vertical-align:middle; }
+    .badge.demo { background:#ebeef1; color:#5b6874; }
+    .badge.ok { background:#cfeee1; color:#0d6249; }
+    .bad { color:var(--red); font-weight:700; }
+    .good { color:var(--green); font-weight:700; }
+    .steps { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin-top:18px; }
+    .step { position:relative; min-height:130px; padding:15px; background:#fff; border:1px solid var(--line); border-radius:9px; }
+    .step b { display:grid; place-items:center; width:31px; height:31px; color:#fff; background:var(--blue); border-radius:50%; font-size:15px; }
+    .step strong { display:block; margin:10px 0 4px; font-size:16px; }
+    .step small { color:var(--muted); line-height:1.5; }
+    .step:not(:last-child)::after { content:"→"; position:absolute; right:-18px; top:50px; z-index:2; color:var(--gold); font-size:27px; font-weight:bold; }
+    .app-demo { display:grid; grid-template-columns:180px 1fr; overflow:hidden; border:1px solid #224258; border-radius:12px; color:#dbe8ed; background:#092030; }
+    .nav { padding:16px 10px; background:#071925; border-right:1px solid #244257; }
+    .nav-title { padding:7px 12px 14px; color:#e9c879; font-weight:700; border-bottom:1px solid #244257; }
+    .nav-item { position:relative; margin:7px 0; padding:10px 12px; color:#afc1cc; border-radius:7px; font-size:15px; }
+    .nav-item.active { color:#fff; background:#16425e; outline:1px solid #4f91b4; }
+    .nav-item.active::after { content:"点这里"; position:absolute; right:-87px; top:6px; z-index:3; padding:4px 8px; color:#543800; background:#ffd675; border-radius:5px; font-size:13px; font-weight:bold; white-space:nowrap; box-shadow:0 2px 8px rgba(0,0,0,.25); }
+    .nav-item.active::before { content:"➜"; position:absolute; right:-24px; z-index:3; color:#ffd675; font-size:23px; }
+    .screen { padding:24px 30px; min-height:390px; background:linear-gradient(145deg,#0c2a3b,#123b51); }
+    .topline { display:flex; justify-content:space-between; gap:12px; padding-bottom:14px; border-bottom:1px solid #2e5063; color:#bdd3df; font-size:14px; }
+    .screen h3 { margin:26px 0 12px; color:#f3d38c; font-size:26px; }
+    .fake-panel { padding:18px; border:1px solid #355a6e; border-radius:9px; background:#0a2232; }
+    .choice-row { display:flex; gap:10px; margin:15px 0; }
+    .choice { flex:1; padding:11px; border:1px solid #3d6980; border-radius:7px; text-align:center; color:#b9ced9; }
+    .choice.selected { border-color:#d9ad57; background:#3b321e; color:#ffe1a4; }
+    .button { display:inline-block; padding:9px 15px; color:#211703; background:#e5b85c; border-radius:6px; font-weight:700; }
+    .callout { margin-top:14px; padding:12px; background:#103a31; border-left:4px solid #56c79c; color:#d2f7e5; border-radius:6px; }
+    .mini { color:#adc1cc; font-size:14px; }
+    .table { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; min-width:720px; background:#fff; }
+    th,td { padding:12px 14px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#eaf1f5; }
+    ul { margin:8px 0; padding-left:1.4em; }
+    li { margin:5px 0; }
+    details { margin-top:13px; padding:0 16px; border:1px solid var(--line); border-radius:8px; background:#fcfdfe; }
+    summary { padding:14px 0; cursor:pointer; font-weight:700; color:var(--blue-dark); }
+    code { padding:1px 5px; border-radius:4px; background:#e7eef2; color:#173d56; font-family:Consolas,monospace; font-size:.92em; }
+    .feedback { padding:18px; background:#102b3d; color:#dceaf0; border-radius:9px; white-space:pre-wrap; font-family:Consolas,"Microsoft YaHei",monospace; font-size:14px; line-height:1.65; }
+    footer { margin-top:50px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; }
+    @media (max-width:760px) { body { font-size:16px; } .grid,.steps { grid-template-columns:1fr; } .step:not(:last-child)::after { content:"↓"; right:auto; left:18px; top:auto; bottom:-29px; } .app-demo { grid-template-columns:142px 1fr; } .screen { padding:18px; } .nav-item.active::after { right:-69px; font-size:11px; } .choice-row { flex-direction:column; } }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <h1>Story Agent 作者操作说明</h1>
+      <p>现在只需要学会一件事：选对书，然后从“自动托管”开始第 6 章试写。</p>
+      <span class="tip">本文件可直接双击打开；不需要 Markdown 编辑器。</span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="notice">
+      <strong>你刚才为什么会看到第 37 / 1000 章？</strong><br>
+      因为你打开的是“夜巡人”的<strong>示例项目</strong>。它用于演示页面和规划，不能真实试写。要测试模型，请切换到“夜巡人·正式试写”，它现在应该显示<strong>第 5 / 1000 章</strong>。
+    </section>
+
+    <h2>第一步：先选对书</h2>
+    <div class="grid">
+      <article class="book demo">
+        <h3>夜巡人 <span class="badge demo">示例项目</span></h3>
+        <p>顶部会显示：<strong>第 37 / 1000 章</strong></p>
+        <p class="bad">不要在这里开始生成。它只用于看界面。</p>
+      </article>
+      <article class="book official">
+        <h3>夜巡人·正式试写 <span class="badge ok">本次要用</span></h3>
+        <p>顶部会显示：<strong>第 5 / 1000 章</strong></p>
+        <p class="good">第 6—10 章已经准备好，可以从第 6 章试写。</p>
+      </article>
+    </div>
+    <p>请点击左侧第一项“作品总览”，然后在作品卡片中点击<strong>夜巡人·正式试写</strong>。<br><strong>注意：</strong>顶栏作品名右侧的小下拉箭头暂时不能切换作品，正确方法就是回“作品总览”点卡片。</p>
+
+    <h2>你今天只要做这 5 步</h2>
+    <section class="steps">
+      <article class="step"><b>1</b><strong>作品总览</strong><small>选“夜巡人·正式试写”</small></article>
+      <article class="step"><b>2</b><strong>确认进度</strong><small>顶部是第 5 / 1000 章，且没有“示例项目”</small></article>
+      <article class="step"><b>3</b><strong>自动托管</strong><small>左侧云朵上箭头图标</small></article>
+      <article class="step"><b>4</b><strong>单章试写</strong><small>选 1 章，并确认范围为第 6—6 章</small></article>
+      <article class="step"><b>5</b><strong>读结果</strong><small>完成后看正文和质量报告，再决定是否继续</small></article>
+    </section>
+
+    <h2>“自动托管”在哪里？</h2>
+    <p>它就在左侧导航栏，不在右侧的“故事 Agent”聊天框里。下面这个示意图就是你要找的位置：</p>
+    <section class="app-demo" aria-label="自动托管入口位置示意">
+      <aside class="nav">
+        <div class="nav-title">Story Agent</div>
+        <div class="nav-item">⌂　作品总览</div>
+        <div class="nav-item">▤　Canon</div>
+        <div class="nav-item">⌘　故事规划</div>
+        <div class="nav-item">✎　章节写作</div>
+        <div class="nav-item">◈　质量中心</div>
+        <div class="nav-item">▥　故事状态</div>
+        <div class="nav-item active">☁　自动托管</div>
+        <div class="nav-item">☷　模型设置</div>
+        <div class="nav-item">▦　短剧制作</div>
+      </aside>
+      <section class="screen">
+        <div class="topline"><span>夜巡人·正式试写</span><span>第 5 / 1000 章</span></div>
+        <h3>自动托管控制台</h3>
+        <div class="fake-panel">
+          <strong>分阶段试写</strong>
+          <div class="choice-row">
+            <div class="choice selected"><strong>1 章</strong><br><span class="mini">冒烟测试</span></div>
+            <div class="choice"><strong>3 章</strong><br><span class="mini">短链路</span></div>
+            <div class="choice"><strong>5 章</strong><br><span class="mini">连续验证</span></div>
+          </div>
+          <div class="callout">✓ 本批次已就绪　　<strong>开始第 6—6 章</strong></div>
+          <p><span class="button">⚡ 开始第 6—6 章</span></p>
+        </div>
+      </section>
+    </section>
+    <p><strong>顶栏“自动托管未启用”不是报错。</strong>它只表示“每天定时自动写作”还没开；你仍然可以通过“分阶段试写”立即运行单章。</p>
+
+    <h2>第 6 章试写时该点什么</h2>
+    <ol>
+      <li>在“自动托管”页选择 <strong>1 章 / 冒烟测试</strong>。</li>
+      <li>右侧“试写就绪检查”不能有红色“阻断”项。</li>
+      <li>金色按钮必须写着 <strong>开始第 6—6 章</strong>。如果显示别的章节，先停止，不要点击。</li>
+      <li>点击开始后，看“运行队列”：它会显示等待、生成中、已提交、失败或已隔离。</li>
+      <li>运行完成后，点击该章节右边的“正文”看候选稿，点击“质量”看逻辑和连续性检查。</li>
+      <li>质量通过、你也读完满意后，确认作品进度变成第 6 / 1000 章。</li>
+      <li>第 6 章没问题，才回来选择 <strong>3 章 / 短链路</strong>，并确认范围变为第 7—9 章。</li>
+    </ol>
+    <section class="notice"><strong>现在不要：</strong>直接选 5 章、开启每日自动托管、在示例项目里生成、或遇到红色错误后强制提交。</section>
+
+    <h2>每个页面是干什么的</h2>
+    <div class="table"><table>
+      <thead><tr><th>页面</th><th>作者应该在什么时候使用</th><th>当前状态</th></tr></thead>
+      <tbody>
+        <tr><td>作品总览</td><td>切换作品、新建作品、查看试写准备步骤。</td><td class="good">可用</td></tr>
+        <tr><td>Canon</td><td>保存世界观、人物、组织、物品、能力、规则、关系。锁定后，正文必须遵守它。</td><td class="good">可用；当前架构器主要适合夜巡人模板</td></tr>
+        <tr><td>故事规划</td><td>看卷、故事弧、里程碑、伏笔和章节节拍。它是剧情预算，不是让你一次写完后续内容。</td><td class="good">可用</td></tr>
+        <tr><td>章节写作</td><td>想手动掌控时，逐章建立契约、创建任务、查看候选稿和版本。</td><td class="good">可用</td></tr>
+        <tr><td>质量中心</td><td>检查逻辑、连续性、人物、文风；只有通过后才应正式提交。</td><td class="good">可用</td></tr>
+        <tr><td>故事状态</td><td>未来统一查看人物、物品、能力、事件台账。</td><td>暂为占位页</td></tr>
+        <tr><td>自动托管</td><td>启动 1/3/5 章试写，查看队列、费用、失败原因和恢复操作。</td><td class="good">可用</td></tr>
+        <tr><td>模型设置</td><td>配置模型、角色分工、价格和安全审计。</td><td class="good">可用</td></tr>
+        <tr><td>短剧制作</td><td>小说改编短剧。</td><td>尚未开发</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2>什么叫 Canon、章节契约、候选正文？</h2>
+    <details><summary>Canon（读作“卡农”）</summary><p>它是作品的正式设定库，不是普通笔记。人物等级、法器规则、代价、组织关系、世界观等都应写在这里。锁定后不能悄悄改，必须通过变更申请留下记录。</p></details>
+    <details><summary>章节契约</summary><p>是“本章允许写什么、必须出现什么、禁止提前写什么”的边界。它的作用就是防止 AI 用十章的速度写完一百章剧情。生成契约不等于生成正文。</p></details>
+    <details><summary>候选正文</summary><p>模型刚写出的稿件先放在候选区。它还没有改变正式小说进度、人物状态或 Canon；通过质量检查并确认提交后，才成为正式章节。</p></details>
+    <details><summary>右侧“故事 Agent”</summary><p>这是你和模型讨论当前页面内容的聊天区。它可以解释、检查或建议修改，但不是“开始写小说”的按钮。开始写，请用“自动托管”或“章节写作”。</p></details>
+
+    <h2>如果你想手动写一章</h2>
+    <div class="card">
+      <ol>
+        <li>进入“章节写作”，在上方章节轨道选章节号。</li>
+        <li>点击“生成章节契约”，先检查标题、人物、伏笔、钩子、完成条件和禁止项。</li>
+        <li>点击“校验并锁定”。</li>
+        <li>点击“创建写作任务”，再点击“运行流水线”。</li>
+        <li>正文只会先进入候选区；去“质量中心”看检查结果后，再正式提交。</li>
+      </ol>
+    </div>
+
+    <h2>哪些还没有开发完</h2>
+    <ul>
+      <li>任意题材的多轮创意聊天 → 自动固化 StoryBrief → 自动生成通用 Canon 与通用规划。</li>
+      <li>完整的“故事状态”台账页面。</li>
+      <li>面向普通作者的短篇小说工作流页面。</li>
+      <li>短剧制作、外部小说平台发布、Windows EXE 打包。</li>
+    </ul>
+    <p>所以当前最适合做的是：测试已经设定好的《夜巡人·正式试写》的第 6 章到第 9 章连续性，而不是直接拿任意新创意大量付费生成。</p>
+
+    <h2>测试后怎么反馈</h2>
+    <div class="feedback">测试范围：第 X—X 章
+是否全部正式提交：是 / 否
+最终 currentChapter：
+总耗时与费用：
+
+问题：
+- 页面或章节：
+- 我点了什么按钮：
+- 页面提示 / 错误码：
+- 截图：
+- 如果是正文问题，引用哪一小段：
+- 我觉得不合理的原因：
+- 希望系统怎样改：</div>
+
+    <footer>本说明对应当前“可试写版”。如需排查，不要发送 API Key，也不要手动复制 <code>.data</code>；优先发页面截图、错误码和章节号。</footer>
+  </main>
+</body>
+</html>

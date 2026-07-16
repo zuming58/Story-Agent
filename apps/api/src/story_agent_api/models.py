@@ -1350,3 +1350,39 @@ class AdaptationFinding(ProjectBase):
     revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ShortStoryOrigin(ProjectBase):
+    __tablename__ = "short_story_origins"
+    __table_args__ = (
+        Index(
+            "uq_short_story_origins_idempotency",
+            "project_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+        ),
+        Index("uq_short_story_origins_target", "target_project_id", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_project_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_strategy_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_strategy_revision: Mapped[int] = mapped_column(Integer)
+    source_strategy_checksum: Mapped[str] = mapped_column(String(64))
+    source_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    strategy_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    target_project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    target_title: Mapped[str] = mapped_column(String(200), default="")
+    target_chapter_count: Mapped[int] = mapped_column(Integer, default=1)
+    target_word_count: Mapped[int] = mapped_column(Integer, default=10000)
+    status: Mapped[str] = mapped_column(String(30), default="creating", index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    diagnostic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

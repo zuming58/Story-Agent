@@ -4,7 +4,7 @@
 
 - GitHub 仓库：`https://github.com/zuming58/Story-Agent.git`
 - 稳定分支：`main`
-- 当前开发分支：`agent/local-data-foundation`
+- 当前开发分支以根目录 `HANDOFF.md` 为准，不在长期工作流中写死。
 - 当前阶段的范围、状态和恢复点以仓库根目录 `HANDOFF.md` 为准。
 - 产品边界以 `docs/prd/PRD-001.md` 为准，视觉边界以 `docs/ui/UI-DESIGN-BASELINE.md` 为准。
 
@@ -21,6 +21,14 @@ git push
 ```
 
 提交前更新 `HANDOFF.md`：写明已完成项、未完成项、测试结果、最新提交和下一位 Agent 的第一项任务。不要提交 `.data/`、`.e2e-data/`、密钥、日志、ZIP 备份或两个本地参考项目。
+
+## 本机一键启动
+
+- 正常开发环境初始化完成后，双击仓库根目录 `START-STORY-AGENT.cmd`。
+- 脚本分别启动 API 与 Web，等待就绪后自动打开 `http://127.0.0.1:5173/overview`。
+- 已有 `apps/api/.venv` 时运行不依赖 `uv`；只有首次初始化 API 环境才需要 `uv`。
+- 当前机器把 uv 下载缓存放在 `F:\Cache\uv\cache`，脚本会自动设置 `UV_CACHE_DIR`，但缓存目录本身不包含 `uv.exe`。
+- 关闭两个最小化的 `Story Agent API`、`Story Agent Web` 命令窗口即可停止本地服务。
 
 ## 第二台电脑首次接力
 

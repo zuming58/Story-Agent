@@ -149,6 +149,7 @@ class Phase9Service:
     def readiness(self, project_id: str, payload: ExportReadinessRequest) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         self._validate_range(project.total_chapters, payload.chapter_start, payload.chapter_end)
+        self._validate_short_story_export_range(project, payload.mode, payload.chapter_start, payload.chapter_end)
         formats = self._requested_formats(project.id, project.folder_path, payload.formats)
         with self.service.db.project(project.id, project.folder_path) as session:
             return self._readiness(session, project.id, project.title, payload.mode, payload.chapter_start, payload.chapter_end, formats)
@@ -342,6 +343,7 @@ class Phase9Service:
     def create_export(self, project_id: str, payload: ExportCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         self._validate_range(project.total_chapters, payload.chapter_start, payload.chapter_end)
+        self._validate_short_story_export_range(project, payload.mode, payload.chapter_start, payload.chapter_end)
         formats = self._requested_formats(project.id, project.folder_path, payload.formats)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             if payload.idempotency_key:
@@ -1039,6 +1041,16 @@ class Phase9Service:
                 "EXPORT_RANGE_OUT_OF_BOUNDS",
                 "导出章节范围超出作品总章数。",
                 {"chapterStart": chapter_start, "chapterEnd": chapter_end, "totalChapters": total_chapters},
+            )
+
+    @staticmethod
+    def _validate_short_story_export_range(project: Any, mode: str, chapter_start: int, chapter_end: int) -> None:
+        if project.mode == "short-form" and mode == "formal" and (chapter_start != 1 or chapter_end != project.total_chapters):
+            raise StoryError(
+                422,
+                "SHORT_STORY_EXPORT_RANGE",
+                "Formal short-story exports must include the complete chapter range.",
+                {"chapterStart": chapter_start, "chapterEnd": chapter_end, "totalChapters": project.total_chapters},
             )
 
     @staticmethod

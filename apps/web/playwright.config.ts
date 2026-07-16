@@ -5,9 +5,14 @@ import { resolve } from "node:path";
 // migration must never poison the next Playwright run.
 const e2eRunId = process.env.STORY_AGENT_E2E_RUN_ID ?? `${Date.now()}-${process.pid}`;
 const e2eDataDir = resolve(process.cwd(), ".e2e-data", e2eRunId);
+const apiPython = process.platform === "win32" ? "..\\api\\.venv\\Scripts\\python.exe" : "../api/.venv/bin/python";
 
 export default defineConfig({
   testDir: "./e2e",
+  // Project creation performs an isolated Alembic migration. On Windows a
+  // cold filesystem or antivirus scan can push a full UI flow past the
+  // Playwright default of 30 seconds even though the application is healthy.
+  timeout: 90_000,
   fullyParallel: false,
   workers: 1,
   retries: 0,
@@ -19,7 +24,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "uv run --project ../api uvicorn story_agent_api.main:app --host 127.0.0.1 --port 8765",
+      command: `"${apiPython}" -m uvicorn story_agent_api.main:app --host 127.0.0.1 --port 8765`,
       url: "http://127.0.0.1:8765/api/v1/health",
       env: { STORY_AGENT_DATA_DIR: e2eDataDir },
       reuseExistingServer: false,

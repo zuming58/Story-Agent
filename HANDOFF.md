@@ -50,7 +50,7 @@ apps/api/src/story_agent_api/phase5.py
 apps/api/src/story_agent_api/phase8.py
 ```
 
-基线：`agent/general-story-incubator-foundation@b4f08aada8edda56f46115900622738814ec8c26`。WIP 提交 hash 请在本节提交后更新。
+基线：`agent/general-story-incubator-foundation@b4f08aada8edda56f46115900622738814ec8c26`。当前 WIP 提交：`3f4d62fdebfbd04b09fa0d994b9b1563a83b8da2`。
 
 正式方案：`docs/plans/PHASE-13-GENERAL-STORY-INCUBATOR.md`
 

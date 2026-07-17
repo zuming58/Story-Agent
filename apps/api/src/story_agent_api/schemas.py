@@ -1631,3 +1631,452 @@ class ShortStoryReadinessOut(ApiModel):
     origin: ShortStoryOriginOut | None = None
     checks: list[ShortStoryReadinessCheckOut]
     updated_at: datetime
+
+
+class MarketResearchBriefCreate(ApiModel):
+    expected_revision: int = Field(default=0, ge=0)
+    format: Literal["long-form", "short-form"]
+    platform: str = Field(default="undecided", min_length=1, max_length=160)
+    genre: str = Field(min_length=1, max_length=240)
+    audience: str = Field(min_length=1, max_length=4000)
+    target_chapters: int | None = Field(default=None, ge=1, le=5000)
+    target_words: int | None = Field(default=None, ge=1000, le=20_000_000)
+    emotional_value: list[str] = Field(min_length=1)
+    research_date_range: dict[str, str] = Field(default_factory=dict)
+    included_domains: list[str] = Field(default_factory=list)
+    excluded_domains: list[str] = Field(default_factory=list)
+    reference_works: list[str] = Field(default_factory=list)
+    forbidden_content: list[str] = Field(default_factory=list)
+    commercial_goals: list[str] = Field(default_factory=list)
+    notes: str = Field(default="", max_length=6000)
+
+
+class MarketResearchBriefOut(ApiModel):
+    id: str
+    project_id: str
+    version_number: int
+    format: str
+    platform: str
+    genre: str
+    audience: str
+    target_chapters: int | None = None
+    target_words: int | None = None
+    emotional_value: list[str]
+    research_date_range: dict[str, str]
+    included_domains: list[str]
+    excluded_domains: list[str]
+    reference_works: list[str]
+    forbidden_content: list[str]
+    commercial_goals: list[str]
+    notes: str
+    checksum: str
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchLimits(ApiModel):
+    max_queries: int = Field(default=6, ge=6, le=30)
+    max_pages: int = Field(default=30, ge=1, le=100)
+    max_chars_per_page: int = Field(default=20_000, ge=1000, le=100_000)
+    max_total_chars: int = Field(default=200_000, ge=1000, le=1_000_000)
+    max_cost: float = Field(default=5.0, ge=0, le=1000)
+    max_runtime_seconds: int = Field(default=180, ge=5, le=3600)
+    minimum_source_types: int = Field(default=3, ge=1, le=7)
+
+
+class ResearchJobCreate(ApiModel):
+    brief_id: str | None = None
+    expected_brief_revision: int = Field(ge=1)
+    idempotency_key: str | None = Field(default=None, max_length=120)
+    search_provider: Literal["tavily", "deterministic"] = "tavily"
+    search_secret_ref: str | None = Field(default=None, max_length=240)
+    fetch_provider: Literal["public-http", "firecrawl", "deterministic"] = "public-http"
+    fetch_secret_ref: str | None = Field(default=None, max_length=240)
+    limits: ResearchLimits = Field(default_factory=ResearchLimits)
+    run_immediately: bool = True
+
+
+class ResearchJobAction(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class ResearchJobOut(ApiModel):
+    id: str
+    project_id: str
+    brief_id: str
+    brief_revision: int
+    brief_checksum: str
+    attempt: int
+    status: str
+    idempotency_key: str | None = None
+    provider_config: dict[str, Any]
+    limits: dict[str, Any]
+    coverage: dict[str, Any]
+    report_checksum: str
+    report_revision: int
+    query_count: int
+    page_count: int
+    fetched_chars: int
+    request_units: float
+    estimated_cost: float
+    error_code: str | None = None
+    error_message: str | None = None
+    diagnostic: dict[str, Any] | None = None
+    revision: int
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime
+
+
+class ResearchSourceVersionOut(ApiModel):
+    id: str
+    project_id: str
+    job_id: str
+    source_id: str
+    version_number: int
+    final_url: str
+    content_checksum: str
+    bounded_content: str
+    summary: str
+    char_count: int
+    truncated: bool
+    fetch_metadata: dict[str, Any]
+    fetched_at: datetime
+
+
+class ResearchSourceOut(ApiModel):
+    id: str
+    project_id: str
+    job_id: str
+    query_id: str | None = None
+    canonical_url: str
+    title: str
+    domain: str
+    source_type: str
+    published_at: datetime | None = None
+    provider_metadata: dict[str, Any]
+    status: str
+    failure_reason: str | None = None
+    excluded: bool
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    versions: list[ResearchSourceVersionOut] = Field(default_factory=list)
+
+
+class ResearchEvidenceOut(ApiModel):
+    id: str
+    project_id: str
+    job_id: str
+    source_id: str
+    source_version_id: str
+    claim_type: str
+    claim: str
+    excerpt: str
+    locator: dict[str, Any]
+    confidence: float
+    finding_refs: list[str]
+    checksum: str
+    created_at: datetime
+
+
+class CompetitorProfileOut(ApiModel):
+    id: str
+    project_id: str
+    job_id: str
+    report_revision: int
+    name: str
+    profile: dict[str, Any]
+    evidence_ids: list[str]
+    confidence: float
+    excluded: bool
+    exclusion_reason: str | None = None
+    checksum: str
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class CompetitorExclude(ApiModel):
+    expected_revision: int = Field(ge=1)
+    expected_job_revision: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ResearchFindingOut(ApiModel):
+    id: str
+    project_id: str
+    job_id: str
+    report_revision: int
+    category: str
+    statement: str
+    claim_type: str
+    evidence_ids: list[str]
+    confidence: float
+    uncertainties: list[str]
+    checksum: str
+    status: str
+    revision: int
+    created_at: datetime
+
+
+class OpportunityScore(ApiModel):
+    platform_fit: int = Field(ge=0, le=15)
+    opening_hook: int = Field(ge=0, le=15)
+    emotional_payoff: int = Field(ge=0, le=15)
+    differentiation: int = Field(ge=0, le=15)
+    serial_engine: int = Field(ge=0, le=15)
+    character_stickiness: int = Field(ge=0, le=10)
+    world_engine: int = Field(ge=0, le=10)
+    readability: int = Field(ge=0, le=5)
+
+
+class StoryOpportunityDraft(ApiModel):
+    high_concept: str = Field(min_length=1, max_length=4000)
+    protagonist: str = Field(min_length=1, max_length=2000)
+    core_desire: str = Field(min_length=1, max_length=2000)
+    core_conflict: str = Field(min_length=1, max_length=3000)
+    world_mechanism: str = Field(min_length=1, max_length=3000)
+    first_three_chapter_promise: str = Field(min_length=1, max_length=3000)
+    serial_engine: str = Field(min_length=1, max_length=3000)
+    differentiation: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    score_components: OpportunityScore
+    evidence_by_component: dict[str, list[str]] = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+    evidence_coverage: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    uncertainties: list[str] = Field(default_factory=list)
+
+
+class StoryOpportunityCreate(ApiModel):
+    expected_job_revision: int = Field(ge=1)
+    opportunities: list[StoryOpportunityDraft] | None = Field(default=None, min_length=3, max_length=5)
+
+
+class StoryOpportunityAction(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class StoryOpportunityOut(ApiModel):
+    id: str
+    project_id: str
+    job_id: str
+    report_revision: int
+    report_checksum: str
+    high_concept: str
+    story: dict[str, Any]
+    score_components: dict[str, int]
+    total_score: int
+    evidence_coverage: float
+    confidence: float
+    uncertainties: list[str]
+    evidence_ids: list[str]
+    checksum: str
+    status: str
+    is_current: bool
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    decided_at: datetime | None = None
+
+
+class IdeationSessionCreate(ApiModel):
+    opportunity_id: str
+    expected_opportunity_revision: int = Field(ge=1)
+
+
+class IdeationMessageCreate(ApiModel):
+    expected_session_revision: int = Field(ge=1)
+    content: str = Field(min_length=1, max_length=12_000)
+
+
+class IdeationMessageOut(ApiModel):
+    id: str
+    project_id: str
+    session_id: str
+    sequence_number: int
+    role: str
+    content: str
+    structured_state: dict[str, Any]
+    evidence_ids: list[str]
+    model_run_id: str | None = None
+    created_at: datetime
+
+
+class IdeationSessionOut(ApiModel):
+    id: str
+    project_id: str
+    opportunity_id: str
+    opportunity_revision: int
+    opportunity_checksum: str
+    research_job_id: str
+    research_report_checksum: str
+    state: dict[str, Any]
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    messages: list[IdeationMessageOut] = Field(default_factory=list)
+
+
+class StoryBriefProposalCreate(ApiModel):
+    expected_session_revision: int = Field(ge=1)
+    brief: dict[str, Any] | None = None
+
+
+class StoryBriefProposalAction(ApiModel):
+    expected_revision: int = Field(ge=1)
+
+
+class StoryBriefProposalOut(ApiModel):
+    id: str
+    project_id: str
+    session_id: str
+    base_brief_version_id: str | None = None
+    opportunity_id: str
+    opportunity_revision: int
+    opportunity_checksum: str
+    research_job_id: str
+    research_report_checksum: str
+    proposed_brief: dict[str, Any]
+    diff: dict[str, Any]
+    checksum: str
+    model_run_id: str | None = None
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    applied_at: datetime | None = None
+    rejected_at: datetime | None = None
+
+
+class StoryBriefVersionOut(ApiModel):
+    id: str
+    project_id: str
+    session_id: str
+    proposal_id: str
+    opportunity_id: str
+    opportunity_checksum: str
+    research_job_id: str
+    research_report_checksum: str
+    version_number: int
+    brief: dict[str, Any]
+    checksum: str
+    is_current: bool
+    revision: int
+    created_at: datetime
+    accepted_at: datetime
+
+
+class IncubationCanonProposalCreate(ApiModel):
+    expected_story_brief_revision: int = Field(ge=1)
+    instructions: str = Field(default="", max_length=6000)
+
+
+class OpeningStrategy(ApiModel):
+    key: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=160)
+    focus: str = Field(min_length=1, max_length=2000)
+
+
+class OpeningExperimentCreate(ApiModel):
+    expected_story_brief_revision: int = Field(ge=1)
+    expected_canon_revision: int = Field(ge=1)
+    strategies: list[OpeningStrategy] | None = Field(default=None, min_length=3, max_length=3)
+
+
+class OpeningCandidateAction(ApiModel):
+    expected_revision: int = Field(ge=1)
+    expected_experiment_revision: int = Field(ge=1)
+
+
+class OpeningExpand(ApiModel):
+    expected_revision: int = Field(ge=1)
+    selected_candidate_id: str
+    expected_candidate_revision: int = Field(ge=1)
+
+
+class ReaderEvaluationOut(ApiModel):
+    id: str
+    project_id: str
+    experiment_id: str
+    candidate_id: str
+    reviewer_role: str
+    scores: dict[str, Any]
+    findings: list[dict[str, Any]]
+    recommendation: str
+    summary: str
+    model_run_id: str | None = None
+    checksum: str
+    created_at: datetime
+
+
+class OpeningCandidateOut(ApiModel):
+    id: str
+    project_id: str
+    experiment_id: str
+    strategy_key: str
+    strategy_label: str
+    strategy: dict[str, Any]
+    chapters: list[dict[str, Any]]
+    chapter_count: int
+    text_checksum: str
+    model_run_id: str | None = None
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    decided_at: datetime | None = None
+    evaluations: list[ReaderEvaluationOut] = Field(default_factory=list)
+
+
+class OpeningExperimentOut(ApiModel):
+    id: str
+    project_id: str
+    story_brief_version_id: str
+    story_brief_revision: int
+    story_brief_checksum: str
+    canon_document_id: str
+    canon_revision: int
+    canon_checksum: str
+    strategies: list[dict[str, Any]]
+    status: str
+    selected_candidate_id: str | None = None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    candidates: list[OpeningCandidateOut] = Field(default_factory=list)
+
+
+class StyleBaselineOut(ApiModel):
+    id: str
+    project_id: str
+    experiment_id: str
+    candidate_id: str
+    story_brief_version_id: str
+    story_brief_checksum: str
+    canon_revision: int
+    canon_checksum: str
+    sample_checksum: str
+    style_rules: list[str]
+    forbidden_patterns: list[str]
+    checksum: str
+    is_current: bool
+    revision: int
+    created_at: datetime
+
+
+class IncubationReadinessOut(ApiModel):
+    project_id: str
+    ready: bool
+    stage: str
+    checks: list[dict[str, Any]]
+    current_story_brief_id: str | None = None
+    selected_opening_candidate_id: str | None = None
+    style_baseline_id: str | None = None
+    updated_at: datetime

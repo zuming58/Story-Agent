@@ -39,6 +39,7 @@ from .models import (
     StateDelta,
     StateFact,
     StateSnapshot,
+    StyleBaseline,
     StoryEntity,
     utc_now,
 )
@@ -1141,6 +1142,11 @@ class Phase5Service:
             if phase7 is not None:
                 phase7.assert_current_automation_lease(session, project.id)
             job = self._get_job(session, project.id, job_id)
+            contract = session.get(ChapterContract, job.chapter_contract_id)
+            if payload.mode == "guarded_auto" and contract and contract.chapter_number <= 3:
+                baseline = session.scalar(select(StyleBaseline).where(StyleBaseline.project_id == project.id, StyleBaseline.is_current.is_(True)))
+                if baseline:
+                    raise StoryError(409, "INCUBATION_FIRST_THREE_MANUAL_REQUIRED", "The first three chapters after an opening experiment require explicit human approval.")
             if job.revision != payload.expected_job_revision:
                 raise StoryError(409, "CHAPTER_JOB_REVISION_CONFLICT", "Chapter job revision conflict.", {"currentRevision": job.revision})
             if job.status == "approved":

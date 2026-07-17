@@ -2,6 +2,56 @@
 
 当前分支：`agent/general-story-incubator-foundation`
 
+## 2026-07-18 Phase 13 后端 WIP 收敛点
+
+状态：**已提交可恢复的后端 WIP 基线；未完成最终审计与全量验证。此处停止功能扩展，下一位模型应从本节继续。**
+
+### 已完成实现
+
+- 新增 project migration `0017_general_story_incubator_foundation`，创建 17 张 Phase 13 表：研究 Brief/任务/查询/来源/版本/证据、竞品/结论/机会、共创会话/消息、StoryBrief 版本/提案、开篇实验/候选/读者评审/StyleBaseline。
+- 新增 `research_providers.py`：稳定 `SearchProvider`、`ContentFetchProvider`、确定性测试 Provider、Tavily 搜索、Firecrawl/公开 HTTP 抓取适配器；`ResearchSourcePolicy` 拒绝非 HTTP(S)、localhost、环回、私网、链路本地地址，并在每次跳转后复检 URL。
+- 新增 `phase13.py` 和 API：Brief、研究状态机、来源/证据、竞品与 findings、机会评分/接受、共创、StoryBrief 权威链、通用 Canon 草稿、三种开篇、独立读者/编辑评审、人工选择、StyleBaseline、incubation readiness。
+- 真实 Provider 只通过 `SecretStore` 的 `secretRef` 读取密钥；默认/测试路径使用确定性 Provider，不调用 Tavily、Firecrawl 或 DeepSeek。
+- 研究外部调用位于 SQLite 写事务之外；写入前重验上游 revision/checksum。候选正文与评审未写入 ChapterCommit、Plan、StateSnapshot 或正式 Canon。
+- `phase8.py` 对带 `incubation=true` 的 Canon 提案使用通用 StoryBrief 校验，固定夜巡人校验仅保留给旧模板残留；`phase5.py` 阻止已有 StyleBaseline 的项目对前 3 章做 `guarded_auto` 批准。
+- 备份恢复已将全部 Phase 13 表列入 projectId 重映射；`Phase13Service.repair_restored_metadata` 为 Phase 13 内部 UUID 重新编号，并更新全部关系列、JSON 引用和 AuditEvent 实体 ID。
+
+### 已通过验证
+
+```text
+Phase 13 focused/API/SSRF/backup-restore: 3 passed
+Projects regression: 3 passed
+Backup regression: 7 passed
+Phase 8 architecture regression: 7 passed
+python compileall apps/api/src apps/api/tests: passed
+git diff --check: passed (only Windows LF/CRLF warnings)
+```
+
+### 尚未完成或必须审计
+
+- `apps/api/tests` 全量命令及 Phase 5/9/10/11/12 分组在桌面执行环境的 124 秒命令上限被终止，未得到失败断言。下一位模型应以更长可用超时或按更小文件/测试拆分跑完，并记录精确结果。
+- 尚未运行本轮要求的 `npm run test`、`npm run build`、`npm run test:e2e`；切换模型后继续运行。根目录 API 脚本依赖 `uv`，若 PATH 无 `uv`，使用 `apps/api/.venv/Scripts/python.exe -m pytest apps/api/tests` 作为等价 API 回归并如实记录。
+- 对 `phase13.py` 做完整代码审计，重点检查：恢复 UUID 重映射的所有 JSON 字段、`ResearchJob` 租约/取消边界、真实 Provider 异常处理、竞争条件、证据不足条件和恢复状态。
+- 增加更细 API 测试：Brief 漂移、任务 cancel/resume/accept/reject、密钥缺失/限流/超时、来源 URL 去重与多版本、竞品排除后旧报告不变、跨项目资源访问、开篇全部拒绝和前三章自动托管拒绝。
+- 不要修改 `apps/web/**`，不要修改 `.data`、密钥、数据库、日志、备份 ZIP 或夜巡人正文；不要合并 main/PR。
+
+### 当前代码范围
+
+```text
+apps/api/migrations/project/versions/0017_general_story_incubator_foundation.py
+apps/api/src/story_agent_api/research_providers.py
+apps/api/src/story_agent_api/phase13.py
+apps/api/tests/test_phase13_incubator.py
+apps/api/src/story_agent_api/models.py
+apps/api/src/story_agent_api/schemas.py
+apps/api/src/story_agent_api/main.py
+apps/api/src/story_agent_api/services.py
+apps/api/src/story_agent_api/phase5.py
+apps/api/src/story_agent_api/phase8.py
+```
+
+基线：`agent/general-story-incubator-foundation@b4f08aada8edda56f46115900622738814ec8c26`。WIP 提交 hash 请在本节提交后更新。
+
 正式方案：`docs/plans/PHASE-13-GENERAL-STORY-INCUBATOR.md`
 
 后端执行清单：`docs/plans/PHASE-13-BACKEND-HANDOFF.md`

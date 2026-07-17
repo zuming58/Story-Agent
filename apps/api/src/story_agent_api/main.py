@@ -122,6 +122,34 @@ from .schemas import (
     ShortStoryOriginOut,
     ShortStoryProposalCreate,
     ShortStoryReadinessOut,
+    CompetitorExclude,
+    CompetitorProfileOut,
+    IdeationMessageCreate,
+    IdeationMessageOut,
+    IdeationSessionCreate,
+    IdeationSessionOut,
+    IncubationCanonProposalCreate,
+    IncubationReadinessOut,
+    MarketResearchBriefCreate,
+    MarketResearchBriefOut,
+    OpeningCandidateAction,
+    OpeningCandidateOut,
+    OpeningExpand,
+    OpeningExperimentCreate,
+    OpeningExperimentOut,
+    ResearchEvidenceOut,
+    ResearchFindingOut,
+    ResearchJobAction,
+    ResearchJobCreate,
+    ResearchJobOut,
+    ResearchSourceOut,
+    StoryBriefProposalAction,
+    StoryBriefProposalCreate,
+    StoryBriefProposalOut,
+    StoryBriefVersionOut,
+    StoryOpportunityAction,
+    StoryOpportunityCreate,
+    StoryOpportunityOut,
     SourceVersionOut,
     SourceVersionSupersede,
     StateCandidateCommit,
@@ -614,6 +642,142 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/projects/{project_id}/short-story/readiness", response_model=ShortStoryReadinessOut)
     def get_short_story_readiness(project_id: str) -> object:
         return service.phase12.readiness(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/research/briefs", response_model=MarketResearchBriefOut, status_code=201)
+    def create_research_brief(project_id: str, payload: MarketResearchBriefCreate, request: Request) -> object:
+        return service.phase13.create_brief(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/research/briefs", response_model=list[MarketResearchBriefOut])
+    def list_research_briefs(project_id: str) -> object:
+        return service.phase13.list_briefs(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/research/jobs", response_model=ResearchJobOut, status_code=201)
+    def create_research_job(project_id: str, payload: ResearchJobCreate, request: Request) -> object:
+        return service.phase13.create_job(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/research/jobs", response_model=list[ResearchJobOut])
+    def list_research_jobs(project_id: str) -> object:
+        return service.phase13.list_jobs(project_id)
+
+    @app.get("/api/v1/research/jobs/{job_id}", response_model=ResearchJobOut)
+    def get_research_job(job_id: str) -> object:
+        return service.phase13.get_job(job_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/cancel", response_model=ResearchJobOut)
+    def cancel_research_job(job_id: str, payload: ResearchJobAction, request: Request) -> object:
+        return service.phase13.cancel_job(job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/resume", response_model=ResearchJobOut)
+    def resume_research_job(job_id: str, payload: ResearchJobAction, request: Request) -> object:
+        return service.phase13.resume_job(job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/accept", response_model=ResearchJobOut)
+    def accept_research_job(job_id: str, payload: ResearchJobAction, request: Request) -> object:
+        return service.phase13.decide_research_job(job_id, payload, request.state.request_id, accepted=True)
+
+    @app.post("/api/v1/research/jobs/{job_id}/reject", response_model=ResearchJobOut)
+    def reject_research_job(job_id: str, payload: ResearchJobAction, request: Request) -> object:
+        return service.phase13.decide_research_job(job_id, payload, request.state.request_id, accepted=False)
+
+    @app.get("/api/v1/research/jobs/{job_id}/sources", response_model=list[ResearchSourceOut])
+    def list_research_sources(job_id: str) -> object:
+        return service.phase13.list_sources(job_id)
+
+    @app.get("/api/v1/research/jobs/{job_id}/evidence", response_model=list[ResearchEvidenceOut])
+    def list_research_evidence(job_id: str) -> object:
+        return service.phase13.list_evidence(job_id)
+
+    @app.get("/api/v1/research/jobs/{job_id}/competitors", response_model=list[CompetitorProfileOut])
+    def list_competitors(job_id: str) -> object:
+        return service.phase13.list_competitors(job_id)
+
+    @app.get("/api/v1/research/jobs/{job_id}/findings", response_model=list[ResearchFindingOut])
+    def list_research_findings(job_id: str) -> object:
+        return service.phase13.list_findings(job_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/opportunities", response_model=list[StoryOpportunityOut], status_code=201)
+    def create_story_opportunities(job_id: str, payload: StoryOpportunityCreate, request: Request) -> object:
+        return service.phase13.create_opportunities(job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/competitors/{competitor_id}/exclude", response_model=CompetitorProfileOut)
+    def exclude_competitor(competitor_id: str, payload: CompetitorExclude, request: Request) -> object:
+        return service.phase13.exclude_competitor(competitor_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/story-opportunities/{opportunity_id}/accept", response_model=StoryOpportunityOut)
+    def accept_story_opportunity(opportunity_id: str, payload: StoryOpportunityAction, request: Request) -> object:
+        return service.phase13.decide_opportunity(opportunity_id, payload, request.state.request_id, accepted=True)
+
+    @app.post("/api/v1/story-opportunities/{opportunity_id}/reject", response_model=StoryOpportunityOut)
+    def reject_story_opportunity(opportunity_id: str, payload: StoryOpportunityAction, request: Request) -> object:
+        return service.phase13.decide_opportunity(opportunity_id, payload, request.state.request_id, accepted=False)
+
+    @app.post("/api/v1/projects/{project_id}/ideation/sessions", response_model=IdeationSessionOut, status_code=201)
+    def create_ideation_session(project_id: str, payload: IdeationSessionCreate, request: Request) -> object:
+        return service.phase13.create_ideation_session(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/ideation/sessions", response_model=list[IdeationSessionOut])
+    def list_ideation_sessions(project_id: str) -> object:
+        return service.phase13.list_ideation_sessions(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/ideation/sessions/{session_id}", response_model=IdeationSessionOut)
+    def get_ideation_session(project_id: str, session_id: str) -> object:
+        return service.phase13.get_ideation_session(project_id, session_id)
+
+    @app.post("/api/v1/ideation/sessions/{session_id}/messages", response_model=IdeationMessageOut, status_code=201)
+    def add_ideation_message(session_id: str, payload: IdeationMessageCreate, request: Request) -> object:
+        return service.phase13.add_ideation_message(session_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/ideation/sessions/{session_id}/story-brief-proposals", response_model=StoryBriefProposalOut, status_code=201)
+    def create_story_brief_proposal(session_id: str, payload: StoryBriefProposalCreate, request: Request) -> object:
+        return service.phase13.create_story_brief_proposal(session_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/story-brief/versions", response_model=list[StoryBriefVersionOut])
+    def list_story_brief_versions(project_id: str) -> object:
+        return service.phase13.list_story_brief_versions(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/story-brief/current", response_model=StoryBriefVersionOut)
+    def current_story_brief(project_id: str) -> object:
+        return service.phase13.current_story_brief(project_id)
+
+    @app.post("/api/v1/story-brief-proposals/{proposal_id}/apply", response_model=StoryBriefProposalOut)
+    def apply_story_brief_proposal(proposal_id: str, payload: StoryBriefProposalAction, request: Request) -> object:
+        return service.phase13.decide_story_brief_proposal(proposal_id, payload, request.state.request_id, accepted=True)
+
+    @app.post("/api/v1/story-brief-proposals/{proposal_id}/reject", response_model=StoryBriefProposalOut)
+    def reject_story_brief_proposal(proposal_id: str, payload: StoryBriefProposalAction, request: Request) -> object:
+        return service.phase13.decide_story_brief_proposal(proposal_id, payload, request.state.request_id, accepted=False)
+
+    @app.post("/api/v1/projects/{project_id}/incubation/canon-proposals", response_model=CanonGenerationProposalOut, status_code=201)
+    def create_incubation_canon_proposal(project_id: str, payload: IncubationCanonProposalCreate, request: Request) -> object:
+        return service.phase13.create_canon_proposal(project_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/projects/{project_id}/opening-experiments", response_model=OpeningExperimentOut, status_code=201)
+    def create_opening_experiment(project_id: str, payload: OpeningExperimentCreate, request: Request) -> object:
+        return service.phase13.create_opening_experiment(project_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/opening-experiments", response_model=list[OpeningExperimentOut])
+    def list_opening_experiments(project_id: str) -> object:
+        return service.phase13.list_opening_experiments(project_id)
+
+    @app.get("/api/v1/opening-experiments/{experiment_id}", response_model=OpeningExperimentOut)
+    def get_opening_experiment(experiment_id: str) -> object:
+        return service.phase13.get_opening_experiment(experiment_id)
+
+    @app.post("/api/v1/opening-candidates/{candidate_id}/select", response_model=OpeningCandidateOut)
+    def select_opening_candidate(candidate_id: str, payload: OpeningCandidateAction, request: Request) -> object:
+        return service.phase13.decide_opening_candidate(candidate_id, payload, request.state.request_id, selected=True)
+
+    @app.post("/api/v1/opening-candidates/{candidate_id}/reject", response_model=OpeningCandidateOut)
+    def reject_opening_candidate(candidate_id: str, payload: OpeningCandidateAction, request: Request) -> object:
+        return service.phase13.decide_opening_candidate(candidate_id, payload, request.state.request_id, selected=False)
+
+    @app.post("/api/v1/opening-experiments/{experiment_id}/expand-to-three-chapters", response_model=OpeningExperimentOut)
+    def expand_opening_experiment(experiment_id: str, payload: OpeningExpand, request: Request) -> object:
+        return service.phase13.expand_opening_to_three_chapters(experiment_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/incubation-readiness", response_model=IncubationReadinessOut)
+    def get_incubation_readiness(project_id: str) -> object:
+        return service.phase13.readiness(project_id)
 
     @app.post("/api/v1/adaptation-proposals/{proposal_id}/apply", response_model=AdaptationProposalOut)
     def apply_adaptation_proposal(proposal_id: str, payload: AdaptationProposalAction, request: Request) -> object:

@@ -1692,7 +1692,12 @@ class ResearchJobCreate(ApiModel):
     idempotency_key: str | None = Field(default=None, max_length=120)
     search_provider: Literal["tavily", "deterministic"] = "tavily"
     search_secret_ref: str | None = Field(default=None, max_length=240)
-    fetch_provider: Literal["public-http", "firecrawl", "deterministic"] = "public-http"
+    # Direct application-side fetching is intentionally not offered here.  A
+    # hostname can pass an initial public-DNS validation and subsequently be
+    # rebound to a private address by the time an HTTP client connects.  Use a
+    # dedicated extraction provider (or the deterministic test provider)
+    # until a pinned-address transport exists.
+    fetch_provider: Literal["firecrawl", "deterministic"] = "firecrawl"
     fetch_secret_ref: str | None = Field(default=None, max_length=240)
     limits: ResearchLimits = Field(default_factory=ResearchLimits)
     run_immediately: bool = True
@@ -1999,6 +2004,11 @@ class OpeningExpand(ApiModel):
     expected_revision: int = Field(ge=1)
     selected_candidate_id: str
     expected_candidate_revision: int = Field(ge=1)
+
+
+class OpeningChapterApproval(ApiModel):
+    expected_revision: int = Field(ge=1)
+    chapter_number: int = Field(ge=1, le=3)
 
 
 class ReaderEvaluationOut(ApiModel):

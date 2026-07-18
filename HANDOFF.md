@@ -848,3 +848,70 @@ F:\Codex\story\.data\projects\1ffdb07d-d717-42cf-8456-30e1475b2859-story\backups
 - `python -m compileall -q apps/api/src apps/api/tests` 与 `git diff --check` 通过。
 
 已知限制：真实 Provider 适配器存在但本轮未进行真实网络烟测；不得在审计前调用真实 Provider、修改 `apps/web/**`、`.data`、密钥、数据库、日志、备份或用户正文。
+# 2026-07-18 Phase 13 final audit checkpoint (GPT-5.6)
+
+Current branch: `agent/general-story-incubator-foundation`
+Audited range: `b4f08aa..adbd3d5`, plus local audit fixes pending commit.
+
+## Audit result
+
+Phase 13's persistence, provider boundary, source/evidence ledger, StoryBrief
+authority chain, Canon proposal handoff, opening experiment records and backup
+remapping are in place. It is safe to continue as a **backend foundation**, but
+it is **not yet the real market-research and creative-generation product**:
+
+- Research findings, competitor profiles, opportunities, ideation replies,
+  Canon drafts, opening prose and reader/editor scores are deterministic
+  scaffolds. They do not yet call the configured research, writer, reader or
+  editor model roles. Do not present their output as live research or as an
+  evidence-based prediction of commercial success.
+- There is no Phase 13 UI yet. Do not modify `apps/web/**` in backend follow-up
+  work. The current computer owns the visual product work.
+- No real provider, user `.data`, API key, database, backup archive, or Night
+  Watch manuscript was touched during this audit.
+
+## Audit fixes added locally
+
+1. Research Brief revisions now advance across replacements. A job only starts
+   from the current Brief and detects a replaced Brief before or during provider
+   work (`RESEARCH_BRIEF_DRIFT`). `POST /api/v1/research/jobs/{id}/run` provides
+   the missing explicit start action for queued jobs.
+2. Saved include/exclude domain scope is enforced after search results return;
+   an excluded domain can no longer enter the source ledger merely because a
+   provider ignored its filter.
+3. Removed the application-side `public-http` fetch option. The old
+   resolve-then-connect approach was vulnerable to DNS rebinding. Research uses
+   Firecrawl or the deterministic test provider until a pinned-address transport
+   exists. Credential references are no longer exposed by the job API.
+4. Opportunities, ideation, StoryBrief and Canon proposals now require an
+   accepted, current research authority rather than just a matching checksum.
+5. Selecting an opening is no longer equivalent to approving it. The selected
+   option must be expanded to three experimental chapters and each chapter must
+   be explicitly approved through
+   `POST /api/v1/opening-candidates/{id}/chapters/approve` before the system
+   creates a `StyleBaseline` or permits an incubation Canon to be locked.
+
+## Verification status
+
+- `python -m compileall -q apps/api/src`: passed.
+- `git diff --check`: passed (Windows LF/CRLF warnings only).
+- Phase 13 focused tests were run in small groups because this desktop runner
+  cuts long command output: original full workflow, SSRF, backup restore,
+  credential/competitor handling, Brief drift/domain scope/direct-fetch block,
+  and cost limit all passed (7 tests total).
+- `npm run build` was started but this desktop runner cut the captured command
+  before its final completion line. Re-run build, full API suite, web tests and
+  Playwright after the audit commit in an unrestricted terminal; do not report
+  them as passed from this checkpoint.
+
+## Next implementation gate
+
+Before Phase 13 can be called usable for new novels, implement model-backed
+analysis with explicit role bindings and structured outputs: query planning,
+evidence extraction, competitor analysis, opportunity generation, ideation,
+Canon draft generation, three distinct opening drafts, and independent reader
+and editor evaluations. Every non-factual conclusion must retain evidence IDs,
+uncertainty and no-imitation constraints. Keep provider calls outside SQLite
+write transactions and retain the current proposal/approval gates.
+
+---

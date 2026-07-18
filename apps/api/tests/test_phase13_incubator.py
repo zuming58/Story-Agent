@@ -36,15 +36,17 @@ def _configure_research(client):
     return search, fetch
 
 
-def _brief(client, project_id, expected_revision=0):
-    response = client.post(f"/api/v1/projects/{project_id}/research/briefs", json={
+def _brief(client, project_id, expected_revision=0, **overrides):
+    payload = {
         "expectedRevision": expected_revision,
         "format": "long-form",
         "platform": "undecided",
         "genre": "urban mystery",
         "audience": "adult readers",
         "emotionalValue": ["tension"],
-    })
+    }
+    payload.update(overrides)
+    response = client.post(f"/api/v1/projects/{project_id}/research/briefs", json=payload)
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -68,6 +70,9 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     assert len(sources.json()) == 6
     evidence = client.get(f"/api/v1/research/jobs/{job['id']}/evidence").json()
     assert len(evidence) == 6
+    research_accepted = client.post(f"/api/v1/research/jobs/{job['id']}/accept", json={"expectedRevision": job["revision"]})
+    assert research_accepted.status_code == 200, research_accepted.text
+    job = research_accepted.json()
 
     score = {"platformFit": 15, "openingHook": 15, "emotionalPayoff": 15, "differentiation": 15, "serialEngine": 15, "characterStickiness": 10, "worldEngine": 10, "readability": 5}
     opportunities = client.post(f"/api/v1/research/jobs/{job['id']}/opportunities", json={
@@ -111,7 +116,25 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     assert choice.status_code == 200, choice.text
     readiness = client.get(f"/api/v1/projects/{project['id']}/incubation-readiness")
     assert readiness.status_code == 200
+    assert readiness.json()["ready"] is False
+    assert client.post(f"/api/v1/projects/{project['id']}/canon/lock", json={"expectedRevision": current_canon["revision"]}).status_code == 409
+
+    expanded = client.post(f"/api/v1/opening-experiments/{output['id']}/expand-to-three-chapters", json={
+        "expectedRevision": choice.json()["revision"] + 1,
+        "selectedCandidateId": choice.json()["id"],
+        "expectedCandidateRevision": choice.json()["revision"],
+    })
+    assert expanded.status_code == 200, expanded.text
+    candidate = next(item for item in expanded.json()["candidates"] if item["id"] == choice.json()["id"])
+    for chapter_number in (1, 2, 3):
+        approved = client.post(f"/api/v1/opening-candidates/{candidate['id']}/chapters/approve", json={
+            "expectedRevision": candidate["revision"], "chapterNumber": chapter_number,
+        })
+        assert approved.status_code == 200, approved.text
+        candidate = approved.json()
+    readiness = client.get(f"/api/v1/projects/{project['id']}/incubation-readiness")
     assert readiness.json()["ready"] is True
+    assert client.post(f"/api/v1/projects/{project['id']}/canon/lock", json={"expectedRevision": current_canon["revision"]}).status_code == 200
 
 
 def test_ssrf_policy_rejects_local_and_private_addresses():
@@ -178,6 +201,54 @@ def test_missing_provider_secret_is_persisted_and_competitor_exclusion_keeps_old
     assert historical and historical[0]["excluded"] is False
     findings = client.get(f"/api/v1/research/jobs/{job['id']}/findings").json()
     assert {item["reportRevision"] for item in findings} == {before[0]["reportRevision"], excluded.json()["reportRevision"]}
+
+
+def test_research_brief_drift_and_domain_scope_cannot_leak_into_a_job(client):
+    project = _project(client)
+    service = client.app.state.story_service
+    query = "undecided urban mystery adult readers platform trends"
+    allowed = "https://allowed.example.test/trends"
+    excluded = "https://blocked.example.test/trends"
+    service.phase13.search_provider = DeterministicSearchProvider({query: [
+        SearchResult(url=allowed, title="allowed", domain="allowed.example.test"),
+        SearchResult(url=excluded, title="blocked", domain="blocked.example.test"),
+    ]})
+    service.phase13.fetch_provider = DeterministicContentFetchProvider({
+        allowed: FetchResponse(requested_url=allowed, final_url=allowed, title="allowed", content="usable evidence" * 50),
+    })
+    brief_response = client.post(f"/api/v1/projects/{project['id']}/research/briefs", json={
+        "expectedRevision": 0, "format": "long-form", "platform": "undecided", "genre": "urban mystery", "audience": "adult readers",
+        "emotionalValue": ["tension"], "includedDomains": ["example.test"], "excludedDomains": ["blocked.example.test"],
+    })
+    brief = brief_response.json()
+    job = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    }).json()
+    updated = _brief(client, project["id"], expected_revision=brief["revision"], includedDomains=["example.test"], excludedDomains=["blocked.example.test"])
+    assert updated["revision"] == brief["revision"] + 1
+    drifted = client.post(f"/api/v1/research/jobs/{job['id']}/run", json={"expectedRevision": job["revision"]})
+    assert drifted.status_code == 200, drifted.text
+    assert drifted.json()["status"] == "failed"
+    assert drifted.json()["errorCode"] == "RESEARCH_BRIEF_DRIFT"
+
+    # A fresh scoped brief runs normally, but the excluded result never enters
+    # persistent research sources even if the search provider returns it.
+    fresh = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": updated["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic",
+        "limits": {"minimumSourceTypes": 1},
+    })
+    assert fresh.status_code == 201, fresh.text
+    sources = client.get(f"/api/v1/research/jobs/{fresh.json()['id']}/sources").json()
+    assert [source["canonicalUrl"] for source in sources] == [allowed]
+
+
+def test_direct_public_http_fetch_is_not_an_available_research_provider(client):
+    project = _project(client)
+    brief = _brief(client, project["id"])
+    response = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "public-http",
+    })
+    assert response.status_code == 422
 
 
 def test_research_cost_limit_stops_the_job_before_results_are_persisted(client):

@@ -134,6 +134,7 @@ from .schemas import (
     MarketResearchBriefOut,
     OpeningCandidateAction,
     OpeningCandidateOut,
+    OpeningChapterApproval,
     OpeningExpand,
     OpeningExperimentCreate,
     OpeningExperimentOut,
@@ -667,6 +668,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def cancel_research_job(job_id: str, payload: ResearchJobAction, request: Request) -> object:
         return service.phase13.cancel_job(job_id, payload, request.state.request_id)
 
+    @app.post("/api/v1/research/jobs/{job_id}/run", response_model=ResearchJobOut)
+    def run_research_job(job_id: str, payload: ResearchJobAction, request: Request) -> object:
+        return service.phase13.start_job(job_id, payload, request.state.request_id)
+
     @app.post("/api/v1/research/jobs/{job_id}/resume", response_model=ResearchJobOut)
     def resume_research_job(job_id: str, payload: ResearchJobAction, request: Request) -> object:
         return service.phase13.resume_job(job_id, payload, request.state.request_id)
@@ -770,6 +775,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/opening-candidates/{candidate_id}/reject", response_model=OpeningCandidateOut)
     def reject_opening_candidate(candidate_id: str, payload: OpeningCandidateAction, request: Request) -> object:
         return service.phase13.decide_opening_candidate(candidate_id, payload, request.state.request_id, selected=False)
+
+    @app.post("/api/v1/opening-candidates/{candidate_id}/chapters/approve", response_model=OpeningCandidateOut)
+    def approve_opening_chapter(candidate_id: str, payload: OpeningChapterApproval, request: Request) -> object:
+        return service.phase13.approve_opening_chapter(candidate_id, payload, request.state.request_id)
 
     @app.post("/api/v1/opening-experiments/{experiment_id}/expand-to-three-chapters", response_model=OpeningExperimentOut)
     def expand_opening_experiment(experiment_id: str, payload: OpeningExpand, request: Request) -> object:

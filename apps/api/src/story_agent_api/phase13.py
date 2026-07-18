@@ -33,7 +33,6 @@ from .research_providers import (
     DeterministicContentFetchProvider,
     DeterministicSearchProvider,
     FirecrawlContentFetchProvider,
-    PublicHttpContentFetchProvider,
     ResearchProviderError,
     SearchProvider,
     TavilySearchProvider,
@@ -45,6 +44,7 @@ from .schemas import (
     IncubationCanonProposalCreate,
     MarketResearchBriefCreate,
     OpeningCandidateAction,
+    OpeningChapterApproval,
     OpeningExpand,
     OpeningExperimentCreate,
     ResearchJobAction,
@@ -114,6 +114,7 @@ class Phase13Service:
                 raise StoryError(409, "RESEARCH_BRIEF_REVISION_CONFLICT", "Research brief revision conflict.", {"currentRevision": current_revision})
             if current:
                 current.status = "superseded"
+                current.revision += 1
                 current.updated_at = _now()
             now = _now()
             snapshot = self._brief_snapshot(data)
@@ -126,7 +127,11 @@ class Phase13Service:
                 included_domains_json=dumps(data["includedDomains"]), excluded_domains_json=dumps(data["excludedDomains"]),
                 reference_works_json=dumps(data["referenceWorks"]), forbidden_content_json=dumps(data["forbiddenContent"]),
                 commercial_goals_json=dumps(data["commercialGoals"]), notes=data["notes"], checksum=stable_digest(snapshot),
-                status="current", revision=1, created_at=now, updated_at=now,
+                # The API updates a moving "current" brief rather than a
+                # stable resource ID. Carry the revision forward so a stale
+                # browser cannot overwrite a newer brief with the same
+                # expectedRevision value.
+                status="current", revision=current_revision + 1, created_at=now, updated_at=now,
             )
             session.add(row)
             session.add(self.service._audit("research_brief.saved", "market_research_brief", row.id, {"revision": row.revision}, request_id))
@@ -148,6 +153,8 @@ class Phase13Service:
             ))
             if not brief or brief.project_id != project.id:
                 raise StoryError(404, "RESEARCH_BRIEF_NOT_FOUND", "Research brief was not found for this project.")
+            if brief.status != "current":
+                raise StoryError(409, "RESEARCH_BRIEF_SUPERSEDED", "Research jobs can only be created from the current research brief.")
             if brief.revision != payload.expected_brief_revision:
                 raise StoryError(409, "RESEARCH_BRIEF_REVISION_CONFLICT", "Research brief revision conflict.", {"currentRevision": brief.revision})
             request_fingerprint = stable_digest({"brief": brief.id, "revision": brief.revision, "payload": payload.model_dump(mode="json", by_alias=True, exclude={"run_immediately"})})
@@ -213,6 +220,22 @@ class Phase13Service:
             session.add(self.service._audit("research_job.cancelled", "research_job", row.id, {}, request_id))
             return self._job_dict(row)
 
+    def start_job(self, job_id: str, payload: ResearchJobAction, request_id: str) -> dict[str, Any]:
+        """Start a queued job that was deliberately created without running.
+
+        This is also the explicit user-visible entry point needed after a
+        research brief has been edited: revision is checked before provider
+        calls begin, so stale UI cannot consume a provider budget.
+        """
+        project, _ = self._project_for_job(job_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            row = session.get(ResearchJob, job_id)
+            assert row
+            self._expect_revision(row, payload.expected_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if row.status != "queued":
+                raise StoryError(409, "RESEARCH_JOB_NOT_QUEUED", "Only a queued research job can be started.")
+        return self.run_job(job_id, request_id)
+
     def resume_job(self, job_id: str, payload: ResearchJobAction, request_id: str) -> dict[str, Any]:
         project, _ = self._project_for_job(job_id)
         with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -234,7 +257,7 @@ class Phase13Service:
             if job.status != "queued":
                 return self._job_dict(job)
             brief = session.get(MarketResearchBrief, job.brief_id)
-            if not brief or brief.project_id != project.id or brief.revision != job.brief_revision or brief.checksum != job.brief_checksum:
+            if not self._brief_matches_job(session, job):
                 job.status, job.error_code, job.completed_at = "failed", "RESEARCH_BRIEF_DRIFT", _now()
                 job.revision += 1
                 job.updated_at = job.completed_at
@@ -247,6 +270,8 @@ class Phase13Service:
             attempt = job.attempt
         planned = self._planned_queries(snapshot)[:int(limits.get("maxQueries", 6))]
         for sequence, (perspective, query_text) in enumerate(planned, start=1):
+            if self._job_has_brief_drift(project, job_id):
+                return self._fail_job(project, job_id, "RESEARCH_BRIEF_DRIFT", "The research brief changed while the job was running.", request_id)
             if not self._job_is_active(project, job_id):
                 return self.get_job(job_id)
             if self._runtime_exceeded(job.started_at, limits):
@@ -276,6 +301,8 @@ class Phase13Service:
                 job = session.get(ResearchJob, job_id)
                 if not query or not job or job.status == "cancelled":
                     return self.get_job(job_id)
+                if not self._brief_matches_job(session, job):
+                    return self._fail_job_in_session(session, job, "RESEARCH_BRIEF_DRIFT", "The research brief changed while the job was running.", request_id)
                 if self._cost_exceeded(job, response.estimated_cost, limits):
                     return self._fail_job_in_session(session, job, "RESEARCH_COST_LIMIT", "The research task exceeded its cost budget.", request_id)
                 query.status, query.result_count, query.request_units, query.estimated_cost, query.completed_at = "succeeded", len(response.results), response.request_units, response.estimated_cost, _now()
@@ -284,13 +311,17 @@ class Phase13Service:
                 job.request_units += response.request_units
                 job.estimated_cost += response.estimated_cost
                 job.updated_at = _now()
+                snapshot_in_session = self._brief_dict(session.get(MarketResearchBrief, job.brief_id))
                 for result in response.results:
-                    self._upsert_search_source(session, project.id, job, query, result)
+                    if self._source_is_allowed(result.url, snapshot_in_session["includedDomains"], snapshot_in_session["excludedDomains"]):
+                        self._upsert_search_source(session, project.id, job, query, result)
         with self.service.db.project(project.id, project.folder_path) as session:
             sources = session.scalars(select(ResearchSource).where(ResearchSource.job_id == job_id, ResearchSource.status == "discovered")).all()
             max_pages = int(limits.get("maxPages", 30))
             source_ids = [source.id for source in sources[:max_pages]]
         for source_id in source_ids:
+            if self._job_has_brief_drift(project, job_id):
+                return self._fail_job(project, job_id, "RESEARCH_BRIEF_DRIFT", "The research brief changed while the job was running.", request_id)
             if not self._job_is_active(project, job_id):
                 return self.get_job(job_id)
             if self._runtime_exceeded(job.started_at, limits):
@@ -319,6 +350,8 @@ class Phase13Service:
                 source, job = session.get(ResearchSource, source_id), session.get(ResearchJob, job_id)
                 if not source or not job or job.status == "cancelled":
                     return self.get_job(job_id)
+                if not self._brief_matches_job(session, job):
+                    return self._fail_job_in_session(session, job, "RESEARCH_BRIEF_DRIFT", "The research brief changed while the job was running.", request_id)
                 if self._cost_exceeded(job, fetched.estimated_cost, limits):
                     return self._fail_job_in_session(session, job, "RESEARCH_COST_LIMIT", "The research task exceeded its cost budget.", request_id)
                 total_limit = int(limits.get("maxTotalChars", 200_000))
@@ -520,8 +553,8 @@ class Phase13Service:
             job = session.get(ResearchJob, job_id)
             assert job
             self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
-            if job.status not in {"awaiting_review", "accepted"}:
-                raise StoryError(409, "RESEARCH_EVIDENCE_INSUFFICIENT", "Story opportunities require a research job awaiting review with adequate evidence.")
+            if job.status != "accepted":
+                raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the evidence-complete research report before creating story opportunities.")
             drafts = payload.opportunities or self._default_opportunities(session, job)
             if len(drafts) < 3 or len(drafts) > 5:
                 raise StoryError(422, "STORY_OPPORTUNITY_COUNT_INVALID", "Create three to five opportunities.")
@@ -551,7 +584,7 @@ class Phase13Service:
             if row.status != "pending":
                 raise StoryError(409, "STORY_OPPORTUNITY_NOT_PENDING", "Story opportunity has already been decided.")
             job = session.get(ResearchJob, row.job_id)
-            if not job or job.report_checksum != row.report_checksum or job.report_revision != row.report_revision:
+            if not job or job.status != "accepted" or job.report_checksum != row.report_checksum or job.report_revision != row.report_revision:
                 raise StoryError(409, "RESEARCH_REPORT_DRIFT", "The research report changed after this opportunity was created.")
             now = _now()
             if accepted:
@@ -576,6 +609,8 @@ class Phase13Service:
             self._expect_revision(opportunity, payload.expected_opportunity_revision, "STORY_OPPORTUNITY_REVISION_CONFLICT")
             job = session.get(ResearchJob, opportunity.job_id)
             assert job
+            if job.status != "accepted":
+                raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the evidence-complete research report before ideation.")
             state = {"confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": safe_json_loads(opportunity.evidence_ids_json, [])}
             row = IdeationSession(id=str(uuid4()), project_id=project.id, opportunity_id=opportunity.id, opportunity_revision=opportunity.revision, opportunity_checksum=opportunity.checksum, research_job_id=job.id, research_report_checksum=job.report_checksum, state_json=dumps(state), status="active", revision=1, created_at=_now(), updated_at=_now())
             session.add(row)
@@ -655,7 +690,7 @@ class Phase13Service:
                 raise StoryError(409, "STORY_BRIEF_PROPOSAL_NOT_PENDING", "StoryBrief proposal has already been decided.")
             opportunity = session.get(StoryOpportunity, row.opportunity_id)
             job = session.get(ResearchJob, row.research_job_id)
-            if not opportunity or not job or opportunity.checksum != row.opportunity_checksum or opportunity.revision != row.opportunity_revision or job.report_checksum != row.research_report_checksum:
+            if not opportunity or not job or opportunity.status != "accepted" or not opportunity.is_current or job.status != "accepted" or opportunity.checksum != row.opportunity_checksum or opportunity.revision != row.opportunity_revision or job.report_checksum != row.research_report_checksum:
                 raise StoryError(409, "STORY_BRIEF_UPSTREAM_DRIFT", "StoryBrief proposal upstream authority changed.")
             now = _now()
             if accepted:
@@ -684,7 +719,7 @@ class Phase13Service:
             self._expect_revision(brief, payload.expected_story_brief_revision, "STORY_BRIEF_REVISION_CONFLICT")
             opportunity = session.get(StoryOpportunity, brief.opportunity_id)
             job = session.get(ResearchJob, brief.research_job_id)
-            if not opportunity or not job or opportunity.checksum != brief.opportunity_checksum or job.report_checksum != brief.research_report_checksum:
+            if not opportunity or not job or opportunity.status != "accepted" or not opportunity.is_current or job.status != "accepted" or opportunity.checksum != brief.opportunity_checksum or job.report_checksum != brief.research_report_checksum:
                 raise StoryError(409, "CANON_UPSTREAM_DRIFT", "The accepted StoryBrief upstream authority changed.")
             doc = session.get(CanonDocument, "story-core")
             assert doc
@@ -708,7 +743,7 @@ class Phase13Service:
             raise StoryError(409, "CANON_STORY_BRIEF_DRIFT", "The StoryBrief changed after this Canon draft was created.")
         opportunity = session.get(StoryOpportunity, brief.opportunity_id)
         job = session.get(ResearchJob, brief.research_job_id)
-        if not opportunity or not opportunity.is_current or opportunity.status != "accepted" or not job or job.report_checksum != metadata.get("researchReportChecksum"):
+        if not opportunity or not opportunity.is_current or opportunity.status != "accepted" or not job or job.status != "accepted" or job.report_checksum != metadata.get("researchReportChecksum"):
             raise StoryError(409, "CANON_RESEARCH_DRIFT", "The research authority changed after this Canon draft was created.")
 
     def create_opening_experiment(self, project_id: str, payload: OpeningExperimentCreate, request_id: str) -> dict[str, Any]:
@@ -730,7 +765,7 @@ class Phase13Service:
             session.add(experiment)
             brief_data = safe_json_loads(brief.brief_json, {})
             for strategy in strategies:
-                chapter = self._opening_chapter(brief_data, strategy)
+                chapter = {**self._opening_chapter(brief_data, strategy), "manualApproved": False}
                 candidate = OpeningCandidate(id=str(uuid4()), project_id=project.id, experiment_id=experiment.id, strategy_key=strategy["key"], strategy_label=strategy["label"], strategy_json=dumps(strategy), chapters_json=dumps([chapter]), chapter_count=1, text_checksum=stable_digest(chapter), status="candidate", revision=1, created_at=_now(), updated_at=_now())
                 session.add(candidate)
                 for role in ("reader_simulator", "opening_editor"):
@@ -766,13 +801,10 @@ class Phase13Service:
             if selected:
                 for other in session.scalars(select(OpeningCandidate).where(OpeningCandidate.experiment_id == experiment.id, OpeningCandidate.id != row.id, OpeningCandidate.status == "candidate")).all():
                     other.status, other.revision, other.updated_at = "not_selected", other.revision + 1, now
+                # Selection only chooses a direction.  A StyleBaseline is an
+                # authority for subsequent writing and must not exist until
+                # all three expanded chapters have been explicitly reviewed.
                 row.status, experiment.status, experiment.selected_candidate_id = "selected", "selected", row.id
-                for baseline in session.scalars(select(StyleBaseline).where(StyleBaseline.project_id == project.id, StyleBaseline.is_current.is_(True))).all():
-                    baseline.is_current, baseline.revision = False, baseline.revision + 1
-                style_rules = ["Use concrete scene action before explanation.", "Keep the protagonist's immediate desire visible.", "End a chapter with a consequence-bearing next question."]
-                forbidden = ["Do not imitate named authors.", "Avoid repeated archive or serial-number exposition."]
-                baseline = StyleBaseline(id=str(uuid4()), project_id=project.id, experiment_id=experiment.id, candidate_id=row.id, story_brief_version_id=experiment.story_brief_version_id, story_brief_checksum=experiment.story_brief_checksum, canon_revision=experiment.canon_revision, canon_checksum=experiment.canon_checksum, sample_checksum=row.text_checksum, style_rules_json=dumps(style_rules), forbidden_patterns_json=dumps(forbidden), checksum=stable_digest({"sample": row.text_checksum, "rules": style_rules, "forbidden": forbidden}), is_current=True, revision=1, created_at=now)
-                session.add(baseline)
             else:
                 row.status = "rejected"
                 remaining = session.scalar(select(func.count()).select_from(OpeningCandidate).where(OpeningCandidate.experiment_id == experiment.id, OpeningCandidate.status == "candidate"))
@@ -798,11 +830,45 @@ class Phase13Service:
             chapters = safe_json_loads(candidate.chapters_json, [])
             while len(chapters) < 3:
                 number = len(chapters) + 1
-                chapters.append({"chapterNumber": number, "title": f"Candidate chapter {number}", "content": f"Continuation experiment only. Chapter {number} creates a new decision and does not enter the official manuscript."})
+                chapters.append({"chapterNumber": number, "title": f"Candidate chapter {number}", "content": f"Continuation experiment only. Chapter {number} creates a new decision and does not enter the official manuscript.", "manualApproved": False})
             candidate.chapters_json, candidate.chapter_count, candidate.text_checksum, candidate.revision, candidate.updated_at = dumps(chapters), 3, stable_digest(chapters), candidate.revision + 1, _now()
             experiment.status, experiment.revision, experiment.updated_at = "three_chapter_experiment", experiment.revision + 1, _now()
             session.add(self.service._audit("opening_experiment.expanded", "opening_experiment", experiment.id, {"candidateId": candidate.id}, request_id))
             return self._experiment_dict(session, experiment)
+
+    def approve_opening_chapter(self, candidate_id: str, payload: OpeningChapterApproval, request_id: str) -> dict[str, Any]:
+        """Record a human gate for one expanded opening chapter.
+
+        The experiment may inform a production style baseline only after all
+        three chapters are both present and explicitly approved.  The chapter
+        text itself remains an experiment and is never written to ChapterCommit.
+        """
+        project, candidate_row = self._project_for_candidate(candidate_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            candidate = session.get(OpeningCandidate, candidate_row.id)
+            assert candidate
+            self._expect_revision(candidate, payload.expected_revision, "OPENING_CANDIDATE_REVISION_CONFLICT")
+            experiment = session.get(OpeningExperiment, candidate.experiment_id)
+            if not experiment or experiment.selected_candidate_id != candidate.id or candidate.status != "selected":
+                raise StoryError(409, "OPENING_CANDIDATE_NOT_SELECTED", "Only the selected opening candidate can be approved.")
+            chapters = safe_json_loads(candidate.chapters_json, [])
+            if len(chapters) != 3:
+                raise StoryError(409, "OPENING_THREE_CHAPTERS_REQUIRED", "Expand the selected opening into three chapters before approving it.")
+            target = next((item for item in chapters if item.get("chapterNumber") == payload.chapter_number), None)
+            if not isinstance(target, dict):
+                raise StoryError(404, "OPENING_CHAPTER_NOT_FOUND", "The opening chapter was not found.")
+            target["manualApproved"] = True
+            now = _now()
+            candidate.chapters_json = dumps(chapters)
+            candidate.revision += 1
+            candidate.updated_at = now
+            if all(item.get("manualApproved") is True for item in chapters):
+                self._activate_style_baseline(session, project.id, experiment, candidate, now)
+                experiment.status = "manual_approval_complete"
+                experiment.revision += 1
+                experiment.updated_at = now
+            session.add(self.service._audit("opening_chapter.approved", "opening_candidate", candidate.id, {"chapterNumber": payload.chapter_number}, request_id))
+            return self._candidate_dict(session, candidate)
 
     def readiness(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -815,11 +881,51 @@ class Phase13Service:
                 {"code": "STORY_BRIEF_ACCEPTED", "status": "ready" if brief else "blocked", "detail": "Accepted StoryBrief exists." if brief else "Accept a StoryBrief proposal first."},
                 {"code": "CANON_DRAFT", "status": "ready" if doc and doc.status == "draft" and bool(doc.content_markdown.strip()) else "blocked", "detail": "Draft Canon exists." if doc and doc.status == "draft" else "Create and apply a Canon draft first."},
                 {"code": "OPENING_SELECTED", "status": "ready" if selected else "blocked", "detail": "A human selected an opening candidate." if selected else "Select an opening candidate explicitly."},
-                {"code": "STYLE_BASELINE", "status": "ready" if baseline else "blocked", "detail": "Style baseline exists." if baseline else "Selecting an opening candidate creates the style baseline."},
-                {"code": "FIRST_THREE_MANUAL_ONLY", "status": "blocked", "detail": "The first three production chapters require later manual approval; automation is not opened by incubation."},
+                {"code": "STYLE_BASELINE", "status": "ready" if baseline else "blocked", "detail": "Three manually approved experimental chapters established the style baseline." if baseline else "Expand the selected candidate and approve all three experimental chapters."},
+                {"code": "FIRST_THREE_MANUAL_ONLY", "status": "warning", "detail": "The first three production chapters require later manual approval; automation is not opened by incubation."},
             ]
-            ready = all(item["status"] == "ready" for item in checks[:-1])
+            ready = all(item["status"] == "ready" for item in checks if item["status"] != "warning")
             return {"projectId": project.id, "ready": ready, "stage": "ready_for_manual_handoff" if ready else "incubating", "checks": checks, "currentStoryBriefId": brief.id if brief else None, "selectedOpeningCandidateId": selected.id if selected else None, "styleBaselineId": baseline.id if baseline else None, "updatedAt": _now()}
+
+    def assert_canon_lockable(self, session: Any, project_id: str, document: CanonDocument) -> None:
+        """Protect incubation Canon from being locked before opening review.
+
+        Ordinary Canon documents preserve the pre-existing lock behaviour.  An
+        incubation Canon is identified by its applied proposal matching the
+        current document, which avoids imposing this new workflow on legacy
+        projects or manually replaced Canon text.
+        """
+        applied = session.scalars(select(CanonGenerationProposal).where(
+            CanonGenerationProposal.project_id == project_id,
+            CanonGenerationProposal.status == "applied",
+        )).all()
+        incubation_rows = [
+            row for row in applied
+            if safe_json_loads(row.brief_json, {}).get("incubation") is True
+            and row.content_markdown == document.content_markdown
+        ]
+        if not incubation_rows:
+            return
+        baseline = session.scalar(select(StyleBaseline).where(
+            StyleBaseline.project_id == project_id,
+            StyleBaseline.is_current.is_(True),
+        ))
+        candidate = session.get(OpeningCandidate, baseline.candidate_id) if baseline else None
+        chapters = safe_json_loads(candidate.chapters_json, []) if candidate else []
+        complete = bool(
+            baseline
+            and candidate
+            and candidate.status == "selected"
+            and candidate.chapter_count == 3
+            and len(chapters) == 3
+            and all(isinstance(item, dict) and item.get("manualApproved") is True for item in chapters)
+        )
+        if not complete:
+            raise StoryError(
+                409,
+                "OPENING_MANUAL_APPROVAL_REQUIRED",
+                "An incubation Canon can be locked only after all three selected opening chapters are manually approved.",
+            )
 
     def recover_interrupted_research(self) -> None:
         for project in self.service.list_projects():
@@ -969,6 +1075,22 @@ class Phase13Service:
             row = session.get(ResearchJob, job_id)
             return bool(row and row.status not in {"cancelled", "failed"})
 
+    def _job_has_brief_drift(self, project: Any, job_id: str) -> bool:
+        with self.service.db.project(project.id, project.folder_path) as session:
+            row = session.get(ResearchJob, job_id)
+            return bool(row and not self._brief_matches_job(session, row))
+
+    @staticmethod
+    def _brief_matches_job(session: Any, job: ResearchJob) -> bool:
+        brief = session.get(MarketResearchBrief, job.brief_id)
+        return bool(
+            brief
+            and brief.project_id == job.project_id
+            and brief.status == "current"
+            and brief.revision == job.brief_revision
+            and brief.checksum == job.brief_checksum
+        )
+
     def _providers_for(self, job: ResearchJob) -> tuple[SearchProvider, ContentFetchProvider]:
         config = safe_json_loads(job.provider_config_json, {})
         search_name = config.get("searchProvider", "deterministic")
@@ -981,8 +1103,6 @@ class Phase13Service:
             raise StoryError(422, "SEARCH_PROVIDER_INVALID", "Unsupported search provider.")
         if fetch_name == "deterministic":
             fetch: ContentFetchProvider = self.fetch_provider
-        elif fetch_name == "public-http":
-            fetch = PublicHttpContentFetchProvider()
         elif fetch_name == "firecrawl":
             fetch = FirecrawlContentFetchProvider(self._secret(config.get("fetchSecretRef"), "FETCH_API_KEY_MISSING"))
         else:
@@ -1042,6 +1162,53 @@ class Phase13Service:
         if any(part in domain for part in ("publisher", "platform", "book")):
             return "platform_official"
         return "other"
+
+    @staticmethod
+    def _source_is_allowed(url: str, included_domains: list[str], excluded_domains: list[str]) -> bool:
+        """Apply saved source scope after provider search results return.
+
+        Providers may treat include-domain filtering as advisory.  Enforcing the
+        scope here keeps exclusions deterministic and prevents a result from
+        being persisted merely because a provider ignored the request.
+        """
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        if not host:
+            return False
+
+        def matches(domain: str) -> bool:
+            normalized = str(domain or "").lower().strip().rstrip(".")
+            return bool(normalized) and (host == normalized or host.endswith(f".{normalized}"))
+
+        if any(matches(domain) for domain in excluded_domains):
+            return False
+        return not included_domains or any(matches(domain) for domain in included_domains)
+
+    def _activate_style_baseline(self, session: Any, project_id: str, experiment: OpeningExperiment, candidate: OpeningCandidate, now: datetime) -> None:
+        for baseline in session.scalars(select(StyleBaseline).where(
+            StyleBaseline.project_id == project_id,
+            StyleBaseline.is_current.is_(True),
+        )).all():
+            baseline.is_current = False
+            baseline.revision += 1
+        style_rules = [
+            "Use concrete scene action before explanation.",
+            "Keep the protagonist's immediate desire visible.",
+            "End a chapter with a consequence-bearing next question.",
+        ]
+        forbidden = [
+            "Do not imitate named authors.",
+            "Avoid repeated archive or serial-number exposition.",
+        ]
+        baseline = StyleBaseline(
+            id=str(uuid4()), project_id=project_id, experiment_id=experiment.id,
+            candidate_id=candidate.id, story_brief_version_id=experiment.story_brief_version_id,
+            story_brief_checksum=experiment.story_brief_checksum, canon_revision=experiment.canon_revision,
+            canon_checksum=experiment.canon_checksum, sample_checksum=candidate.text_checksum,
+            style_rules_json=dumps(style_rules), forbidden_patterns_json=dumps(forbidden),
+            checksum=stable_digest({"sample": candidate.text_checksum, "rules": style_rules, "forbidden": forbidden}),
+            is_current=True, revision=1, created_at=now,
+        )
+        session.add(baseline)
 
     def _upsert_search_source(self, session: Any, project_id: str, job: ResearchJob, query: ResearchQuery, result: Any) -> None:
         canonical = result.url.split("#", 1)[0]
@@ -1127,7 +1294,17 @@ class Phase13Service:
 
     @staticmethod
     def _job_dict(row: ResearchJob) -> dict[str, Any]:
-        return {"id": row.id, "projectId": row.project_id, "briefId": row.brief_id, "briefRevision": row.brief_revision, "briefChecksum": row.brief_checksum, "attempt": row.attempt, "status": row.status, "idempotencyKey": row.idempotency_key, "providerConfig": safe_json_loads(row.provider_config_json, {}), "limits": safe_json_loads(row.limits_json, {}), "coverage": safe_json_loads(row.coverage_json, {}), "reportChecksum": row.report_checksum, "reportRevision": row.report_revision, "queryCount": row.query_count, "pageCount": row.page_count, "fetchedChars": row.fetched_chars, "requestUnits": row.request_units, "estimatedCost": row.estimated_cost, "errorCode": row.error_code, "errorMessage": row.error_message, "diagnostic": None, "revision": row.revision, "createdAt": row.created_at, "startedAt": row.started_at, "completedAt": row.completed_at, "updatedAt": row.updated_at}
+        config = safe_json_loads(row.provider_config_json, {})
+        public_config = {
+            "searchProvider": config.get("searchProvider", "deterministic"),
+            "fetchProvider": config.get("fetchProvider", "deterministic"),
+            # Credential references are deliberately not exposed through the
+            # API.  Callers only need to know whether each provider can read a
+            # configured secret from the OS credential store.
+            "searchSecretConfigured": bool(config.get("searchSecretRef")),
+            "fetchSecretConfigured": bool(config.get("fetchSecretRef")),
+        }
+        return {"id": row.id, "projectId": row.project_id, "briefId": row.brief_id, "briefRevision": row.brief_revision, "briefChecksum": row.brief_checksum, "attempt": row.attempt, "status": row.status, "idempotencyKey": row.idempotency_key, "providerConfig": public_config, "limits": safe_json_loads(row.limits_json, {}), "coverage": safe_json_loads(row.coverage_json, {}), "reportChecksum": row.report_checksum, "reportRevision": row.report_revision, "queryCount": row.query_count, "pageCount": row.page_count, "fetchedChars": row.fetched_chars, "requestUnits": row.request_units, "estimatedCost": row.estimated_cost, "errorCode": row.error_code, "errorMessage": row.error_message, "diagnostic": None, "revision": row.revision, "createdAt": row.created_at, "startedAt": row.started_at, "completedAt": row.completed_at, "updatedAt": row.updated_at}
 
     @staticmethod
     def _source_dict(row: ResearchSource, versions: list[ResearchSourceVersion]) -> dict[str, Any]:

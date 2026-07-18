@@ -4,6 +4,7 @@ from story_agent_api.research_providers import (
     DeterministicContentFetchProvider,
     DeterministicSearchProvider,
     FetchResponse,
+    SearchResponse,
     SearchResult,
 )
 
@@ -149,3 +150,59 @@ def test_phase13_backup_restore_remaps_internal_identity_chain(client):
     sources = client.get(f"/api/v1/research/jobs/{clone_job['id']}/sources")
     assert sources.status_code == 200
     assert all(item["projectId"] == clone["id"] and item["jobId"] == clone_job["id"] for item in sources.json())
+
+
+def test_missing_provider_secret_is_persisted_and_competitor_exclusion_keeps_old_report(client):
+    project = _project(client)
+    brief = _brief(client, project["id"])
+    missing_secret = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"],
+    })
+    assert missing_secret.status_code == 201, missing_secret.text
+    assert missing_secret.json()["status"] == "failed"
+    assert missing_secret.json()["errorCode"] == "SEARCH_API_KEY_MISSING"
+
+    _configure_research(client)
+    job = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic",
+    }).json()
+    before = client.get(f"/api/v1/research/jobs/{job['id']}/competitors").json()
+    assert before
+    excluded = client.post(f"/api/v1/competitors/{before[0]['id']}/exclude", json={
+        "expectedRevision": before[0]["revision"], "expectedJobRevision": job["revision"], "reason": "not comparable",
+    })
+    assert excluded.status_code == 200, excluded.text
+    assert excluded.json()["reportRevision"] == before[0]["reportRevision"] + 1
+    after = client.get(f"/api/v1/research/jobs/{job['id']}/competitors").json()
+    historical = [item for item in after if item["reportRevision"] == before[0]["reportRevision"]]
+    assert historical and historical[0]["excluded"] is False
+    findings = client.get(f"/api/v1/research/jobs/{job['id']}/findings").json()
+    assert {item["reportRevision"] for item in findings} == {before[0]["reportRevision"], excluded.json()["reportRevision"]}
+
+
+def test_research_cost_limit_stops_the_job_before_results_are_persisted(client):
+    class CostlySearch:
+        name = "costly-search"
+
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, _query, _domains, _date_range, _limit):
+            self.calls += 1
+            return SearchResponse(results=[], estimated_cost=1.0)
+
+    project = _project(client)
+    brief = _brief(client, project["id"])
+    costly = CostlySearch()
+    client.app.state.story_service.phase13.search_provider = costly
+    job = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"],
+        "searchProvider": "deterministic",
+        "fetchProvider": "deterministic",
+        "limits": {"maxCost": 0},
+    })
+    assert job.status_code == 201, job.text
+    assert job.json()["status"] == "failed"
+    assert job.json()["errorCode"] == "RESEARCH_COST_LIMIT"
+    assert costly.calls == 1
+    assert client.get(f"/api/v1/research/jobs/{job.json()['id']}/sources").json() == []

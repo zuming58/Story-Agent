@@ -821,3 +821,28 @@ F:\Codex\story\.data\projects\1ffdb07d-d717-42cf-8456-30e1475b2859-story\backups
 ```
 
 第 1—5 章的最新权威数据在当前项目 `story.db` 中；Git 只保存代码、测试、方案和交接记录。
+# 2026-07-18 Phase 13 后端收敛交接
+
+当前分支：`agent/general-story-incubator-foundation`
+
+状态：**Phase 13 后端基础已实现并完成 API 回归；停止继续开发，等待 GPT-5.6 审计。**
+
+本次收敛补充：
+- 研究任务现在会将缺失凭据、Provider 和预算错误持久化为可恢复的 `failed` 状态；执行路径在每次外部调用前检查运行时预算，并在持久化结果前拒绝超出费用预算，抓取达到总字符上限后不再发起下一页请求。
+- 同一次研究分析的竞品、findings、任务 checksum 使用同一份新 report revision；排除竞品时复制出新报告版本，历史报告保持不可变。
+- 通用 Canon 提案 apply 时重新校验 current StoryBrief、accepted opportunity 和 research checksum，避免上游 authority 漂移后覆盖 Canon。
+- 带有 StyleBaseline 的项目禁止自动托管提交前 3 章；人工流程与 Canon/revision/事务边界保持不变。
+- Phase 12 质量门测试显式标记 `isMajor` 事件，和既有“只统计明确重大事件”的规则一致。
+
+迁移与表：`0017_general_story_incubator_foundation`，覆盖研究 Brief/任务/查询/来源/版本/证据、竞品/findings/机会、共创/StoryBrief、开篇候选/评审/StyleBaseline 共 17 张项目库表；备份恢复会 remap Phase 13 全部 UUID、关系、JSON 引用和 AuditEvent 实体 ID。
+
+接口：研究 Brief 与状态机、来源/证据/竞品/findings/机会、共创与 StoryBrief 权威链、通用 Canon 提案、三种开篇实验、人工选择、三章扩展与 incubation readiness 均已挂载在 `/api/v1`。默认测试路径使用确定性 Provider，不调用 Tavily、Firecrawl 或 DeepSeek。
+
+验证结果：
+- API 全量按桌面 124 秒命令上限分片完成：`162 passed`。
+- `npm run test` 已执行，但 API 全量阶段被桌面 124 秒硬上限中断；其等价 API 分片与 `npm run test:web` 均通过，Web 为 `3 files / 11 tests`。
+- `npm run build` 通过，仅有既有 Vite chunk-size warning。
+- `npm run test:e2e` 已执行但被同一 124 秒上限中断，未产生失败断言；需要在无此上限的环境完整复跑，不能报为通过。
+- `python -m compileall -q apps/api/src apps/api/tests` 与 `git diff --check` 通过。
+
+已知限制：真实 Provider 适配器存在但本轮未进行真实网络烟测；不得在审计前调用真实 Provider、修改 `apps/web/**`、`.data`、密钥、数据库、日志、备份或用户正文。

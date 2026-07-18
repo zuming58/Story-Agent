@@ -249,6 +249,8 @@ class Phase13Service:
         for sequence, (perspective, query_text) in enumerate(planned, start=1):
             if not self._job_is_active(project, job_id):
                 return self.get_job(job_id)
+            if self._runtime_exceeded(job.started_at, limits):
+                return self._fail_job(project, job_id, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.", request_id)
             fingerprint = stable_digest({"perspective": perspective, "query": query_text})
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 existing = session.scalar(select(ResearchQuery).where(ResearchQuery.job_id == job_id, ResearchQuery.fingerprint == fingerprint))
@@ -267,11 +269,15 @@ class Phase13Service:
                 response = search_provider.search(query_text, snapshot["includedDomains"], snapshot["researchDateRange"], int(limits.get("maxPages", 30)))
             except ResearchProviderError as exc:
                 return self._fail_job(project, job_id, exc.code, exc.message, request_id)
+            except StoryError as exc:
+                return self._fail_job(project, job_id, exc.code, exc.message, request_id)
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 query = session.scalar(select(ResearchQuery).where(ResearchQuery.job_id == job_id, ResearchQuery.fingerprint == fingerprint))
                 job = session.get(ResearchJob, job_id)
                 if not query or not job or job.status == "cancelled":
                     return self.get_job(job_id)
+                if self._cost_exceeded(job, response.estimated_cost, limits):
+                    return self._fail_job_in_session(session, job, "RESEARCH_COST_LIMIT", "The research task exceeded its cost budget.", request_id)
                 query.status, query.result_count, query.request_units, query.estimated_cost, query.completed_at = "succeeded", len(response.results), response.request_units, response.estimated_cost, _now()
                 query.provider_metadata_json = dumps(response.provider_metadata)
                 job.query_count += 1
@@ -287,11 +293,15 @@ class Phase13Service:
         for source_id in source_ids:
             if not self._job_is_active(project, job_id):
                 return self.get_job(job_id)
+            if self._runtime_exceeded(job.started_at, limits):
+                return self._fail_job(project, job_id, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.", request_id)
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 source = session.get(ResearchSource, source_id)
                 job = session.get(ResearchJob, job_id)
                 if not source or not job or source.status != "discovered":
                     continue
+                if job.fetched_chars >= int(limits.get("maxTotalChars", 200_000)):
+                    break
                 source.status, job.status, job.updated_at = "fetching", "fetching", _now()
                 url, max_chars = source.canonical_url, int(limits.get("maxCharsPerPage", 20_000))
             try:
@@ -303,10 +313,14 @@ class Phase13Service:
                     if source:
                         source.status, source.failure_reason, source.updated_at = "failed", exc.code, _now()
                 continue
+            except StoryError as exc:
+                return self._fail_job(project, job_id, exc.code, exc.message, request_id)
             with self.service.db.project_write(project.id, project.folder_path) as session:
                 source, job = session.get(ResearchSource, source_id), session.get(ResearchJob, job_id)
                 if not source or not job or job.status == "cancelled":
                     return self.get_job(job_id)
+                if self._cost_exceeded(job, fetched.estimated_cost, limits):
+                    return self._fail_job_in_session(session, job, "RESEARCH_COST_LIMIT", "The research task exceeded its cost budget.", request_id)
                 total_limit = int(limits.get("maxTotalChars", 200_000))
                 remaining = max(0, total_limit - job.fetched_chars)
                 content = fetched.content[:remaining]
@@ -322,6 +336,8 @@ class Phase13Service:
                 job.request_units += fetched.request_units
                 job.estimated_cost += fetched.estimated_cost
                 job.updated_at = _now()
+        if self._runtime_exceeded(job.started_at, limits):
+            return self._fail_job(project, job_id, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.", request_id)
         return self._analyze_job(project, job_id, request_id)
 
     def _analyze_job(self, project: Any, job_id: str, request_id: str) -> dict[str, Any]:
@@ -331,6 +347,7 @@ class Phase13Service:
             if job.status == "cancelled":
                 return self._job_dict(job)
             job.status, job.updated_at = "analyzing", _now()
+            report_revision = job.report_revision + 1
             versions = session.scalars(select(ResearchSourceVersion).where(ResearchSourceVersion.job_id == job.id)).all()
             sources = {source.id: source for source in session.scalars(select(ResearchSource).where(ResearchSource.job_id == job.id)).all()}
             evidence_ids: list[str] = []
@@ -354,7 +371,7 @@ class Phase13Service:
                 existing = session.scalar(select(CompetitorProfile).where(
                     CompetitorProfile.job_id == job.id,
                     CompetitorProfile.name == source.title,
-                    CompetitorProfile.report_revision == job.report_revision,
+                    CompetitorProfile.report_revision == report_revision,
                 ))
                 if existing:
                     continue
@@ -373,7 +390,7 @@ class Phase13Service:
                     "risks": ["No unsupported reconstruction or imitation."],
                 }
                 session.add(CompetitorProfile(
-                    id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision,
+                    id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=report_revision,
                     name=source.title or source.domain, profile_json=dumps(profile), evidence_ids_json=dumps(source_evidence),
                     confidence=0.3 if source_evidence else 0.0, checksum=stable_digest({"source": source.id, "profile": profile}),
                     status="active", revision=1, created_at=_now(), updated_at=_now(),
@@ -385,12 +402,12 @@ class Phase13Service:
             for category, statement in findings:
                 existing = session.scalar(select(ResearchFinding).where(
                     ResearchFinding.job_id == job.id,
-                    ResearchFinding.report_revision == job.report_revision,
+                    ResearchFinding.report_revision == report_revision,
                     ResearchFinding.category == category,
                 ))
                 if not existing:
                     session.add(ResearchFinding(
-                        id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision,
+                        id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=report_revision,
                         category=category, statement=statement, claim_type="inference", evidence_ids_json=dumps(evidence_ids),
                         confidence=0.5 if evidence_ids else 0.0, uncertainties_json=dumps(["Requires human review."]),
                         checksum=stable_digest({"category": category, "statement": statement, "evidence": evidence_ids}),
@@ -400,8 +417,8 @@ class Phase13Service:
             limits = safe_json_loads(job.limits_json, {})
             coverage = {"sourceTypes": source_types, "sourceTypeCount": len(source_types), "evidenceCount": len(evidence_ids), "minimumSourceTypes": int(limits.get("minimumSourceTypes", 3)), "coveredPerspectives": sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.status == "succeeded")).all()})}
             job.coverage_json = dumps(coverage)
-            job.report_revision += 1
-            job.report_checksum = stable_digest({"job": job.id, "reportRevision": job.report_revision, "coverage": coverage, "evidence": sorted(evidence_ids)})
+            job.report_revision = report_revision
+            job.report_checksum = stable_digest({"job": job.id, "reportRevision": report_revision, "coverage": coverage, "evidence": sorted(evidence_ids)})
             enough = len(source_types) >= coverage["minimumSourceTypes"] and len(evidence_ids) >= len(PERSPECTIVES)
             job.status = "awaiting_review" if enough else "insufficient_evidence"
             job.completed_at, job.updated_at, job.revision = _now(), _now(), job.revision + 1
@@ -455,13 +472,47 @@ class Phase13Service:
             assert row and job
             self._expect_revision(row, payload.expected_revision, "COMPETITOR_REVISION_CONFLICT")
             self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
-            row.excluded, row.exclusion_reason, row.status, row.revision, row.updated_at = True, payload.reason, "excluded", row.revision + 1, _now()
-            job.report_revision += 1
-            job.report_checksum = self._report_checksum(session, job)
+            next_revision = job.report_revision + 1
+            clones: list[CompetitorProfile] = []
+            for existing in session.scalars(select(CompetitorProfile).where(
+                CompetitorProfile.job_id == job.id,
+                CompetitorProfile.report_revision == job.report_revision,
+            )).all():
+                clone = CompetitorProfile(
+                    id=str(uuid4()), project_id=project.id, job_id=job.id,
+                    report_revision=next_revision, name=existing.name,
+                    profile_json=existing.profile_json, evidence_ids_json=existing.evidence_ids_json,
+                    confidence=existing.confidence, excluded=existing.id == row.id,
+                    exclusion_reason=payload.reason if existing.id == row.id else None,
+                    checksum=existing.checksum, status="excluded" if existing.id == row.id else "active",
+                    revision=1, created_at=_now(), updated_at=_now(),
+                )
+                session.add(clone)
+                clones.append(clone)
+            for finding in session.scalars(select(ResearchFinding).where(
+                ResearchFinding.job_id == job.id,
+                ResearchFinding.report_revision == job.report_revision,
+            )).all():
+                session.add(ResearchFinding(
+                    id=str(uuid4()), project_id=project.id, job_id=job.id,
+                    report_revision=next_revision, category=finding.category,
+                    statement=finding.statement, claim_type=finding.claim_type,
+                    evidence_ids_json=finding.evidence_ids_json, confidence=finding.confidence,
+                    uncertainties_json=finding.uncertainties_json, checksum=finding.checksum,
+                    status=finding.status, revision=1, created_at=_now(),
+                ))
+            job.report_revision = next_revision
+            job.report_checksum = stable_digest({
+                "job": job.id,
+                "reportRevision": next_revision,
+                "competitors": sorted(item.checksum for item in clones if not item.excluded),
+            })
             job.revision += 1
             job.updated_at = _now()
-            session.add(self.service._audit("competitor.excluded", "competitor_profile", row.id, {"reason": payload.reason, "reportRevision": job.report_revision}, request_id))
-            return self._competitor_dict(row)
+            excluded = next(item for item in clones if item.excluded)
+            session.add(self.service._audit("competitor.excluded", "competitor_profile", excluded.id, {"reason": payload.reason, "reportRevision": next_revision, "replaces": row.id}, request_id))
+            session.flush()
+            return self._competitor_dict(excluded)
 
     def create_opportunities(self, job_id: str, payload: StoryOpportunityCreate, request_id: str) -> list[dict[str, Any]]:
         project, _ = self._project_for_job(job_id)
@@ -645,6 +696,20 @@ class Phase13Service:
             session.add(self.service._audit("incubation_canon_proposal.created", "canon_generation_proposal", proposal.id, {"storyBriefVersionId": brief.id}, request_id))
             session.flush()
             return self.service.phase8._canon_proposal_dict(proposal)
+
+    def assert_canon_proposal_upstream(self, session: Any, proposal: CanonGenerationProposal) -> None:
+        """Validate the frozen Phase 13 authority at Canon apply time."""
+        metadata = safe_json_loads(proposal.brief_json, {})
+        if not metadata.get("incubation"):
+            return
+        brief_id = metadata.get("storyBriefVersionId")
+        brief = session.get(StoryBriefVersion, brief_id) if isinstance(brief_id, str) else None
+        if not brief or not brief.is_current or brief.revision != metadata.get("storyBriefRevision") or brief.checksum != metadata.get("storyBriefChecksum"):
+            raise StoryError(409, "CANON_STORY_BRIEF_DRIFT", "The StoryBrief changed after this Canon draft was created.")
+        opportunity = session.get(StoryOpportunity, brief.opportunity_id)
+        job = session.get(ResearchJob, brief.research_job_id)
+        if not opportunity or not opportunity.is_current or opportunity.status != "accepted" or not job or job.report_checksum != metadata.get("researchReportChecksum"):
+            raise StoryError(409, "CANON_RESEARCH_DRIFT", "The research authority changed after this Canon draft was created.")
 
     def create_opening_experiment(self, project_id: str, payload: OpeningExperimentCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -939,10 +1004,25 @@ class Phase13Service:
         with self.service.db.project_write(project.id, project.folder_path) as session:
             row = session.get(ResearchJob, job_id)
             assert row
-            row.status, row.error_code, row.error_message, row.completed_at = "failed", code, message, _now()
-            row.revision, row.updated_at = row.revision + 1, row.completed_at
-            session.add(self.service._audit("research_job.failed", "research_job", row.id, {"code": code}, request_id))
-            return self._job_dict(row)
+            return self._fail_job_in_session(session, row, code, message, request_id)
+
+    @staticmethod
+    def _runtime_exceeded(started_at: datetime | None, limits: dict[str, Any]) -> bool:
+        if not started_at:
+            return False
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        return (_now() - started_at).total_seconds() > int(limits.get("maxRuntimeSeconds", 180))
+
+    @staticmethod
+    def _cost_exceeded(job: ResearchJob, additional_cost: float, limits: dict[str, Any]) -> bool:
+        return job.estimated_cost + max(0.0, additional_cost) > float(limits.get("maxCost", 5.0))
+
+    def _fail_job_in_session(self, session: Any, row: ResearchJob, code: str, message: str, request_id: str) -> dict[str, Any]:
+        row.status, row.error_code, row.error_message, row.completed_at = "failed", code, message, _now()
+        row.revision, row.updated_at = row.revision + 1, row.completed_at
+        session.add(self.service._audit("research_job.failed", "research_job", row.id, {"code": code}, request_id))
+        return self._job_dict(row)
 
     @staticmethod
     def _brief_snapshot(data: dict[str, Any]) -> dict[str, Any]:

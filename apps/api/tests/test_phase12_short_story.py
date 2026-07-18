@@ -433,7 +433,10 @@ def test_short_story_deterministic_quality_rules_block_invalid_candidate(client:
                 "summary": "two events",
                 "entities": [],
                 "facts": [],
-                "events": [{"summary": "one"}, {"summary": "two"}],
+                "events": [
+                    {"summary": "one", "isMajor": True},
+                    {"summary": "two", "isMajor": True},
+                ],
                 "foreshadows": [],
                 "boundaries": [],
             }

@@ -1212,6 +1212,10 @@ class Phase5Service:
                 if job.status != "approved":
                     raise StoryError(409, "CHAPTER_JOB_NOT_RESUMABLE", "Only approved chapter jobs can be committed.")
                 contract = self._get_contract(session, project.id, job.chapter_contract_id)
+                if phase7 is not None and phase7.current_execution_context() and contract.chapter_number <= 3:
+                    baseline = session.scalar(select(StyleBaseline).where(StyleBaseline.project_id == project.id, StyleBaseline.is_current.is_(True)))
+                    if baseline:
+                        raise StoryError(409, "INCUBATION_FIRST_THREE_MANUAL_REQUIRED", "The first three chapters after an opening experiment cannot be committed by automation.")
                 if contract.status != "locked":
                     raise StoryError(409, "CHAPTER_CONTRACT_NOT_LOCKED", "Chapter contract is no longer locked.")
                 self._assert_contract_fresh(session, project.id, contract)

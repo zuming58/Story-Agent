@@ -948,3 +948,45 @@ all three experimental chapters require explicit approval before StyleBaseline
 creation and incubation Canon locking.
 
 ---
+# 2026-07-19 Phase 14 模型驱动故事孵化器后端交接
+
+当前分支：`agent/model-backed-story-incubator`
+
+准确基线：`081a01ae9614bde42309cbf34ad39019ffad00d1`
+
+本轮后端实现提交：`cb73f21`（后续交接文档提交仅记录该实现结果）。
+
+状态：**第十四阶段后端实现与本地确定性回归已完成；停止继续开发，等待 GPT-5.6 审计。**
+
+## 本轮完成
+
+- 复用现有 OpenAI-compatible Provider、RoleBinding、SecretStore 和 ModelRun；Phase 13 新增统一 JSON 模型调用边界，非法 JSON 只允许一次独立修复调用，仍失败则显式报错。
+- `research_planner` 生成并校验六个固定 perspective 的查询计划；Provider 凭据在规划前校验，查询重复、缺失或越界均使任务失败。
+- `research_analyst` 分批抽取短证据并综合竞品和 findings；excerpt/locator 必须匹配冻结来源版本，fact 必须引用同 job evidenceId。
+- `story_incubator` 生成 3-5 个机会、多轮共创回复、StoryBrief、通用 Canon、三种开篇和选中方向的第 2/3 章实验稿；所有写入前重验 revision/checksum。
+- `reader_simulator` 与 `opening_editor` 分别独立调用并各自关联 ModelRun；失败不生成固定评分或伪通过评审。
+- 修正机会评分：各分项仍受固定上限约束，`totalScore` 为 0-100 自然求和，不再强制等于 100；专项验证模型机会得到 74 分。
+- 保持研究、机会、StoryBrief、Canon 和开篇的人工接受机制；只选中开篇不会创建 StyleBaseline，三章逐章人工批准后才允许孵化 Canon 锁定。
+- 所有模型调用均位于 SQLite 写事务外；模型错误、缺失绑定、凭据错误和研究分析失败均显式收敛，研究任务不会悬挂在运行状态。
+
+## 数据库与 API
+
+- 本阶段无新增迁移、无新增表；复用 `model_runs`、角色绑定和 Phase 13 的 17 张项目表。
+- 无新增 UI 或公开路由；沿用 Phase 13 的研究、机会、共创、StoryBrief、Canon、开篇、逐章批准和 `/model-runs` API，JSON 语义升级为真实模型输出。
+- 自动测试使用本地 FakeModel HTTP Provider 与确定性搜索/抓取 Provider；未调用 DeepSeek、Tavily 或 Firecrawl。
+
+## 验证结果
+
+- Phase 14/13 focused：`7 passed`。
+- API full suite 按桌面 124 秒上限分片完成：`167 passed`。
+- `npm run test` 已运行，但单命令在 API 阶段被 124 秒环境上限终止；等价 API 分片全部通过，`npm run test:web` 为 `3 files / 11 tests passed`。
+- `npm run build`：通过，仅有既有 Vite chunk-size warning。
+- Playwright：整套命令受 124 秒上限终止；按项目拆分后 `desktop-1440 7 passed`、`desktop-1280 7 passed`，合计 `14 passed`。
+- `python -m compileall -q apps/api/src apps/api/tests`：通过。
+- `git diff --check`：通过，仅有 Windows LF/CRLF 提示。
+
+## 已知风险与未完成项
+
+- 真实模型和真实搜索/抓取 Provider 尚未进行付费烟测；审计后应使用全新测试项目和最小预算人工执行，不得复用或读取《夜巡人》项目。
+- 真实模型输出质量、token 成本和长上下文截断仍需 GPT-5.6 审计及后续受控验收；本轮不承诺真实模型生成内容达到出版质量。
+- 未修改 `apps/web/**`、用户 `.data`、密钥、SQLite、日志、备份 ZIP、正式正文或视觉快照。

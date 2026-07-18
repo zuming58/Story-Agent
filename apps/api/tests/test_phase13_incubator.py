@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 from story_agent_api.research_providers import (
     DeterministicContentFetchProvider,
     DeterministicSearchProvider,
@@ -7,6 +11,46 @@ from story_agent_api.research_providers import (
     SearchResponse,
     SearchResult,
 )
+
+
+class _FakeModelHandler(BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        payload = json.loads(body or b"{}")
+        joined = "\n".join(item.get("content", "") for item in payload.get("messages", []) if isinstance(item, dict))
+        step = next((name for name in ("query_plan", "evidence", "research_report", "opportunities", "ideation", "story_brief", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
+        perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
+        if step == "query_plan": value = {"queries": [{"perspective": item, "query": f"undecided urban mystery adult readers {item.replace('_', ' ')}".replace("genre leaders", "leading works").replace("reader praise", "reader praise").replace("reader dropoff", "reader dropoff reasons").replace("opening strategy", "opening hook strategy").replace("serial engine", "serial retention engine")} for item in perspectives]}
+        elif step == "evidence":
+            source = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")) ["sourceContent"]
+            first, second = source[:40], source[40:80]
+            value = {"evidence": [
+                {"claimType": "fact", "claim": "bounded source evidence", "excerpt": first, "locator": {"start": 0, "end": len(first)}, "confidence": 0.7},
+                {"claimType": "opinion", "claim": "bounded source opinion", "excerpt": second, "locator": {"start": 40, "end": 40 + len(second)}, "confidence": 0.6},
+            ]}
+        elif step == "research_report":
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); evidence = data["evidence"]; value = {"competitors": [{"name": "Comparable", "profile": {"readingPromise": "A bounded promise"}, "evidenceIds": [evidence[0]["id"]], "confidence": 0.6}], "findings": [{"category": "opening_strategy", "statement": "Evidence-backed finding.", "claimType": "inference", "evidenceIds": [evidence[0]["id"]], "confidence": 0.6, "uncertainties": ["sample"]}]}
+        elif step == "opportunities":
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; value = {"opportunities": [{"highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notApplicable", "firstThreeChapterPromise": "A choice", "serialEngine": "Escalation", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []} for n in range(1,4)]}
+        elif step == "ideation": value = {"reply": "A concrete constraint is recorded.", "confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": []}
+        elif step == "story_brief": value = {"brief": {"format":"long-form","platform":"undecided","audience":"adult readers","premise":"A costly search","readerPromise":"A choice","theme":"trust","tone":"scene-led","pov":"close third","pace":"purposeful","endingDirection":"consequence","protagonist":"Ming","coreDesire":"Find truth","coreConflict":"Truth costs trust","worldMechanism":"notApplicable","serialEngine":"Escalation","emotionalRewards":["tension"],"differentiators":["original"],"forbiddenContent":[],"referenceTraits":["abstract"]}}
+        elif step == "canon": value = {"markdown": "# Story Core\nConflict: truth costs trust\n## Boundaries", "structured": {"entities": [], "relations": [], "rules": []}}
+        elif step == "opening_review": value = {"scores": {"continueReading": 70}, "findings": [], "recommendation": "continue", "summary": "Independent review."}
+        elif step == "opening_expand": value = {"chapters": [{"chapterNumber": 2, "title": "Two", "content": "A consequence deepens."}, {"chapterNumber": 3, "title": "Three", "content": "A new choice follows."}]}
+        else: value = {"chapter": {"title": "Opening", "content": "Ming makes an immediate costly choice."}}
+        response = json.dumps({"model":"fake-incubator", "choices":[{"message":{"content":json.dumps(value)},"finish_reason":"stop"}], "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
+    def log_message(self, *_args): return
+
+
+def _configure_models(client):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModelHandler); threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    provider = client.post("/api/v1/model-providers", json={"name":"Phase 14 Fake","baseUrl":f"http://{host}:{port}","timeoutSeconds":5,"maxRetries":0,"apiKey":"fake"}).json()
+    model = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={"modelId":"fake-incubator","displayName":"Fake"}).json()
+    for role in ("research_planner", "research_analyst", "story_incubator", "reader_simulator", "opening_editor"):
+        assert client.put(f"/api/v1/model-role-bindings/{role}", json={"modelId":model["id"]}).status_code == 200
+    return server
 
 
 def _project(client):
@@ -31,6 +75,7 @@ def _configure_research(client):
         search.fixtures[query] = [SearchResult(url=url, title=perspective, domain=url.split("/")[2])]
         fetch.fixtures[url] = FetchResponse(requested_url=url, final_url=url, title=perspective, content=f"Evidence for {perspective}. " * 20)
     service = client.app.state.story_service
+    _configure_models(client)
     service.phase13.search_provider = search
     service.phase13.fetch_provider = fetch
     return search, fetch
@@ -62,28 +107,24 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     })
     assert job_response.status_code == 201, job_response.text
     job = job_response.json()
-    assert job["status"] == "awaiting_review"
+    assert job["status"] == "awaiting_review", job
     assert len(search.calls) == 6
     assert len(fetch.calls) == 6
     sources = client.get(f"/api/v1/research/jobs/{job['id']}/sources")
     assert sources.status_code == 200
     assert len(sources.json()) == 6
     evidence = client.get(f"/api/v1/research/jobs/{job['id']}/evidence").json()
-    assert len(evidence) == 6
+    assert len(evidence) >= 6
     research_accepted = client.post(f"/api/v1/research/jobs/{job['id']}/accept", json={"expectedRevision": job["revision"]})
     assert research_accepted.status_code == 200, research_accepted.text
     job = research_accepted.json()
 
-    score = {"platformFit": 15, "openingHook": 15, "emotionalPayoff": 15, "differentiation": 15, "serialEngine": 15, "characterStickiness": 10, "worldEngine": 10, "readability": 5}
     opportunities = client.post(f"/api/v1/research/jobs/{job['id']}/opportunities", json={
         "expectedJobRevision": job["revision"],
-        "opportunities": [{
-            "highConcept": f"Direction {number}", "protagonist": "Ming", "coreDesire": "Find a missing sibling", "coreConflict": "Every clue costs trust", "worldMechanism": "notApplicable", "firstThreeChapterPromise": "A clue, a choice, and a consequence", "serialEngine": "Each clue opens another obligation", "scoreComponents": score, "evidenceIds": [item["id"] for item in evidence], "evidenceCoverage": 1, "confidence": 0.7,
-        } for number in range(1, 4)],
     })
     assert opportunities.status_code == 201, opportunities.text
     first = opportunities.json()[0]
-    assert first["totalScore"] == 100
+    assert first["totalScore"] == 74
     accepted = client.post(f"/api/v1/story-opportunities/{first['id']}/accept", json={"expectedRevision": first["revision"]})
     assert accepted.status_code == 200, accepted.text
     opportunity = accepted.json()
@@ -135,6 +176,9 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     readiness = client.get(f"/api/v1/projects/{project['id']}/incubation-readiness")
     assert readiness.json()["ready"] is True
     assert client.post(f"/api/v1/projects/{project['id']}/canon/lock", json={"expectedRevision": current_canon["revision"]}).status_code == 200
+    runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
+    roles = {item["role"] for item in runs}
+    assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:story-brief", "story_incubator:canon", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
 
 
 def test_ssrf_policy_rejects_local_and_private_addresses():
@@ -205,6 +249,7 @@ def test_missing_provider_secret_is_persisted_and_competitor_exclusion_keeps_old
 
 def test_research_brief_drift_and_domain_scope_cannot_leak_into_a_job(client):
     project = _project(client)
+    _configure_models(client)
     service = client.app.state.story_service
     query = "undecided urban mystery adult readers platform trends"
     allowed = "https://allowed.example.test/trends"
@@ -263,6 +308,7 @@ def test_research_cost_limit_stops_the_job_before_results_are_persisted(client):
             return SearchResponse(results=[], estimated_cost=1.0)
 
     project = _project(client)
+    _configure_models(client)
     brief = _brief(client, project["id"])
     costly = CostlySearch()
     client.app.state.story_service.phase13.search_provider = costly

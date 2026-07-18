@@ -450,7 +450,6 @@ class Phase7Service:
         missing_beats = [
             chapter for chapter, node in planned_nodes.items()
             if node is not None
-            and node.type == "章节窗口"
             and not any(
                 isinstance(beat, dict)
                 and beat.get("chapterNumber", beat.get("chapter_number")) == chapter
@@ -460,7 +459,7 @@ class Phase7Service:
         if not plan or uncovered:
             detail = "作品规划不存在。" if not plan else "未覆盖章节：" + "、".join(map(str, uncovered))
             add("TRIAL_PLAN_GAP", "blocked", "故事规划存在缺口", detail, "/planning", uncovered[0] if uncovered else start)
-        else:
+        elif not missing_beats:
             add("TRIAL_PLAN_READY", "ready", "规划覆盖试写范围", f"第 {start}—{min(end, total)} 章均有规划窗口。", "/planning")
         if missing_beats:
             add(
@@ -488,13 +487,10 @@ class Phase7Service:
             candidate_end = start + size - 1
             if candidate_end <= total and plan and all(
                 (node_for_chapter(chapter) is not None)
-                and (
-                    node_for_chapter(chapter).type != "章节窗口"
-                    or any(
-                        isinstance(beat, dict)
-                        and beat.get("chapterNumber", beat.get("chapter_number")) == chapter
-                        for beat in loads(node_for_chapter(chapter).chapter_beats_json)
-                    )
+                and any(
+                    isinstance(beat, dict)
+                    and beat.get("chapterNumber", beat.get("chapter_number")) == chapter
+                    for beat in loads(node_for_chapter(chapter).chapter_beats_json)
                 )
                 for chapter in range(start, candidate_end + 1)
             ):

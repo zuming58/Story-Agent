@@ -1,3 +1,163 @@
+# 2026-07-17 第十三阶段重制交接：市场研究与故事孵化
+
+当前分支：`agent/general-story-incubator-foundation`
+
+本轮后端实现提交：`f70daa9`（后续交接文档提交仅记录此实现结果）。
+
+## 2026-07-18 Phase 13 后端 WIP 收敛点
+
+状态：**已提交可恢复的后端 WIP 基线；未完成最终审计与全量验证。此处停止功能扩展，下一位模型应从本节继续。**
+
+### 已完成实现
+
+- 新增 project migration `0017_general_story_incubator_foundation`，创建 17 张 Phase 13 表：研究 Brief/任务/查询/来源/版本/证据、竞品/结论/机会、共创会话/消息、StoryBrief 版本/提案、开篇实验/候选/读者评审/StyleBaseline。
+- 新增 `research_providers.py`：稳定 `SearchProvider`、`ContentFetchProvider`、确定性测试 Provider、Tavily 搜索、Firecrawl/公开 HTTP 抓取适配器；`ResearchSourcePolicy` 拒绝非 HTTP(S)、localhost、环回、私网、链路本地地址，并在每次跳转后复检 URL。
+- 新增 `phase13.py` 和 API：Brief、研究状态机、来源/证据、竞品与 findings、机会评分/接受、共创、StoryBrief 权威链、通用 Canon 草稿、三种开篇、独立读者/编辑评审、人工选择、StyleBaseline、incubation readiness。
+- 真实 Provider 只通过 `SecretStore` 的 `secretRef` 读取密钥；默认/测试路径使用确定性 Provider，不调用 Tavily、Firecrawl 或 DeepSeek。
+- 研究外部调用位于 SQLite 写事务之外；写入前重验上游 revision/checksum。候选正文与评审未写入 ChapterCommit、Plan、StateSnapshot 或正式 Canon。
+- `phase8.py` 对带 `incubation=true` 的 Canon 提案使用通用 StoryBrief 校验，固定夜巡人校验仅保留给旧模板残留；`phase5.py` 阻止已有 StyleBaseline 的项目对前 3 章做 `guarded_auto` 批准。
+- 备份恢复已将全部 Phase 13 表列入 projectId 重映射；`Phase13Service.repair_restored_metadata` 为 Phase 13 内部 UUID 重新编号，并更新全部关系列、JSON 引用和 AuditEvent 实体 ID。
+
+### 已通过验证
+
+```text
+Phase 13 focused/API/SSRF/backup-restore: 3 passed
+Projects regression: 3 passed
+Backup regression: 7 passed
+Phase 8 architecture regression: 7 passed
+python compileall apps/api/src apps/api/tests: passed
+git diff --check: passed (only Windows LF/CRLF warnings)
+```
+
+### 尚未完成或必须审计
+
+- `apps/api/tests` 全量命令及 Phase 5/9/10/11/12 分组在桌面执行环境的 124 秒命令上限被终止，未得到失败断言。下一位模型应以更长可用超时或按更小文件/测试拆分跑完，并记录精确结果。
+- 尚未运行本轮要求的 `npm run test`、`npm run build`、`npm run test:e2e`；切换模型后继续运行。根目录 API 脚本依赖 `uv`，若 PATH 无 `uv`，使用 `apps/api/.venv/Scripts/python.exe -m pytest apps/api/tests` 作为等价 API 回归并如实记录。
+- 对 `phase13.py` 做完整代码审计，重点检查：恢复 UUID 重映射的所有 JSON 字段、`ResearchJob` 租约/取消边界、真实 Provider 异常处理、竞争条件、证据不足条件和恢复状态。
+- 增加更细 API 测试：Brief 漂移、任务 cancel/resume/accept/reject、密钥缺失/限流/超时、来源 URL 去重与多版本、竞品排除后旧报告不变、跨项目资源访问、开篇全部拒绝和前三章自动托管拒绝。
+- 不要修改 `apps/web/**`，不要修改 `.data`、密钥、数据库、日志、备份 ZIP 或夜巡人正文；不要合并 main/PR。
+
+### 当前代码范围
+
+```text
+apps/api/migrations/project/versions/0017_general_story_incubator_foundation.py
+apps/api/src/story_agent_api/research_providers.py
+apps/api/src/story_agent_api/phase13.py
+apps/api/tests/test_phase13_incubator.py
+apps/api/src/story_agent_api/models.py
+apps/api/src/story_agent_api/schemas.py
+apps/api/src/story_agent_api/main.py
+apps/api/src/story_agent_api/services.py
+apps/api/src/story_agent_api/phase5.py
+apps/api/src/story_agent_api/phase8.py
+```
+
+基线：`agent/general-story-incubator-foundation@b4f08aada8edda56f46115900622738814ec8c26`。当前 WIP 提交：`3f4d62fdebfbd04b09fa0d994b9b1563a83b8da2`。
+
+正式方案：`docs/plans/PHASE-13-GENERAL-STORY-INCUBATOR.md`
+
+后端执行清单：`docs/plans/PHASE-13-BACKEND-HANDOFF.md`
+
+另一台 Codex 提示词：`docs/plans/PHASE-13-OTHER-CODEX-PROMPT.md`
+
+状态：**开发计划已经重制完成，等待另一台电脑只实施后端；当前电脑 GPT-5.6 负责最终审计、修复和全部 UI。**
+
+## 本轮产品结论
+
+- 《夜巡人·正式试写》已正式提交第 1—9 章，但用户阅读前两章后明确判定正文干涩、档案编号重复、人物与情绪牵引不足，没有继续阅读欲望。
+- 这证明既有系统可以保证 Canon、状态、连续性和自动生产，却不能证明作品“值得读”；测试通过不能再作为小说质量完成标准。
+- 《夜巡人》停止第 10 章以后生成，保留为失败样本和回归数据；不得继续消费真实模型费用。
+- 第十三阶段前移为：市场目标 → 联网竞品研究 → 爆款机制/弃书原因 → 差异化故事机会 → 多轮共创 → StoryBrief → Canon 草稿 → 三种开篇 → 人工愿读确认。
+- “爆款潜力”只能提供分项、有证据、有不确定性的评估，禁止宣称保证爆款。
+- 前三章必须人工选择和批准；没有用户愿意继续读的开篇时必须返回共创，不得进入规划和自动托管。
+
+## 协作边界
+
+- 另一台电脑完整实现 `PHASE-13-BACKEND-HANDOFF.md`，包括研究 Provider、来源证据、竞品矩阵、故事机会、StoryBrief、通用 Canon 和开篇实验后端。
+- 另一台电脑禁止修改 `apps/web/**`、CSS、设计令牌、页面组件和视觉快照。
+- 当前电脑在另一台推送后审计来源追溯、SSRF、密钥、事务、revision、版权边界、状态隔离、备份恢复和测试，再独立开发 UI。
+- GitHub 是唯一代码权威；两台电脑不得同时修改当前功能分支。
+
+---
+
+# 2026-07-16 历史记录：夜巡人第 6 章质量门修复
+
+## 夜巡人第 6 章真实试写质量门修复
+
+- 正式项目第 6 章已生成 v3 候选稿（2379 字），连续性、故事编辑与文风复核通过，但确定性质量门误报 `PACE_MAJOR_EVENT_OVERFLOW`。
+- 根因是旧规则把事实抽取中的所有场景事件都当作“重大事件”：铜铃来源调查、下楼查看防火门、空白登记被计为 3 项；其中下楼查看只是第一项调查的过程步骤，规划实际仍只有 2 个重大事件。
+- 新抽取协议要求每个事件提供 `isMajor` JSON boolean，并把契约 `paceBudget` 传给事实抽取模型；同一调查目标中的移动、观察和记录必须合并或标为非重大。
+- 质量门现在只统计明确标记为 `isMajor=true` 的事件。旧版抽取缺少分类时产生 warning，不再凭空升级为 blocker；真正明确超出预算的重大事件仍会阻断。
+- 已直接重新校验现有 v3，没有重写正文、没有再次调用 DeepSeek 写作模型。当前任务保持 `human_review`，`currentRevisionRound=2`，`openBlockingCount=0`。
+- 用户下一步只需刷新质量中心，阅读 v3 后点击“质量通过并提交”；提交前不得重新启动第 6 章试写。
+- 回归结果：Phase 5 全部通过，Phase 7 自动托管全部通过，专项 3 项通过。
+
+当前分支：`agent/general-story-incubator-foundation`
+
+准确基线：`agent/short-story-production-foundation@7120d2f`
+
+完整方案：`docs/plans/PHASE-13-GENERAL-STORY-INCUBATOR.md`
+
+执行清单：`docs/plans/PHASE-13-BACKEND-HANDOFF.md`
+
+状态：**第十三阶段交接文档与分支已准备，但按用户决定暂停开发，不交给另一台电脑执行。当前优先进行夜巡人连续写作测试。第 6 章 v3 候选稿已经生成，误报的节奏 blocker 已修复并重新校验为 0 个阻断；现在必须由用户阅读 v3 并点击“质量通过并提交”，不得重新启动第 6 章。提交成功、进度变为 6/1000 后，再连续测试第 7—9 章。**
+
+## 夜巡人试写准备（已完成）
+
+- 本机正式项目 `夜巡人·正式试写` 的项目 ID 为 `1ffdb07d-d717-42cf-8456-30e1475b2859`，当前 `currentChapter=5`，Canon 已锁定。
+- 修复前已创建项目备份 `afa35e54-c2de-45ff-988b-e7fe812c6c7c`；备份 ZIP 位于项目本地 `.data`，不进入 Git。
+- `Phase7Service.trial_readiness` 现在对故事弧、章节窗口或其他覆盖节点统一要求当前章存在精确 Beat；缺失时不再同时返回 `TRIAL_PLAN_READY`，安全批次上限也不会越过缺失章节。
+- 回归测试将缺 Beat 的节点明确设置为 `故事弧`，并验证 ready=false、`TRIAL_CHAPTER_BEAT_MISSING` 与不存在伪就绪状态。
+- 正式项目现有规划节点已通过真实 Plan API 增加第 6—10 章唯一精确 Beat，节点 revision 从 1 更新到 2；第 1—5 章 Beat 保持不变。
+- 第 6—10 章标题依次为《地底的第四声铃》《空白值夜表》《借钉之前》《归还时间写在明天》《见雾者登记》；升级、法器、知识和揭示边界均已写入 Beat。
+- 实际 API 检查结果：`chapterCount=1` 对应第 6 章、`chapterCount=3` 对应第 6—8 章、`chapterCount=5` 对应第 6—10 章，三者均 ready=true，`maxSafeChapterCount=5`。
+- 第 6 章已经生成 v3 候选稿并进入 `human_review`，正文尚未正式提交；不要再次点击“开始第 6—6 章”。详细复核步骤见 `docs/testing/PHASE-12-NIGHT-WATCH-TRIAL.md`。
+- 本次真实正文与质量数据仅保存在本机 `.data`，不进入 Git；没有实施 Phase 13，也没有把备份、密钥或模型输出加入 Git。
+
+## 本轮验证结果
+
+```text
+Phase 8 trial-readiness focused: 7 passed
+API full: passed
+Web unit: 3 files / 11 tests passed
+Build: passed（仅既有 Vite chunk-size warning）
+Playwright: 14 passed（1440×1024 与 1280×800）
+python compileall: passed
+git diff --check: passed（仅 Windows LF/CRLF 提示）
+```
+
+根目录 `npm run test` 仍依赖系统 PATH 中的 `uv`；本机清理 C 盘后 PATH 无 `uv`，因此本轮使用项目自带 `apps/api/.venv/Scripts/python.exe` 执行相同的完整 API 测试。产品运行与测试本身均通过。
+
+## 历史任务（已被 2026-07-17 重制方案替代，不得执行）
+
+完整执行 `PHASE-13-BACKEND-HANDOFF.md`：
+
+- 持久化创意会话、消息、StoryBrief 版本和修改提案。
+- 提供多轮构思、固化 StoryBrief、接受/拒绝和版本查询 API。
+- 将 Phase 8 的夜巡人固定逻辑重构为可选模板，生产默认路径改为通用长篇/短篇架构器。
+- 通用 Canon 校验按作品实际体系启用；没有等级、法宝或怪异规则时不得强行生成。
+- 根据作品形态、目标章节和总字数动态生成分层规划与下一批 5 章节拍。
+- 补齐作品归档、复制等书库后端能力。
+- 不修改任何 UI，不调用真实 DeepSeek，不碰 `.data` 和用户正式作品。
+
+## 严格禁止
+
+- 禁止修改 `apps/web/**`、CSS、设计令牌、Playwright 视觉基线。
+- 禁止提交 API Key、SQLite、日志、备份 ZIP、测试临时目录或生成正文。
+- 禁止把夜巡人、沈砚、雾城、1000 章、七卷、六阶能力作为通用默认值。
+- 禁止模型回复直接修改正式 StoryBrief、Canon 或 Plan；必须经过提案确认和 revision 校验。
+- 禁止模型调用期间持有 SQLite 长事务。
+- 禁止合并任何分支或提前进入第十四阶段。
+
+## 历史交付要求（仅供追溯）
+
+1. 运行 Phase 13 专项、API 全量、Web 单测、Build 和 Playwright。
+2. 更新本文件，记录迁移、表、API、测试、已知限制和准确提交。
+3. 提交并推送 `agent/general-story-incubator-foundation`。
+4. 停止开发，等待当前电脑 GPT-5.6 审计和 UI 实施。
+
+---
+
 # 2026-07-16 第十二阶段最终审计与产品入口交接（GPT-5.6）
 
 当前分支：`agent/short-story-production-foundation`
@@ -663,3 +823,95 @@ F:\Codex\story\.data\projects\1ffdb07d-d717-42cf-8456-30e1475b2859-story\backups
 ```
 
 第 1—5 章的最新权威数据在当前项目 `story.db` 中；Git 只保存代码、测试、方案和交接记录。
+# 2026-07-18 Phase 13 后端收敛交接
+
+当前分支：`agent/general-story-incubator-foundation`
+
+状态：**Phase 13 后端基础已实现并完成 API 回归；停止继续开发，等待 GPT-5.6 审计。**
+
+本次收敛补充：
+- 研究任务现在会将缺失凭据、Provider 和预算错误持久化为可恢复的 `failed` 状态；执行路径在每次外部调用前检查运行时预算，并在持久化结果前拒绝超出费用预算，抓取达到总字符上限后不再发起下一页请求。
+- 同一次研究分析的竞品、findings、任务 checksum 使用同一份新 report revision；排除竞品时复制出新报告版本，历史报告保持不可变。
+- 通用 Canon 提案 apply 时重新校验 current StoryBrief、accepted opportunity 和 research checksum，避免上游 authority 漂移后覆盖 Canon。
+- 带有 StyleBaseline 的项目禁止自动托管提交前 3 章；人工流程与 Canon/revision/事务边界保持不变。
+- Phase 12 质量门测试显式标记 `isMajor` 事件，和既有“只统计明确重大事件”的规则一致。
+
+迁移与表：`0017_general_story_incubator_foundation`，覆盖研究 Brief/任务/查询/来源/版本/证据、竞品/findings/机会、共创/StoryBrief、开篇候选/评审/StyleBaseline 共 17 张项目库表；备份恢复会 remap Phase 13 全部 UUID、关系、JSON 引用和 AuditEvent 实体 ID。
+
+接口：研究 Brief 与状态机、来源/证据/竞品/findings/机会、共创与 StoryBrief 权威链、通用 Canon 提案、三种开篇实验、人工选择、三章扩展与 incubation readiness 均已挂载在 `/api/v1`。默认测试路径使用确定性 Provider，不调用 Tavily、Firecrawl 或 DeepSeek。
+
+验证结果：
+- API 全量按桌面 124 秒命令上限分片完成：`162 passed`。
+- `npm run test` 已执行，但 API 全量阶段被桌面 124 秒硬上限中断；其等价 API 分片与 `npm run test:web` 均通过，Web 为 `3 files / 11 tests`。
+- `npm run build` 通过，仅有既有 Vite chunk-size warning。
+- `npm run test:e2e` 已执行但被同一 124 秒上限中断，未产生失败断言；需要在无此上限的环境完整复跑，不能报为通过。
+- `python -m compileall -q apps/api/src apps/api/tests` 与 `git diff --check` 通过。
+
+已知限制：真实 Provider 适配器存在但本轮未进行真实网络烟测；不得在审计前调用真实 Provider、修改 `apps/web/**`、`.data`、密钥、数据库、日志、备份或用户正文。
+# 2026-07-18 Phase 13 final audit checkpoint (GPT-5.6)
+
+Current branch: `agent/general-story-incubator-foundation`
+Audited range: `b4f08aa..adbd3d5`, plus local audit fixes pending commit.
+
+## Audit result
+
+Phase 13's persistence, provider boundary, source/evidence ledger, StoryBrief
+authority chain, Canon proposal handoff, opening experiment records and backup
+remapping are in place. It is safe to continue as a **backend foundation**, but
+it is **not yet the real market-research and creative-generation product**:
+
+- Research findings, competitor profiles, opportunities, ideation replies,
+  Canon drafts, opening prose and reader/editor scores are deterministic
+  scaffolds. They do not yet call the configured research, writer, reader or
+  editor model roles. Do not present their output as live research or as an
+  evidence-based prediction of commercial success.
+- There is no Phase 13 UI yet. Do not modify `apps/web/**` in backend follow-up
+  work. The current computer owns the visual product work.
+- No real provider, user `.data`, API key, database, backup archive, or Night
+  Watch manuscript was touched during this audit.
+
+## Audit fixes added locally
+
+1. Research Brief revisions now advance across replacements. A job only starts
+   from the current Brief and detects a replaced Brief before or during provider
+   work (`RESEARCH_BRIEF_DRIFT`). `POST /api/v1/research/jobs/{id}/run` provides
+   the missing explicit start action for queued jobs.
+2. Saved include/exclude domain scope is enforced after search results return;
+   an excluded domain can no longer enter the source ledger merely because a
+   provider ignored its filter.
+3. Removed the application-side `public-http` fetch option. The old
+   resolve-then-connect approach was vulnerable to DNS rebinding. Research uses
+   Firecrawl or the deterministic test provider until a pinned-address transport
+   exists. Credential references are no longer exposed by the job API.
+4. Opportunities, ideation, StoryBrief and Canon proposals now require an
+   accepted, current research authority rather than just a matching checksum.
+5. Selecting an opening is no longer equivalent to approving it. The selected
+   option must be expanded to three experimental chapters and each chapter must
+   be explicitly approved through
+   `POST /api/v1/opening-candidates/{id}/chapters/approve` before the system
+   creates a `StyleBaseline` or permits an incubation Canon to be locked.
+
+## Verification status
+
+- `python -m compileall -q apps/api/src`: passed.
+- `git diff --check`: passed (Windows LF/CRLF warnings only).
+- Phase 13 focused tests were run in small groups because this desktop runner
+  cuts long command output: original full workflow, SSRF, backup restore,
+  credential/competitor handling, Brief drift/domain scope/direct-fetch block,
+  and cost limit all passed (7 tests total).
+- `npm run build` was started but this desktop runner cut the captured command
+  before its final completion line. Re-run build, full API suite, web tests and
+  Playwright after the audit commit in an unrestricted terminal; do not report
+  them as passed from this checkpoint.
+
+## Next implementation gate
+
+Before Phase 13 can be called usable for new novels, implement model-backed
+analysis with explicit role bindings and structured outputs: query planning,
+evidence extraction, competitor analysis, opportunity generation, ideation,
+Canon draft generation, three distinct opening drafts, and independent reader
+and editor evaluations. Every non-factual conclusion must retain evidence IDs,
+uncertainty and no-imitation constraints. Keep provider calls outside SQLite
+write transactions and retain the current proposal/approval gates.
+
+---

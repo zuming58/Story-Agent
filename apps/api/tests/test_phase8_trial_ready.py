@@ -117,7 +117,7 @@ def test_readiness_requires_per_chapter_beats_and_ignores_cancelled_jobs(client:
     project_id = project["id"]
     window = client.post(f"/api/v1/projects/{project_id}/plan/nodes", json={
         "title": "Five chapter window",
-        "type": "章节窗口",
+        "type": "故事弧",
         "targetChapter": 1,
         "rangeMin": 1,
         "rangeMax": 5,
@@ -133,6 +133,9 @@ def test_readiness_requires_per_chapter_beats_and_ignores_cancelled_jobs(client:
     assert window.status_code == 201, window.text
     readiness = client.get(f"/api/v1/projects/{project_id}/trial-readiness?chapterCount=3").json()
     missing = next(item for item in readiness["checks"] if item["code"] == "TRIAL_CHAPTER_BEAT_MISSING")
+    codes = {item["code"] for item in readiness["checks"]}
+    assert readiness["ready"] is False
+    assert "TRIAL_PLAN_READY" not in codes
     assert missing["status"] == "blocked"
     assert missing["chapterNumber"] == 2
 
@@ -194,6 +197,14 @@ def test_trial_batch_override_is_frozen_and_runs_three_chapters(client: TestClie
         "completionConditions": ["Lin Mo pushed open the old house door."],
         "contracts": ["A cold clue waited under the lamp."],
         "foreshadows": [],
+        "chapterBeats": [
+            {
+                "chapterNumber": chapter,
+                "title": f"Beat {chapter}",
+                "objective": f"Advance chapter {chapter} only",
+            }
+            for chapter in range(1, 6)
+        ],
     })
     assert simplified.status_code == 200, simplified.text
     lock_canon(client, project_id)

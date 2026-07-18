@@ -268,6 +268,11 @@ MODEL_ROLES = [
     "drama_adapter",
     "script_writer",
     "adaptation_reviewer",
+    "research_planner",
+    "research_analyst",
+    "story_incubator",
+    "reader_simulator",
+    "opening_editor",
 ]
 
 STRUCTURED_ACTIONS = {"replan", "logic_check", "complete_dependencies"}
@@ -334,6 +339,7 @@ class StoryService:
         from .phase10 import Phase10Service
         from .phase11 import Phase11Service
         from .phase12 import Phase12Service
+        from .phase13 import Phase13Service
 
         self.phase5 = Phase5Service(self)
         self.phase7 = Phase7Service(self)
@@ -342,6 +348,7 @@ class StoryService:
         self.phase10 = Phase10Service(self)
         self.phase11 = Phase11Service(self)
         self.phase12 = Phase12Service(self)
+        self.phase13 = Phase13Service(self)
 
     def close(self) -> None:
         self.db.dispose()
@@ -359,6 +366,7 @@ class StoryService:
         self.phase10.recover_interrupted_endurance()
         self.phase11.recover_interrupted_adaptations()
         self.phase12.recover_interrupted_short_story_origins()
+        self.phase13.recover_interrupted_research()
 
     def _ensure_model_role_bindings(self) -> None:
         now = utc_now()
@@ -1312,6 +1320,23 @@ class StoryService:
                         "drama_script_versions",
                         "adaptation_findings",
                         "short_story_origins",
+                        "market_research_briefs",
+                        "research_jobs",
+                        "research_queries",
+                        "research_sources",
+                        "research_source_versions",
+                        "research_evidence",
+                        "competitor_profiles",
+                        "research_findings",
+                        "story_opportunities",
+                        "ideation_sessions",
+                        "ideation_messages",
+                        "story_brief_versions",
+                        "story_brief_proposals",
+                        "opening_experiments",
+                        "opening_candidates",
+                        "reader_evaluations",
+                        "style_baselines",
                     ):
                         session.execute(text(
                             f"UPDATE {table_name} SET project_id = :new_id WHERE project_id = :old_id"
@@ -1361,6 +1386,7 @@ class StoryService:
                 self._repair_restored_endurance_metadata(restored, old_id)
                 self.phase11.repair_restored_metadata(restored.id, restored.folder_path, old_id)
                 self.phase12.repair_restored_metadata(restored.id, restored.folder_path, old_id)
+                self.phase13.repair_restored_metadata(restored.id, restored.folder_path, old_id)
                 return restored
             except Exception:
                 if restored is not None:

@@ -587,6 +587,11 @@ class Phase4Service:
                 raise _story_error(409, "CANON_LOCKED", "Canon 已锁定。")
             if root.revision != payload.expected_revision:
                 raise _story_error(409, "REVISION_CONFLICT", "Canon 版本已变化。", {"currentRevision": root.revision})
+            # A Canon created through the market-research incubator has a
+            # stronger handoff gate: a human must approve all three opening
+            # experiment chapters before the document becomes authoritative.
+            # Legacy and manually-authored Canon retain the original flow.
+            self.service.phase13.assert_canon_lockable(session, project.id, root)
             now = datetime.now(timezone.utc)
             before = {"rootRevision": root.revision, "rootStatus": root.status}
             for model in (CanonDocument, CanonEntityType, CanonEntity, CanonRelation, CanonRule):

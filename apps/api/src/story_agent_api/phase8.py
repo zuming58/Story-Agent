@@ -653,13 +653,14 @@ class Phase8Service:
             if current_revision != row.base_revision:
                 raise StoryError(409, "CANON_REVISION_CONFLICT", "Canon 已在提案生成后发生变化。", {"currentRevision": current_revision})
             structured = loads(row.structured_json) or {}
-            incubation = loads(row.brief_json).get("incubation") is True if row.brief_json else False
+            incubation_metadata = loads(row.brief_json) or {} if row.brief_json else {}
+            incubation = incubation_metadata.get("incubation") is True
             if incubation:
                 self.service.phase13.assert_canon_proposal_upstream(session, row)
             # Readiness is derived data. Recompute it at the write boundary so
             # a proposal cannot be accepted or rejected because a stored
             # validator snapshot predates the current deterministic rules.
-            readiness = self.service.phase13._generic_canon_checks(row.content_markdown, structured) if incubation else self._canon_checks(row.content_markdown, structured)
+            readiness = self.service.phase13._generic_canon_checks(row.content_markdown, structured, incubation_metadata.get("brief")) if incubation else self._canon_checks(row.content_markdown, structured)
             row.readiness_json = dumps(readiness)
             if not readiness.get("ready"):
                 raise StoryError(409, "CANON_PROPOSAL_INCOMPLETE", "Canon 提案未通过完整性检查。", readiness)

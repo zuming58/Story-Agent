@@ -704,6 +704,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def create_story_opportunities(job_id: str, payload: StoryOpportunityCreate, request: Request) -> object:
         return service.phase13.create_opportunities(job_id, payload, request.state.request_id)
 
+    @app.get("/api/v1/projects/{project_id}/story-opportunities", response_model=list[StoryOpportunityOut])
+    def list_story_opportunities(project_id: str, job_id: str | None = None) -> object:
+        return service.phase13.list_opportunities(project_id, job_id)
+
     @app.post("/api/v1/competitors/{competitor_id}/exclude", response_model=CompetitorProfileOut)
     def exclude_competitor(competitor_id: str, payload: CompetitorExclude, request: Request) -> object:
         return service.phase13.exclude_competitor(competitor_id, payload, request.state.request_id)
@@ -735,6 +739,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/ideation/sessions/{session_id}/story-brief-proposals", response_model=StoryBriefProposalOut, status_code=201)
     def create_story_brief_proposal(session_id: str, payload: StoryBriefProposalCreate, request: Request) -> object:
         return service.phase13.create_story_brief_proposal(session_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/story-brief/proposals", response_model=list[StoryBriefProposalOut])
+    def list_story_brief_proposals(project_id: str, session_id: str | None = None) -> object:
+        return service.phase13.list_story_brief_proposals(project_id, session_id)
 
     @app.get("/api/v1/projects/{project_id}/story-brief/versions", response_model=list[StoryBriefVersionOut])
     def list_story_brief_versions(project_id: str) -> object:

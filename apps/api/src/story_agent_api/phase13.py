@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -15,6 +16,7 @@ from .models import (
     IdeationMessage,
     IdeationSession,
     MarketResearchBrief,
+    ModelRun,
     OpeningCandidate,
     OpeningExperiment,
     ReaderEvaluation,
@@ -108,6 +110,8 @@ class Phase13Service:
         request_id: str,
         system: str,
         payload: dict[str, Any],
+        *,
+        budget_job_id: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Run one bounded JSON call plus one explicit repair attempt.
 
@@ -119,15 +123,21 @@ class Phase13Service:
             {"role": "system", "content": f"{system}\nReturn one JSON object only."},
             {"role": "user", "content": dumps(payload)},
         ]
+        if budget_job_id:
+            self._assert_research_model_budget(project, budget_job_id)
         text, run_id = self.service.phase8._complete_role(
             project, role, messages, request_id, response_json=True, run_role=run_role,
         )
+        if budget_job_id:
+            self._charge_research_model_run(project, budget_job_id, run_id)
         try:
             value = json.loads(text)
             if isinstance(value, dict):
                 return value, run_id
         except (TypeError, ValueError):
             pass
+        if budget_job_id:
+            self._assert_research_model_budget(project, budget_job_id)
         repair, repair_run_id = self.service.phase8._complete_role(
             project,
             role,
@@ -139,6 +149,8 @@ class Phase13Service:
             response_json=True,
             run_role=f"{run_role}:repair",
         )
+        if budget_job_id:
+            self._charge_research_model_run(project, budget_job_id, repair_run_id)
         try:
             value = json.loads(repair)
         except (TypeError, ValueError) as exc:
@@ -146,6 +158,30 @@ class Phase13Service:
         if not isinstance(value, dict):
             raise StoryError(422, "INCUBATOR_MODEL_JSON_INVALID", "The model did not return a JSON object after one repair attempt.")
         return value, repair_run_id
+
+    def _assert_research_model_budget(self, project: Any, job_id: str) -> None:
+        """Stop before another paid model call once the job budget is spent."""
+        with self.service.db.project(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            if not job or job.project_id != project.id:
+                raise StoryError(404, "RESEARCH_JOB_NOT_FOUND", "Research job was not found.")
+            limits = safe_json_loads(job.limits_json, {})
+            if job.status == "cancelled":
+                raise StoryError(409, "RESEARCH_JOB_CANCELLED", "Research job was cancelled.")
+            if self._runtime_exceeded(job.started_at, limits):
+                raise StoryError(409, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.")
+            if job.estimated_cost >= float(limits.get("maxCost", 5.0)):
+                raise StoryError(409, "RESEARCH_COST_LIMIT", "The research task exhausted its cost budget.")
+
+    def _charge_research_model_run(self, project: Any, job_id: str, run_id: str) -> None:
+        """Include completed model cost in the research job's authoritative budget."""
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            run = session.get(ModelRun, run_id)
+            if not job or job.project_id != project.id or not run:
+                raise StoryError(409, "RESEARCH_JOB_DRIFT", "Research job changed while model cost was recorded.")
+            job.estimated_cost += max(0.0, float(run.estimated_cost or 0.0))
+            job.updated_at = _now()
 
     # ------------------------------------------------------------------
     # Research brief and job lifecycle
@@ -195,6 +231,25 @@ class Phase13Service:
 
     def create_job(self, project_id: str, payload: ResearchJobCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
+        search_secret_ref = payload.search_secret_ref
+        fetch_secret_ref = payload.fetch_secret_ref
+        try:
+            if payload.search_api_key:
+                search_secret_ref = f"research-provider:{project.id}:tavily"
+                self.service.secret_store.set_secret(search_secret_ref, payload.search_api_key)
+            elif payload.search_provider == "tavily" and not search_secret_ref:
+                reusable = f"research-provider:{project.id}:tavily"
+                if self.service.secret_store.get_secret(reusable):
+                    search_secret_ref = reusable
+            if payload.fetch_api_key:
+                fetch_secret_ref = f"research-provider:{project.id}:firecrawl"
+                self.service.secret_store.set_secret(fetch_secret_ref, payload.fetch_api_key)
+            elif payload.fetch_provider == "firecrawl" and not fetch_secret_ref:
+                reusable = f"research-provider:{project.id}:firecrawl"
+                if self.service.secret_store.get_secret(reusable):
+                    fetch_secret_ref = reusable
+        except Exception as exc:
+            raise StoryError(503, "CREDENTIAL_STORE_UNAVAILABLE", "Unable to save research credentials in the operating-system credential store.") from exc
         with self.service.db.project_write(project.id, project.folder_path) as session:
             brief = session.get(MarketResearchBrief, payload.brief_id) if payload.brief_id else session.scalar(select(MarketResearchBrief).where(
                 MarketResearchBrief.project_id == project.id, MarketResearchBrief.status == "current"
@@ -205,7 +260,7 @@ class Phase13Service:
                 raise StoryError(409, "RESEARCH_BRIEF_SUPERSEDED", "Research jobs can only be created from the current research brief.")
             if brief.revision != payload.expected_brief_revision:
                 raise StoryError(409, "RESEARCH_BRIEF_REVISION_CONFLICT", "Research brief revision conflict.", {"currentRevision": brief.revision})
-            request_fingerprint = stable_digest({"brief": brief.id, "revision": brief.revision, "payload": payload.model_dump(mode="json", by_alias=True, exclude={"run_immediately"})})
+            request_fingerprint = stable_digest({"brief": brief.id, "revision": brief.revision, "payload": payload.model_dump(mode="json", by_alias=True, exclude={"run_immediately", "search_api_key", "fetch_api_key"})})
             if payload.idempotency_key:
                 existing = session.scalar(select(ResearchJob).where(
                     ResearchJob.project_id == project.id, ResearchJob.idempotency_key == payload.idempotency_key
@@ -222,9 +277,9 @@ class Phase13Service:
             now = _now()
             config = {
                 "searchProvider": payload.search_provider,
-                "searchSecretRef": payload.search_secret_ref,
+                "searchSecretRef": search_secret_ref,
                 "fetchProvider": payload.fetch_provider,
-                "fetchSecretRef": payload.fetch_secret_ref,
+                "fetchSecretRef": fetch_secret_ref,
             }
             row = ResearchJob(
                 id=str(uuid4()), project_id=project.id, brief_id=brief.id, brief_revision=brief.revision,
@@ -318,7 +373,7 @@ class Phase13Service:
             attempt = job.attempt
         try:
             self._providers_for(job)
-            planned = self._model_queries(project, snapshot, request_id)
+            planned = self._model_queries(project, snapshot, request_id, job_id)
         except StoryError as exc:
             return self._fail_job(project, job_id, exc.code, exc.message, request_id)
         planned = planned[:int(limits.get("maxQueries", 6))]
@@ -437,12 +492,24 @@ class Phase13Service:
                 return self._job_dict(job)
             versions = list(session.scalars(select(ResearchSourceVersion).where(ResearchSourceVersion.job_id == job.id)).all())
             sources = {item.id: item for item in session.scalars(select(ResearchSource).where(ResearchSource.job_id == job.id)).all()}
-            frozen = {"revision": job.revision, "briefChecksum": job.brief_checksum, "reportRevision": job.report_revision}
+            frozen = {
+                "revision": job.revision,
+                "briefChecksum": job.brief_checksum,
+                "reportRevision": job.report_revision,
+                "startedAt": job.started_at,
+                "limits": safe_json_loads(job.limits_json, {}),
+            }
         extracted: list[tuple[ResearchSourceVersion, dict[str, Any]]] = []
         for version in versions:
             source = sources.get(version.source_id)
             if not source or source.excluded or not version.bounded_content:
                 continue
+            if self._job_has_brief_drift(project, job_id):
+                return self._fail_job(project, job_id, "RESEARCH_BRIEF_DRIFT", "The research brief changed while evidence was analyzed.", request_id)
+            if not self._job_is_active(project, job_id):
+                return self.get_job(job_id)
+            if self._runtime_exceeded(frozen["startedAt"], frozen["limits"]):
+                return self._fail_job(project, job_id, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.", request_id)
             output, _ = self._complete_model_json(
                 project,
                 "research_analyst",
@@ -450,6 +517,7 @@ class Phase13Service:
                 request_id,
                 "Extract up to three short evidence items. Each item needs claimType (fact/opinion/inference), claim, excerpt copied exactly from sourceContent, locator start/end offsets, confidence 0..1, and perspectives. Do not reproduce long text or invent evidence.",
                 {"phase14Step": "evidence", "sourceVersionId": version.id, "sourceContent": version.bounded_content[:8000]},
+                budget_job_id=job_id,
             )
             extracted.append((version, output))
         with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -482,6 +550,10 @@ class Phase13Service:
                     evidence_rows.append(row)
             session.flush()
             evidence_payload = [self._evidence_dict(row) for row in evidence_rows]
+        if self._job_has_brief_drift(project, job_id):
+            return self._fail_job(project, job_id, "RESEARCH_BRIEF_DRIFT", "The research brief changed before report analysis.", request_id)
+        if not self._job_is_active(project, job_id):
+            return self.get_job(job_id)
         report, _ = self._complete_model_json(
             project,
             "research_analyst",
@@ -489,6 +561,7 @@ class Phase13Service:
             request_id,
             "Analyze supplied short evidence into competitor profiles and research findings. Facts must cite evidenceIds; unsupported items must be inference with uncertainties. Do not imitate authors or reconstruct source text.",
             {"phase14Step": "research_report", "evidence": evidence_payload, "sources": [{"id": source.id, "title": source.title, "domain": source.domain} for source in sources.values()]},
+            budget_job_id=job_id,
         )
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)
@@ -512,15 +585,26 @@ class Phase13Service:
                     continue
                 refs = set(raw.get("evidenceIds", []))
                 claim_type = str(raw.get("claimType") or "inference")
-                if claim_type == "fact" and (not refs or not refs.issubset(evidence_ids)):
+                if not refs.issubset(evidence_ids):
                     continue
-                session.add(ResearchFinding(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=report_revision, category=str(raw.get("category") or "general")[:80], statement=str(raw.get("statement") or "").strip()[:2000], claim_type=claim_type if claim_type in {"fact", "opinion", "inference"} else "inference", evidence_ids_json=dumps(sorted(refs)), confidence=max(0.0, min(1.0, float(raw.get("confidence", 0.0)))), uncertainties_json=dumps(raw.get("uncertainties", [])), checksum=stable_digest(raw), status="active", revision=1, created_at=_now()))
+                if claim_type == "fact" and not refs:
+                    continue
+                uncertainties = raw.get("uncertainties", [])
+                if claim_type in {"opinion", "inference"} and not uncertainties:
+                    continue
+                statement = str(raw.get("statement") or "").strip()[:2000]
+                if not statement:
+                    continue
+                session.add(ResearchFinding(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=report_revision, category=str(raw.get("category") or "general")[:80], statement=statement, claim_type=claim_type if claim_type in {"fact", "opinion", "inference"} else "inference", evidence_ids_json=dumps(sorted(refs)), confidence=max(0.0, min(1.0, float(raw.get("confidence", 0.0)))), uncertainties_json=dumps(uncertainties), checksum=stable_digest(raw), status="active", revision=1, created_at=_now()))
             source_types = sorted({source.source_type for source in sources.values() if source.status == "fetched" and not source.excluded})
             limits = safe_json_loads(job.limits_json, {})
-            coverage = {"sourceTypes": source_types, "sourceTypeCount": len(source_types), "evidenceCount": len(evidence_ids), "minimumSourceTypes": int(limits.get("minimumSourceTypes", 3)), "coveredPerspectives": sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.status == "succeeded")).all()})}
+            evidence_sources = {row.source_id for row in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()}
+            evidence_query_ids = {source.query_id for source in sources.values() if source.id in evidence_sources and source.query_id}
+            evidence_perspectives = sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.id.in_(evidence_query_ids))).all()}) if evidence_query_ids else []
+            coverage = {"sourceTypes": source_types, "sourceTypeCount": len(source_types), "evidenceCount": len(evidence_ids), "minimumSourceTypes": int(limits.get("minimumSourceTypes", 3)), "coveredPerspectives": sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.status == "succeeded")).all()}), "evidencePerspectives": evidence_perspectives}
             job.coverage_json, job.report_revision = dumps(coverage), report_revision
             job.report_checksum = stable_digest({"job": job.id, "reportRevision": report_revision, "coverage": coverage, "evidence": sorted(evidence_ids)})
-            enough = len(source_types) >= coverage["minimumSourceTypes"] and len(evidence_ids) >= len(PERSPECTIVES)
+            enough = len(source_types) >= coverage["minimumSourceTypes"] and set(evidence_perspectives) == set(PERSPECTIVES)
             job.status, job.completed_at, job.updated_at, job.revision = ("awaiting_review" if enough else "insufficient_evidence"), _now(), _now(), job.revision + 1
             session.add(self.service._audit("research_job.awaiting_review" if enough else "research_job.insufficient_evidence", "research_job", job.id, coverage, request_id))
             return self._job_dict(job)
@@ -739,8 +823,21 @@ class Phase13Service:
                 draft = draft_model.model_dump(mode="json", by_alias=True) if hasattr(draft_model, "model_dump") else draft_model
                 scores, total = self._validate_scores(draft.get("scoreComponents", {}))
                 refs = set(draft.get("evidenceIds", []))
-                if not refs.issubset(evidence_ids):
+                if not refs or not refs.issubset(evidence_ids):
                     raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "An opportunity references evidence outside this research job.")
+                by_component = draft.get("evidenceByComponent", {})
+                if not isinstance(by_component, dict):
+                    raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Opportunity component evidence must be an object.")
+                component_refs: set[str] = set()
+                for component, raw_refs in by_component.items():
+                    if component not in SCORE_LIMITS or not isinstance(raw_refs, list):
+                        raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Opportunity component evidence is malformed.")
+                    values = {str(item) for item in raw_refs}
+                    if not values.issubset(evidence_ids):
+                        raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Opportunity component evidence references another research job.")
+                    component_refs.update(values)
+                if component_refs and not component_refs.issubset(refs):
+                    raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Component evidence must also appear in the opportunity evidence list.")
                 story = {key: draft.get(key) for key in ("protagonist", "coreDesire", "coreConflict", "worldMechanism", "firstThreeChapterPromise", "serialEngine", "differentiation", "risks", "evidenceByComponent")}
                 checksum = stable_digest({"highConcept": draft["highConcept"], "story": story, "scores": scores, "evidence": sorted(refs), "report": job.report_checksum})
                 row = StoryOpportunity(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision, report_checksum=job.report_checksum, high_concept=draft["highConcept"], story_json=dumps(story), score_components_json=dumps(scores), total_score=total, evidence_coverage=draft["evidenceCoverage"], confidence=draft["confidence"], uncertainties_json=dumps(draft.get("uncertainties", [])), evidence_ids_json=dumps(sorted(refs)), checksum=checksum, status="pending", is_current=False, revision=1, created_at=_now(), updated_at=_now())
@@ -748,6 +845,18 @@ class Phase13Service:
                 rows.append(row)
             session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows)}, request_id))
             session.flush()
+            return [self._opportunity_dict(row) for row in rows]
+
+    def list_opportunities(self, project_id: str, job_id: str | None = None) -> list[dict[str, Any]]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            query = select(StoryOpportunity).where(StoryOpportunity.project_id == project.id)
+            if job_id:
+                job = session.get(ResearchJob, job_id)
+                if not job or job.project_id != project.id:
+                    raise StoryError(404, "RESEARCH_JOB_NOT_FOUND", "Research job was not found for this project.")
+                query = query.where(StoryOpportunity.job_id == job_id)
+            rows = session.scalars(query.order_by(StoryOpportunity.created_at.desc())).all()
             return [self._opportunity_dict(row) for row in rows]
 
     def decide_opportunity(self, opportunity_id: str, payload: StoryOpportunityAction, request_id: str, *, accepted: bool) -> dict[str, Any]:
@@ -833,7 +942,11 @@ class Phase13Service:
             row = session.get(IdeationSession, session_row.id)
             assert row
             self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
-            self._assert_ideation_upstream(session, row)
+            _, job = self._assert_ideation_upstream(session, row)
+            job_evidence_ids = set(session.scalars(select(ResearchEvidence.id).where(ResearchEvidence.job_id == job.id)).all())
+            state_evidence_ids = {str(item) for item in state["evidenceIds"]}
+            if not state_evidence_ids.issubset(job_evidence_ids):
+                raise StoryError(422, "IDEATION_EVIDENCE_INVALID", "The co-creation reply references evidence outside its frozen research report.")
             seq = (session.scalar(select(func.max(IdeationMessage.sequence_number)).where(IdeationMessage.session_id == row.id)) or 0) + 1
             user = IdeationMessage(id=str(uuid4()), project_id=project.id, session_id=row.id, sequence_number=seq, role="user", content=payload.content, structured_state_json="{}", evidence_ids_json="[]", created_at=_now())
             session.add(user)
@@ -885,6 +998,18 @@ class Phase13Service:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
             return [self._brief_version_dict(row) for row in session.scalars(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id).order_by(StoryBriefVersion.version_number.desc())).all()]
+
+    def list_story_brief_proposals(self, project_id: str, session_id: str | None = None) -> list[dict[str, Any]]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            query = select(StoryBriefProposal).where(StoryBriefProposal.project_id == project.id)
+            if session_id:
+                ideation = session.get(IdeationSession, session_id)
+                if not ideation or ideation.project_id != project.id:
+                    raise StoryError(404, "IDEATION_SESSION_NOT_FOUND", "Ideation session was not found for this project.")
+                query = query.where(StoryBriefProposal.session_id == session_id)
+            rows = session.scalars(query.order_by(StoryBriefProposal.created_at.desc())).all()
+            return [self._brief_proposal_dict(row) for row in rows]
 
     def current_story_brief(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -944,9 +1069,47 @@ class Phase13Service:
             "Generate a generic story Canon proposal. Return markdown, structured (entities, relations, rules), and do not introduce named-author imitation, Night Watch residue, forced power systems, or chapter plans.",
             {"phase14Step": "canon", "storyBrief": brief_data, "instructions": payload.instructions},
         )
-        markdown, structured = str(output.get("markdown") or "").strip(), output.get("structured")
-        if not markdown or not isinstance(structured, dict):
+        markdown, generated_structured = str(output.get("markdown") or "").strip(), output.get("structured")
+        if not markdown or not isinstance(generated_structured, dict):
             raise StoryError(422, "CANON_MODEL_INVALID", "The story incubator did not return a Canon proposal.")
+        analyzed, _ = self._complete_model_json(
+            project,
+            "research_analyst",
+            "research_analyst:canon-analyzer",
+            request_id,
+            "Independently extract the supplied Canon into structured entities, relations, and rules. Preserve only claims present in the Canon. Return structured only.",
+            {"phase14Step": "canon_analyze", "storyBrief": brief_data, "canonMarkdown": markdown},
+        )
+        structured = analyzed.get("structured") if isinstance(analyzed.get("structured"), dict) else analyzed
+        structured = structured if isinstance(structured, dict) else {}
+        structured["_generationCrossCheck"] = self._canon_cross_check(generated_structured, structured)
+        readiness = self._generic_canon_checks(markdown, structured, brief_data)
+        if not readiness["ready"]:
+            missing = [item["code"] for item in readiness["checks"] if item["status"] == "blocked"]
+            repaired, _ = self._complete_model_json(
+                project,
+                "story_incubator",
+                "story_incubator:canon-repair",
+                request_id,
+                "Repair only the listed Canon completeness failures. Return the complete markdown and structured entities, relations, and rules. Do not add unrelated systems or chapter plans.",
+                {"phase14Step": "canon_repair", "missingChecks": missing, "storyBrief": brief_data, "markdown": markdown, "structured": generated_structured},
+            )
+            repaired_markdown = str(repaired.get("markdown") or "").strip()
+            repaired_structured = repaired.get("structured")
+            if repaired_markdown and isinstance(repaired_structured, dict):
+                markdown, generated_structured = repaired_markdown, repaired_structured
+                analyzed, _ = self._complete_model_json(
+                    project,
+                    "research_analyst",
+                    "research_analyst:canon-analyzer-recheck",
+                    request_id,
+                    "Independently extract the supplied Canon into structured entities, relations, and rules. Preserve only claims present in the Canon. Return structured only.",
+                    {"phase14Step": "canon_analyze", "storyBrief": brief_data, "canonMarkdown": markdown},
+                )
+                structured = analyzed.get("structured") if isinstance(analyzed.get("structured"), dict) else analyzed
+                structured = structured if isinstance(structured, dict) else {}
+                structured["_generationCrossCheck"] = self._canon_cross_check(generated_structured, structured)
+                readiness = self._generic_canon_checks(markdown, structured, brief_data)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
             if not brief or brief.id != frozen["briefId"] or brief.revision != frozen["briefRevision"] or brief.checksum != frozen["briefChecksum"]:
@@ -959,7 +1122,7 @@ class Phase13Service:
             if not doc or doc.revision != frozen["canonRevision"]:
                 raise StoryError(409, "CANON_REVISION_CONFLICT", "Canon changed while the proposal was generated.")
             metadata = {"incubation": True, "storyBriefVersionId": brief.id, "storyBriefRevision": brief.revision, "storyBriefChecksum": brief.checksum, "opportunityId": opportunity.id, "researchReportChecksum": job.report_checksum, "brief": brief_data}
-            proposal = CanonGenerationProposal(id=str(uuid4()), project_id=project.id, base_revision=doc.revision, status="pending", brief_json=dumps(metadata), content_markdown=markdown, structured_json=dumps(structured), readiness_json=dumps(self._generic_canon_checks(markdown, structured)), model_run_id=model_run_id, revision=1, created_at=_now(), updated_at=_now())
+            proposal = CanonGenerationProposal(id=str(uuid4()), project_id=project.id, base_revision=doc.revision, status="pending" if readiness["ready"] else "failed", brief_json=dumps(metadata), content_markdown=markdown, structured_json=dumps(structured), readiness_json=dumps(readiness), model_run_id=model_run_id, revision=1, created_at=_now(), updated_at=_now())
             session.add(proposal)
             session.add(self.service._audit("incubation_canon_proposal.created", "canon_generation_proposal", proposal.id, {"storyBriefVersionId": brief.id}, request_id))
             session.flush()
@@ -997,20 +1160,25 @@ class Phase13Service:
             brief_data, canon_markdown = safe_json_loads(brief.brief_json, {}), doc.content_markdown
         generated: list[tuple[dict[str, Any], dict[str, Any], str, list[tuple[str, dict[str, Any], str]]]] = []
         for strategy in strategies:
-            output, run_id = self._complete_model_json(project, "story_incubator", f"story_incubator:opening:{strategy['key']}", request_id, "Write one distinct first chapter for the given opening strategy. Return chapter with title and content only. Respect the StoryBrief and Canon. Do not imitate authors or reuse source text.", {"phase14Step": "opening", "strategy": strategy, "storyBrief": brief_data, "canonMarkdown": canon_markdown[:8000]})
+            output, run_id = self._complete_model_json(project, "story_incubator", f"story_incubator:opening:{strategy['key']}", request_id, "Write one distinct first chapter for the given opening strategy. Return chapter with title and content only. Respect the StoryBrief word range and Canon. Do not imitate authors or reuse source text.", {"phase14Step": "opening", "strategy": strategy, "storyBrief": brief_data, "canonMarkdown": canon_markdown[:8000]})
             chapter = output.get("chapter") if isinstance(output.get("chapter"), dict) else output
             content = str(chapter.get("content") or "").strip() if isinstance(chapter, dict) else ""
             title = str(chapter.get("title") or strategy["label"]).strip() if isinstance(chapter, dict) else ""
             if not content:
                 raise StoryError(422, "OPENING_MODEL_INVALID", "The story incubator did not return an opening chapter.")
+            self._validate_opening_content(content, brief_data)
             chapter = {"chapterNumber": 1, "title": title[:300], "content": content, "manualApproved": False}
             reviews: list[tuple[str, dict[str, Any], str]] = []
             for role in ("reader_simulator", "opening_editor"):
                 review, review_run_id = self._complete_model_json(project, role, f"{role}:opening-review", request_id, "Independently review this opening. Return scores, findings with source ranges and suggestions, recommendation, and summary. Do not read another reviewer and do not use fixed scores.", {"phase14Step": "opening_review", "strategy": strategy, "chapter": chapter, "storyBrief": brief_data})
                 if not isinstance(review.get("scores"), dict) or not str(review.get("summary") or "").strip():
                     raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "The opening reviewer did not return a valid review.")
+                self._validate_opening_review(review, content)
                 reviews.append((role, review, review_run_id))
             generated.append((strategy, chapter, run_id, reviews))
+        contents = [item[1]["content"] for item in generated]
+        if any(self._opening_similarity(contents[left], contents[right]) >= 0.85 for left in range(len(contents)) for right in range(left + 1, len(contents))):
+            raise StoryError(422, "OPENING_CANDIDATES_NOT_DISTINCT", "Opening candidates are too similar to be meaningful alternatives.")
         with self.service.db.project_write(project.id, project.folder_path) as session:
             brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
             doc = session.get(CanonDocument, "story-core")
@@ -1088,6 +1256,16 @@ class Phase13Service:
         additions = output.get("chapters") if isinstance(output.get("chapters"), list) else []
         if {item.get("chapterNumber") for item in additions if isinstance(item, dict)} != {2, 3}:
             raise StoryError(422, "OPENING_EXPANSION_MODEL_INVALID", "The story incubator must return chapters two and three.")
+        addition_contents = [str(item.get("content") or "").strip() for item in additions if isinstance(item, dict)]
+        if any(not content for content in addition_contents):
+            raise StoryError(422, "OPENING_EXPANSION_MODEL_INVALID", "Expanded opening chapters cannot be empty.")
+        brief_data = safe_json_loads(brief.brief_json, {}) if brief else {}
+        for content in addition_contents:
+            self._validate_opening_content(content, brief_data)
+        existing_content = str(chapters[0].get("content") or "") if chapters and isinstance(chapters[0], dict) else ""
+        all_contents = [existing_content, *addition_contents]
+        if any(self._opening_similarity(all_contents[left], all_contents[right]) >= 0.85 for left in range(len(all_contents)) for right in range(left + 1, len(all_contents))):
+            raise StoryError(422, "OPENING_CHAPTERS_NOT_DISTINCT", "Expanded opening chapters must advance with distinct content.")
         with self.service.db.project_write(project.id, project.folder_path) as session:
             experiment = session.get(OpeningExperiment, experiment_row.id)
             candidate = session.get(OpeningCandidate, payload.selected_candidate_id)
@@ -1427,7 +1605,7 @@ class Phase13Service:
         suffixes = ("platform trends", "leading works", "reader praise", "reader dropoff reasons", "opening hook strategy", "serial retention engine")
         return list(zip(PERSPECTIVES, [f"{base} {suffix}" for suffix in suffixes], strict=True))
 
-    def _model_queries(self, project: Any, brief: dict[str, Any], request_id: str) -> list[tuple[str, str]]:
+    def _model_queries(self, project: Any, brief: dict[str, Any], request_id: str, job_id: str) -> list[tuple[str, str]]:
         output, _ = self._complete_model_json(
             project,
             "research_planner",
@@ -1435,6 +1613,7 @@ class Phase13Service:
             request_id,
             "You are a market-research query planner. Produce exactly one concise public-web query for each required perspective. Do not invent facts, copyrighted text, or named-author imitation.",
             {"phase14Step": "query_plan", "brief": brief, "perspectives": list(PERSPECTIVES)},
+            budget_job_id=job_id,
         )
         items = output.get("queries")
         if not isinstance(items, list):
@@ -1564,9 +1743,103 @@ class Phase13Service:
         return markdown, {"entities": entities, "relations": [], "rules": rules}
 
     @staticmethod
-    def _generic_canon_checks(markdown: str, structured: dict[str, Any]) -> dict[str, Any]:
-        checks = [{"code": "CANON_GENERIC_CORE", "status": "ready" if "Story Core" in markdown else "blocked", "detail": "Story core present."}, {"code": "CANON_GENERIC_CONFLICT", "status": "ready" if "Conflict:" in markdown else "blocked", "detail": "Core conflict present."}, {"code": "CANON_GENERIC_BOUNDARIES", "status": "ready" if "Boundaries" in markdown else "blocked", "detail": "Boundaries present."}, {"code": "CANON_GENERIC_NO_NIGHT_WATCH", "status": "ready" if not any(term in markdown for term in ("夜巡人", "沈砚", "雾城", "七卷", "六阶")) else "blocked", "detail": "No night-watch template residue."}]
+    def _canon_cross_check(generated: dict[str, Any], analyzed: dict[str, Any]) -> dict[str, Any]:
+        def names(payload: dict[str, Any], collection: str, field: str) -> set[str]:
+            items = payload.get(collection, [])
+            if not isinstance(items, list):
+                return set()
+            return {str(item.get(field) or "").strip().casefold() for item in items if isinstance(item, dict) and str(item.get(field) or "").strip()}
+
+        missing_entities = sorted(names(generated, "entities", "canonicalName") - names(analyzed, "entities", "canonicalName"))
+        missing_rules = sorted(names(generated, "rules", "ruleCode") - names(analyzed, "rules", "ruleCode"))
+        return {"ready": not missing_entities and not missing_rules, "missingEntities": missing_entities, "missingRules": missing_rules}
+
+    @staticmethod
+    def _generic_canon_checks(markdown: str, structured: dict[str, Any], brief: dict[str, Any] | None = None) -> dict[str, Any]:
+        brief = brief or {}
+        entities = structured.get("entities", [])
+        relations = structured.get("relations", [])
+        rules = structured.get("rules", [])
+        entities_valid = isinstance(entities, list) and bool(entities) and all(
+            isinstance(item, dict)
+            and bool(str(item.get("canonicalName") or "").strip())
+            and bool(str(item.get("entityTypeName") or "").strip())
+            and isinstance(item.get("attributesJson", {}), dict)
+            for item in entities
+        )
+        relations_valid = isinstance(relations, list) and all(isinstance(item, dict) for item in relations)
+        rules_valid = isinstance(rules, list) and bool(rules) and all(
+            isinstance(item, dict)
+            and bool(str(item.get("ruleCode") or "").strip())
+            and bool(str(item.get("statement") or "").strip())
+            and isinstance(item.get("constraintJson", {}), dict)
+            for item in rules
+        )
+        normalized = markdown.casefold()
+        protagonist = str(brief.get("protagonist") or "").strip().casefold()
+        entity_names = {str(item.get("canonicalName") or "").strip().casefold() for item in entities if isinstance(item, dict)} if isinstance(entities, list) else set()
+        cross_check = structured.get("_generationCrossCheck", {"ready": True})
+        night_watch_terms = ("夜巡人", "沈砚", "雾城", "七卷", "六阶")
+        checks = [
+            {"code": "CANON_GENERIC_CORE", "status": "ready" if ("story core" in normalized or "故事内核" in markdown) else "blocked", "detail": "Story core must be explicit."},
+            {"code": "CANON_GENERIC_CONFLICT", "status": "ready" if ("conflict" in normalized or "冲突" in markdown) else "blocked", "detail": "Core conflict must be explicit."},
+            {"code": "CANON_GENERIC_BOUNDARIES", "status": "ready" if ("boundar" in normalized or "边界" in markdown or "禁止" in markdown) else "blocked", "detail": "Writing boundaries must be explicit."},
+            {"code": "CANON_GENERIC_ENTITIES", "status": "ready" if entities_valid else "blocked", "detail": "At least one valid structured entity is required."},
+            {"code": "CANON_GENERIC_RELATIONS", "status": "ready" if relations_valid else "blocked", "detail": "Relations must be a structured list."},
+            {"code": "CANON_GENERIC_RULES", "status": "ready" if rules_valid else "blocked", "detail": "At least one enforceable structured rule is required."},
+            {"code": "CANON_GENERIC_PROTAGONIST", "status": "ready" if (not protagonist or protagonist in entity_names) else "blocked", "detail": "The StoryBrief protagonist must exist in structured Canon."},
+            {"code": "CANON_GENERIC_ANALYZER_CROSSCHECK", "status": "ready" if isinstance(cross_check, dict) and cross_check.get("ready") is True else "blocked", "detail": "Independent Canon extraction must agree with generated entities and rules."},
+            {"code": "CANON_GENERIC_NO_NIGHT_WATCH", "status": "ready" if not any(term in markdown for term in night_watch_terms) else "blocked", "detail": "No Night Watch template residue is allowed in a generic project."},
+        ]
         return {"ready": all(item["status"] == "ready" for item in checks), "checks": checks}
+
+    @staticmethod
+    def _narrative_length(content: str) -> int:
+        cjk = len(re.findall(r"[\u3400-\u9fff]", content))
+        latin_words = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", content))
+        return cjk + latin_words
+
+    @staticmethod
+    def _chapter_word_range(brief: dict[str, Any]) -> tuple[int, int]:
+        raw = brief.get("chapterWordRange", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        minimum = int(raw.get("min", 800) or 800)
+        maximum = int(raw.get("max", 3000) or 3000)
+        if minimum < 100 or maximum < minimum or maximum > 20_000:
+            raise StoryError(422, "STORY_BRIEF_WORD_RANGE_INVALID", "StoryBrief chapterWordRange must be a valid min/max range.")
+        return minimum, maximum
+
+    @classmethod
+    def _validate_opening_content(cls, content: str, brief: dict[str, Any]) -> None:
+        minimum, maximum = cls._chapter_word_range(brief)
+        length = cls._narrative_length(content)
+        if length < minimum or length > maximum:
+            raise StoryError(422, "OPENING_WORD_RANGE_INVALID", "Opening chapter is outside the StoryBrief word range.", {"length": length, "minimum": minimum, "maximum": maximum})
+
+    @staticmethod
+    def _opening_similarity(left: str, right: str) -> float:
+        def grams(value: str) -> set[str]:
+            normalized = re.sub(r"\s+", "", value.casefold())
+            return {normalized[index:index + 3] for index in range(max(0, len(normalized) - 2))}
+        left_grams, right_grams = grams(left), grams(right)
+        if not left_grams or not right_grams:
+            return 1.0 if left.strip() == right.strip() else 0.0
+        return len(left_grams & right_grams) / len(left_grams | right_grams)
+
+    @staticmethod
+    def _validate_opening_review(review: dict[str, Any], content: str) -> None:
+        required_scores = {"firstScreenHook", "characterDesire", "emotionalPull", "sceneTension", "expositionDensity", "terminologyRepetition", "dialogueActionExplanationBalance", "continueReading"}
+        scores = review.get("scores")
+        if not isinstance(scores, dict) or not required_scores.issubset(scores) or any(not isinstance(scores[key], (int, float)) or scores[key] < 0 or scores[key] > 100 for key in required_scores):
+            raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "Opening review must contain every bounded score.")
+        findings = review.get("findings", [])
+        if not isinstance(findings, list):
+            raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "Opening review findings must be a list.")
+        for finding in findings:
+            location = finding.get("range", {}) if isinstance(finding, dict) else {}
+            if not isinstance(location, dict) or not isinstance(location.get("start"), int) or not isinstance(location.get("end"), int) or location["start"] < 0 or location["end"] < location["start"] or location["end"] > len(content) or not str(finding.get("suggestion") or "").strip():
+                raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "Every opening finding must contain a valid source range and suggestion.")
 
     @staticmethod
     def _opening_chapter(brief: dict[str, Any], strategy: dict[str, Any]) -> dict[str, Any]:

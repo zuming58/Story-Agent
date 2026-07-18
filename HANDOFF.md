@@ -1,3 +1,50 @@
+# 2026-07-18 第十四阶段审计与创意孵化 UI 恢复点（GPT-5.6 WIP）
+
+当前分支：`agent/model-backed-story-incubator`
+
+审计基线：`081a01a`；另一台电脑交付：`cb73f21`、`a30e363`。
+
+状态：**后端深度审计与修复已基本落盘；创意孵化 UI 已建立功能页面但尚未完成 CSS、页面测试、全量回归和最终推送。下次必须从本节继续，不得把 Phase 14 误报为已完成。**
+
+## 已完成的审计与修复
+
+- 研究模型调用已纳入 `ResearchJob` 费用上限，并在每次模型/外部调用前复核取消、运行时和 Brief 漂移，外部调用期间不持有 SQLite 长事务。
+- 报告的事实、推断和观点均限制为当前任务证据；事实必须有引用，推断/观点必须带不确定性，不再允许跨任务 evidence ID。
+- 覆盖率改为从“查询视角 → 来源 → 证据”真实计算，六类研究视角和最少来源类型缺失时不能伪装成充分证据。
+- 故事机会和共创状态中的 evidence ID 必须属于冻结的当前研究任务；跨任务引用会被拒绝。
+- Canon 改为 Architect 生成、独立 `research_analyst:canon-analyzer` 分析、确定性交叉检查、最多一次修复重试；空结构化实体/规则、缺故事内核/冲突/边界均不能通过。
+- 开篇实验增加章节字数范围、三方案差异度、完整评审分数/取值范围和 finding 定位校验。
+- 新增故事机会及待处理 StoryBrief 提案列表接口，刷新页面后能恢复业务状态。
+- 研究任务创建可安全接收 Tavily/Firecrawl 密钥并写入 `SecretStore`；API、数据库、fingerprint 和日志不返回完整密钥。
+- Phase 8 应用孵化 Canon 时重新执行通用 readiness，避免旧提案绕过新校验。
+- 已补 Phase 14 专项回归测试；中断前专项结果为 `8 passed`，后续新增接口和密钥路径仍需重新执行。
+
+## 已落盘但未完成的 UI
+
+- 新增 `/incubator` 路由、侧栏“创意孵化”入口和 `StoryIncubatorPage.tsx`。
+- 页面已串联六步真实流程：研究目标、市场调研、故事机会、人机共创、StoryBrief、Canon 与三开篇实验。
+- React Query 读取 SQLite 权威数据，业务状态不写入 `localStorage`；页面刷新使用新增列表接口恢复。
+- 固定右侧 Story Agent 已增加创意孵化作用域与“检查方向 / 整理决策 / 比较开篇”动作。
+- **尚未为 `.incubator-*` 组件补齐墨曜指挥舱 CSS，也未完成 1440×1024、1280×800 视觉验收。**
+
+## 下次恢复顺序
+
+1. 先运行 `git status --short`，确认本节列出的修改仍在；不要回滚用户或其他阶段数据。
+2. 完成 `apps/web/src/workbench.css` 的创意孵化样式和响应式布局，保持现有深海军蓝、金色、细边框设计令牌。
+3. 补 Web 单测：路由入口、六阶段恢复、接受/拒绝与错误状态；不得用纯静态假数据替代后端语义。
+4. 重跑 `apps/api/tests/test_phase13_incubator.py`，再运行 API 全量、Web 单测、Build、Playwright。
+5. 审查 `git diff --check`、密钥泄露、`.data`/数据库/日志/正文是否误入 Git。
+6. 更新本节为最终审计结果，提交并推送当前分支；不合并 `main`，等待用户检查 UI。
+
+## 当前未验证项与严格边界
+
+- 尚未得到本轮所有并行 API 分组的最终结果；旧的 167 API / 11 Web / 14 Playwright 是另一台电脑交付结果，不可冒充本轮审计结果。
+- 尚未用真实 Tavily、Firecrawl、DeepSeek 完成一次端到端人工孵化；自动测试必须继续使用确定性 Provider，不能消费真实额度。
+- 不修改 `.data`、API Key、Windows Credential Manager 中既有密钥、夜巡人正文和用户正式作品。
+- 不修改已有页面的设计风格或视觉快照；UI 只在当前电脑完成。
+
+---
+
 # 2026-07-17 第十三阶段重制交接：市场研究与故事孵化
 
 当前分支：`agent/general-story-incubator-foundation`

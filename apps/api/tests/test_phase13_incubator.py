@@ -4,6 +4,8 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 from story_agent_api.research_providers import (
     DeterministicContentFetchProvider,
     DeterministicSearchProvider,
@@ -11,6 +13,7 @@ from story_agent_api.research_providers import (
     SearchResponse,
     SearchResult,
 )
+from story_agent_api.services import StoryError
 
 
 class _FakeModelHandler(BaseHTTPRequestHandler):
@@ -18,7 +21,7 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(body or b"{}")
         joined = "\n".join(item.get("content", "") for item in payload.get("messages", []) if isinstance(item, dict))
-        step = next((name for name in ("query_plan", "evidence", "research_report", "opportunities", "ideation", "story_brief", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
+        step = next((name for name in ("query_plan", "evidence", "research_report", "opportunities", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
         perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
         if step == "query_plan": value = {"queries": [{"perspective": item, "query": f"undecided urban mystery adult readers {item.replace('_', ' ')}".replace("genre leaders", "leading works").replace("reader praise", "reader praise").replace("reader dropoff", "reader dropoff reasons").replace("opening strategy", "opening hook strategy").replace("serial engine", "serial retention engine")} for item in perspectives]}
         elif step == "evidence":
@@ -33,11 +36,16 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         elif step == "opportunities":
             data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; value = {"opportunities": [{"highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notApplicable", "firstThreeChapterPromise": "A choice", "serialEngine": "Escalation", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []} for n in range(1,4)]}
         elif step == "ideation": value = {"reply": "A concrete constraint is recorded.", "confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": []}
-        elif step == "story_brief": value = {"brief": {"format":"long-form","platform":"undecided","audience":"adult readers","premise":"A costly search","readerPromise":"A choice","theme":"trust","tone":"scene-led","pov":"close third","pace":"purposeful","endingDirection":"consequence","protagonist":"Ming","coreDesire":"Find truth","coreConflict":"Truth costs trust","worldMechanism":"notApplicable","serialEngine":"Escalation","emotionalRewards":["tension"],"differentiators":["original"],"forbiddenContent":[],"referenceTraits":["abstract"]}}
-        elif step == "canon": value = {"markdown": "# Story Core\nConflict: truth costs trust\n## Boundaries", "structured": {"entities": [], "relations": [], "rules": []}}
-        elif step == "opening_review": value = {"scores": {"continueReading": 70}, "findings": [], "recommendation": "continue", "summary": "Independent review."}
-        elif step == "opening_expand": value = {"chapters": [{"chapterNumber": 2, "title": "Two", "content": "A consequence deepens."}, {"chapterNumber": 3, "title": "Three", "content": "A new choice follows."}]}
-        else: value = {"chapter": {"title": "Opening", "content": "Ming makes an immediate costly choice."}}
+        elif step == "story_brief": value = {"brief": {"format":"long-form","platform":"undecided","audience":"adult readers","chapterWordRange":{"min":100,"max":1000},"premise":"A costly search","readerPromise":"A choice","theme":"trust","tone":"scene-led","pov":"close third","pace":"purposeful","endingDirection":"consequence","protagonist":"Ming","coreDesire":"Find truth","coreConflict":"Truth costs trust","worldMechanism":"notApplicable","serialEngine":"Escalation","emotionalRewards":["tension"],"differentiators":["original"],"forbiddenContent":[],"referenceTraits":["abstract"]}}
+        elif step in {"canon", "canon_repair"}: value = {"markdown": "# Story Core\nMing searches for truth.\n## Conflict\nTruth costs trust.\n## Boundaries\nNo imitation and no unsupported facts.", "structured": {"entities": [{"canonicalName":"Ming","entityTypeName":"person","aliasesJson":[],"attributesJson":{"desire":"Find truth"}}], "relations": [], "rules": [{"ruleCode":"TRUTH-COST","category":"story","statement":"Truth costs trust.","severity":"high","constraintJson":{"hard":True}}]}}
+        elif step == "canon_analyze": value = {"structured": {"entities": [{"canonicalName":"Ming","entityTypeName":"person","aliasesJson":[],"attributesJson":{"desire":"Find truth"}}], "relations": [], "rules": [{"ruleCode":"TRUTH-COST","category":"story","statement":"Truth costs trust.","severity":"high","constraintJson":{"hard":True}}]}}
+        elif step == "opening_review": value = {"scores": {"firstScreenHook":78,"characterDesire":76,"emotionalPull":72,"sceneTension":75,"expositionDensity":20,"terminologyRepetition":5,"dialogueActionExplanationBalance":74,"continueReading":77}, "findings": [], "recommendation": "continue", "summary": "Independent review."}
+        elif step == "opening_expand": value = {"chapters": [{"chapterNumber": 2, "title": "Two", "content": ("Ming follows the physical consequence into a crowded station and must choose whom to trust before the doors close. " * 12)}, {"chapterNumber": 3, "title": "Three", "content": ("At dawn, a witness changes the bargain and Ming risks a private memory to keep the investigation alive. " * 12)}]}
+        else:
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user"))
+            key = data.get("strategy", {}).get("key", "opening")
+            seeds = {"strong-event":"A public alarm forces Ming to rescue a stranger while losing the only safe exit. ", "strong-character":"Ming rejects an easy lie and pays for the decision in front of someone important. ", "strong-mystery":"A sealed message answers a question Ming has never asked and demands a choice before sunrise. "}
+            value = {"chapter": {"title": key, "content": seeds.get(key, seeds["strong-event"]) * 14}}
         response = json.dumps({"model":"fake-incubator", "choices":[{"message":{"content":json.dumps(value)},"finish_reason":"stop"}], "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
     def log_message(self, *_args): return
@@ -125,6 +133,9 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     assert opportunities.status_code == 201, opportunities.text
     first = opportunities.json()[0]
     assert first["totalScore"] == 74
+    restored_opportunities = client.get(f"/api/v1/projects/{project['id']}/story-opportunities?jobId={job['id']}")
+    assert restored_opportunities.status_code == 200
+    assert {item["id"] for item in restored_opportunities.json()} == {item["id"] for item in opportunities.json()}
     accepted = client.post(f"/api/v1/story-opportunities/{first['id']}/accept", json={"expectedRevision": first["revision"]})
     assert accepted.status_code == 200, accepted.text
     opportunity = accepted.json()
@@ -136,6 +147,9 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     assert message.status_code == 201, message.text
     proposal = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": session["revision"] + 1})
     assert proposal.status_code == 201, proposal.text
+    restored_proposals = client.get(f"/api/v1/projects/{project['id']}/story-brief/proposals?sessionId={session['id']}")
+    assert restored_proposals.status_code == 200
+    assert restored_proposals.json()[0]["id"] == proposal.json()["id"]
     applied = client.post(f"/api/v1/story-brief-proposals/{proposal.json()['id']}/apply", json={"expectedRevision": proposal.json()["revision"]})
     assert applied.status_code == 200, applied.text
     brief_version = client.get(f"/api/v1/projects/{project['id']}/story-brief/current").json()
@@ -178,7 +192,26 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     assert client.post(f"/api/v1/projects/{project['id']}/canon/lock", json={"expectedRevision": current_canon["revision"]}).status_code == 200
     runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
     roles = {item["role"] for item in runs}
-    assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:story-brief", "story_incubator:canon", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
+    assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:story-brief", "story_incubator:canon", "research_analyst:canon-analyzer", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
+
+
+def test_phase14_deterministic_canon_and_opening_gates(client):
+    phase13 = client.app.state.story_service.phase13
+    incomplete = phase13._generic_canon_checks(
+        "# Story Core\nConflict: a cost\n## Boundaries",
+        {"entities": [], "relations": [], "rules": [], "_generationCrossCheck": {"ready": True}},
+        {"protagonist": "Ming"},
+    )
+    assert incomplete["ready"] is False
+    assert {item["code"] for item in incomplete["checks"] if item["status"] == "blocked"} >= {"CANON_GENERIC_ENTITIES", "CANON_GENERIC_RULES", "CANON_GENERIC_PROTAGONIST"}
+
+    with pytest.raises(StoryError) as short:
+        phase13._validate_opening_content("too short", {"chapterWordRange": {"min": 100, "max": 200}})
+    assert short.value.code == "OPENING_WORD_RANGE_INVALID"
+
+    with pytest.raises(StoryError) as review:
+        phase13._validate_opening_review({"scores": {"continueReading": 90}, "findings": []}, "content")
+    assert review.value.code == "OPENING_REVIEW_MODEL_INVALID"
 
 
 def test_ssrf_policy_rejects_local_and_private_addresses():
@@ -321,5 +354,5 @@ def test_research_cost_limit_stops_the_job_before_results_are_persisted(client):
     assert job.status_code == 201, job.text
     assert job.json()["status"] == "failed"
     assert job.json()["errorCode"] == "RESEARCH_COST_LIMIT"
-    assert costly.calls == 1
+    assert costly.calls == 0
     assert client.get(f"/api/v1/research/jobs/{job.json()['id']}/sources").json() == []

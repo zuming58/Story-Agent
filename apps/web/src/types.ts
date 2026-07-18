@@ -594,6 +594,88 @@ export interface StoryBrief {
   referenceTraits: string[];
 }
 
+export interface MarketResearchBrief {
+  id: string; projectId: string; versionNumber: number; format: "long-form" | "short-form"; platform: string;
+  genre: string; audience: string; targetChapters: number | null; targetWords: number | null;
+  emotionalValue: string[]; researchDateRange: Record<string, string>; includedDomains: string[]; excludedDomains: string[];
+  referenceWorks: string[]; forbiddenContent: string[]; commercialGoals: string[]; notes: string;
+  checksum: string; status: string; revision: number; createdAt: string; updatedAt: string;
+}
+
+export interface ResearchJob {
+  id: string; projectId: string; briefId: string; briefRevision: number; briefChecksum: string; attempt: number; status: string;
+  providerConfig: { searchProvider: string; fetchProvider: string; searchSecretConfigured: boolean; fetchSecretConfigured: boolean };
+  limits: Record<string, number>; coverage: Record<string, unknown>; reportChecksum: string; reportRevision: number;
+  queryCount: number; pageCount: number; fetchedChars: number; requestUnits: number; estimatedCost: number;
+  errorCode: string | null; errorMessage: string | null; revision: number; createdAt: string; startedAt: string | null; completedAt: string | null; updatedAt: string;
+}
+
+export interface ResearchEvidence {
+  id: string; projectId: string; jobId: string; sourceId: string; sourceVersionId: string; claimType: "fact" | "opinion" | "inference";
+  claim: string; excerpt: string; locator: Record<string, unknown>; confidence: number; findingRefs: string[]; checksum: string; createdAt: string;
+}
+
+export interface CompetitorProfile {
+  id: string; projectId: string; jobId: string; reportRevision: number; name: string; profile: Record<string, unknown>;
+  evidenceIds: string[]; confidence: number; excluded: boolean; exclusionReason: string | null; checksum: string;
+  status: string; revision: number; createdAt: string; updatedAt: string;
+}
+
+export interface ResearchFinding {
+  id: string; projectId: string; jobId: string; reportRevision: number; category: string; statement: string;
+  claimType: string; evidenceIds: string[]; confidence: number; uncertainties: string[]; status: string; revision: number; createdAt: string;
+}
+
+export interface StoryOpportunity {
+  id: string; projectId: string; jobId: string; reportRevision: number; reportChecksum: string; highConcept: string;
+  story: Record<string, unknown>; scoreComponents: Record<string, number>; totalScore: number; evidenceCoverage: number; confidence: number;
+  uncertainties: string[]; evidenceIds: string[]; checksum: string; status: string; isCurrent: boolean; revision: number; createdAt: string; updatedAt: string;
+}
+
+export interface IdeationMessage {
+  id: string; projectId: string; sessionId: string; sequenceNumber: number; role: "user" | "assistant"; content: string;
+  structuredState: Record<string, unknown>; evidenceIds: string[]; modelRunId: string | null; createdAt: string;
+}
+
+export interface IdeationSession {
+  id: string; projectId: string; opportunityId: string; opportunityRevision: number; opportunityChecksum: string;
+  researchJobId: string; researchReportChecksum: string; state: Record<string, unknown>; status: string; revision: number;
+  createdAt: string; updatedAt: string; messages: IdeationMessage[];
+}
+
+export interface IncubationStoryBriefProposal {
+  id: string; projectId: string; sessionId: string; opportunityId: string; proposedBrief: Record<string, unknown>;
+  diff: Record<string, unknown>; checksum: string; modelRunId: string | null; status: string; revision: number; createdAt: string; updatedAt: string;
+}
+
+export interface IncubationStoryBriefVersion {
+  id: string; projectId: string; sessionId: string; proposalId: string; opportunityId: string; versionNumber: number;
+  brief: Record<string, unknown>; checksum: string; isCurrent: boolean; revision: number; createdAt: string; acceptedAt: string;
+}
+
+export interface ReaderEvaluation {
+  id: string; reviewerRole: string; scores: Record<string, number>; findings: Array<Record<string, unknown>>;
+  recommendation: string; summary: string; modelRunId: string | null; createdAt: string;
+}
+
+export interface OpeningCandidate {
+  id: string; experimentId: string; strategyKey: string; strategyLabel: string; strategy: Record<string, unknown>;
+  chapters: Array<{ chapterNumber: number; title: string; content: string; manualApproved?: boolean }>;
+  chapterCount: number; textChecksum: string; modelRunId: string | null; status: string; revision: number;
+  createdAt: string; updatedAt: string; evaluations: ReaderEvaluation[];
+}
+
+export interface OpeningExperiment {
+  id: string; projectId: string; storyBriefVersionId: string; storyBriefRevision: number; storyBriefChecksum: string;
+  canonDocumentId: string; canonRevision: number; canonChecksum: string; strategies: Array<Record<string, unknown>>;
+  status: string; selectedCandidateId: string | null; revision: number; createdAt: string; updatedAt: string; candidates: OpeningCandidate[];
+}
+
+export interface IncubationReadiness {
+  projectId: string; ready: boolean; stage: string; checks: Array<{ code: string; status: string; detail?: string }>;
+  currentStoryBriefId: string | null; selectedOpeningCandidateId: string | null; styleBaselineId: string | null; updatedAt: string;
+}
+
 export interface ArchitectureCheck {
   code: string;
   status: "ready" | "warning" | "blocked";
@@ -604,7 +686,7 @@ export interface CanonGenerationProposal {
   id: string;
   projectId: string;
   baseRevision: number;
-  status: "pending" | "applied" | "rejected";
+  status: "pending" | "applied" | "rejected" | "failed";
   brief: StoryBrief;
   contentMarkdown: string;
   structured: { entities: Array<Record<string, unknown>>; relations: Array<Record<string, unknown>>; rules: Array<Record<string, unknown>> };

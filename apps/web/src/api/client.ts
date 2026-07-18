@@ -34,6 +34,19 @@ import type {
   PlanGenerationProposal,
   TrialReadiness,
   TrialRunSize,
+  MarketResearchBrief,
+  ResearchJob,
+  ResearchEvidence,
+  CompetitorProfile,
+  ResearchFinding,
+  StoryOpportunity,
+  IdeationSession,
+  IdeationMessage,
+  IncubationStoryBriefProposal,
+  IncubationStoryBriefVersion,
+  OpeningExperiment,
+  OpeningCandidate,
+  IncubationReadiness,
 } from "../types";
 
 export class ApiClientError extends Error {
@@ -144,6 +157,40 @@ export const api = {
     const suffix = params.toString() ? `?${params.toString()}` : "";
     return request<ModelRun[]>(`/projects/${projectId}/model-runs${suffix}`);
   },
+  researchBriefs: (projectId: string) => request<MarketResearchBrief[]>(`/projects/${projectId}/research/briefs`),
+  saveResearchBrief: (projectId: string, payload: {
+    expectedRevision: number; format: "long-form" | "short-form"; platform: string; genre: string; audience: string;
+    targetChapters?: number | null; targetWords?: number | null; emotionalValue: string[]; researchDateRange?: Record<string, string>;
+    includedDomains?: string[]; excludedDomains?: string[]; referenceWorks?: string[]; forbiddenContent?: string[]; commercialGoals?: string[]; notes?: string;
+  }) => request<MarketResearchBrief>(`/projects/${projectId}/research/briefs`, { method: "POST", body: JSON.stringify(payload) }),
+  researchJobs: (projectId: string) => request<ResearchJob[]>(`/projects/${projectId}/research/jobs`),
+  createResearchJob: (projectId: string, payload: {
+    briefId?: string; expectedBriefRevision: number; idempotencyKey?: string; searchProvider?: "tavily" | "deterministic";
+    fetchProvider?: "firecrawl" | "deterministic"; searchApiKey?: string; fetchApiKey?: string; runImmediately?: boolean;
+    limits?: { maxQueries?: number; maxPages?: number; maxCharsPerPage?: number; maxTotalChars?: number; maxCost?: number; maxRuntimeSeconds?: number; minimumSourceTypes?: number };
+  }) => request<ResearchJob>(`/projects/${projectId}/research/jobs`, { method: "POST", body: JSON.stringify(payload) }),
+  researchJobAction: (jobId: string, action: "run" | "resume" | "cancel" | "accept" | "reject", expectedRevision: number) =>
+    request<ResearchJob>(`/research/jobs/${jobId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  researchEvidence: (jobId: string) => request<ResearchEvidence[]>(`/research/jobs/${jobId}/evidence`),
+  researchCompetitors: (jobId: string) => request<CompetitorProfile[]>(`/research/jobs/${jobId}/competitors`),
+  researchFindings: (jobId: string) => request<ResearchFinding[]>(`/research/jobs/${jobId}/findings`),
+  storyOpportunities: (projectId: string, jobId?: string) => request<StoryOpportunity[]>(`/projects/${projectId}/story-opportunities${jobId ? `?jobId=${encodeURIComponent(jobId)}` : ""}`),
+  createStoryOpportunities: (jobId: string, expectedJobRevision: number) => request<StoryOpportunity[]>(`/research/jobs/${jobId}/opportunities`, { method: "POST", body: JSON.stringify({ expectedJobRevision }) }),
+  decideStoryOpportunity: (opportunityId: string, action: "accept" | "reject", expectedRevision: number) => request<StoryOpportunity>(`/story-opportunities/${opportunityId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  ideationSessions: (projectId: string) => request<IdeationSession[]>(`/projects/${projectId}/ideation/sessions`),
+  createIdeationSession: (projectId: string, opportunityId: string, expectedOpportunityRevision: number) => request<IdeationSession>(`/projects/${projectId}/ideation/sessions`, { method: "POST", body: JSON.stringify({ opportunityId, expectedOpportunityRevision }) }),
+  addIdeationMessage: (sessionId: string, expectedSessionRevision: number, content: string) => request<IdeationMessage>(`/ideation/sessions/${sessionId}/messages`, { method: "POST", body: JSON.stringify({ expectedSessionRevision, content }) }),
+  incubationStoryBriefProposals: (projectId: string, sessionId?: string) => request<IncubationStoryBriefProposal[]>(`/projects/${projectId}/story-brief/proposals${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`),
+  createIncubationStoryBriefProposal: (sessionId: string, expectedSessionRevision: number) => request<IncubationStoryBriefProposal>(`/ideation/sessions/${sessionId}/story-brief-proposals`, { method: "POST", body: JSON.stringify({ expectedSessionRevision }) }),
+  decideIncubationStoryBriefProposal: (proposalId: string, action: "apply" | "reject", expectedRevision: number) => request<IncubationStoryBriefProposal>(`/story-brief-proposals/${proposalId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  incubationStoryBriefVersions: (projectId: string) => request<IncubationStoryBriefVersion[]>(`/projects/${projectId}/story-brief/versions`),
+  createIncubationCanonProposal: (projectId: string, expectedStoryBriefRevision: number, instructions = "") => request<CanonGenerationProposal>(`/projects/${projectId}/incubation/canon-proposals`, { method: "POST", body: JSON.stringify({ expectedStoryBriefRevision, instructions }) }),
+  openingExperiments: (projectId: string) => request<OpeningExperiment[]>(`/projects/${projectId}/opening-experiments`),
+  createOpeningExperiment: (projectId: string, expectedStoryBriefRevision: number, expectedCanonRevision: number) => request<OpeningExperiment>(`/projects/${projectId}/opening-experiments`, { method: "POST", body: JSON.stringify({ expectedStoryBriefRevision, expectedCanonRevision }) }),
+  decideOpeningCandidate: (candidateId: string, action: "select" | "reject", expectedRevision: number, expectedExperimentRevision: number) => request<OpeningCandidate>(`/opening-candidates/${candidateId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision, expectedExperimentRevision }) }),
+  expandOpeningExperiment: (experimentId: string, selectedCandidateId: string, expectedRevision: number, expectedCandidateRevision: number) => request<OpeningExperiment>(`/opening-experiments/${experimentId}/expand-to-three-chapters`, { method: "POST", body: JSON.stringify({ expectedRevision, selectedCandidateId, expectedCandidateRevision }) }),
+  approveOpeningChapter: (candidateId: string, chapterNumber: number, expectedRevision: number) => request<OpeningCandidate>(`/opening-candidates/${candidateId}/chapters/approve`, { method: "POST", body: JSON.stringify({ expectedRevision, chapterNumber }) }),
+  incubationReadiness: (projectId: string) => request<IncubationReadiness>(`/projects/${projectId}/incubation-readiness`),
   cancelModelRun: (projectId: string, runId: string) => request<ModelRun>(`/projects/${projectId}/model-runs/${runId}/cancel`, { method: "POST" }),
   modelProviders: () => request<ModelProvider[]>("/model-providers"),
   createModelProvider: (payload: {

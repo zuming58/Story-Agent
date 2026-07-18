@@ -1692,6 +1692,7 @@ class ResearchJobCreate(ApiModel):
     idempotency_key: str | None = Field(default=None, max_length=120)
     search_provider: Literal["tavily", "deterministic"] = "tavily"
     search_secret_ref: str | None = Field(default=None, max_length=240)
+    search_api_key: str | None = Field(default=None, min_length=1, max_length=2000, exclude=True, repr=False)
     # Direct application-side fetching is intentionally not offered here.  A
     # hostname can pass an initial public-DNS validation and subsequently be
     # rebound to a private address by the time an HTTP client connects.  Use a
@@ -1699,6 +1700,7 @@ class ResearchJobCreate(ApiModel):
     # until a pinned-address transport exists.
     fetch_provider: Literal["firecrawl", "deterministic"] = "firecrawl"
     fetch_secret_ref: str | None = Field(default=None, max_length=240)
+    fetch_api_key: str | None = Field(default=None, min_length=1, max_length=2000, exclude=True, repr=False)
     limits: ResearchLimits = Field(default_factory=ResearchLimits)
     run_immediately: bool = True
 

@@ -915,3 +915,36 @@ uncertainty and no-imitation constraints. Keep provider calls outside SQLite
 write transactions and retain the current proposal/approval gates.
 
 ---
+# 2026-07-18 Phase 14 handoff: model-backed story incubator
+
+Current branch: `agent/model-backed-story-incubator`
+
+Base commit: `081a01a` (`agent/general-story-incubator-foundation`, Phase 13
+GPT-5.6 audit fixes).
+
+Status: **Phase 14 backend plan is ready for the other computer. No Phase 14
+implementation has started on this branch.**
+
+Authoritative plan:
+`docs/plans/PHASE-14-MODEL-BACKED-STORY-INCUBATOR.md`
+
+Copy/paste prompt for the other Codex:
+`docs/plans/PHASE-14-OTHER-CODEX-PROMPT.md`
+
+Scope split:
+
+- The other computer implements only the model-backed backend and tests.
+- The current computer owns all Phase 14 UI, CSS, design tokens, page components
+  and visual snapshots after the backend returns for audit.
+- The other computer must not use real provider credentials or touch `.data`
+  and must not continue the Night Watch manuscript.
+- GitHub is the code authority. Do not work on this branch simultaneously from
+  both computers.
+
+The next audit must treat deterministic Phase 13 prose and scores as scaffolding,
+not as a fallback. A model failure must remain a visible failure. The opening
+human gate added in `081a01a` must remain intact: selection alone is insufficient;
+all three experimental chapters require explicit approval before StyleBaseline
+creation and incubation Canon locking.
+
+---

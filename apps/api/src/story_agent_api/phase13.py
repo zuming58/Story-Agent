@@ -1344,6 +1344,13 @@ class Phase13Service:
     def readiness(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
         required_roles = {"research_planner", "research_analyst", "story_incubator", "reader_simulator", "opening_editor"}
+        role_labels = {
+            "research_planner": "市场调研规划",
+            "research_analyst": "研究证据分析",
+            "story_incubator": "故事创意孵化",
+            "reader_simulator": "目标读者模拟",
+            "opening_editor": "开篇编辑评审",
+        }
         missing_roles: list[str] = []
         unavailable_roles: list[str] = []
         untested_providers: set[str] = set()
@@ -1365,13 +1372,13 @@ class Phase13Service:
                 elif provider.last_test_status != "success":
                     untested_providers.add(provider.name)
         if missing_roles:
-            model_check = {"code": "INCUBATION_MODEL_ROLE_MISSING", "status": "blocked", "detail": "Bind the required incubation roles: " + ", ".join(missing_roles), "actionPath": "/settings"}
+            model_check = {"code": "INCUBATION_MODEL_ROLE_MISSING", "status": "blocked", "detail": "请先绑定孵化所需模型角色：" + "、".join(role_labels[role] for role in missing_roles), "actionPath": "/settings"}
         elif unavailable_roles:
-            model_check = {"code": "INCUBATION_MODEL_UNAVAILABLE", "status": "blocked", "detail": "Enable models, providers, and credentials for: " + ", ".join(unavailable_roles), "actionPath": "/settings"}
+            model_check = {"code": "INCUBATION_MODEL_UNAVAILABLE", "status": "blocked", "detail": "请启用模型、Provider 和密钥：" + "、".join(role_labels[role] for role in unavailable_roles), "actionPath": "/settings"}
         elif untested_providers:
-            model_check = {"code": "INCUBATION_PROVIDER_NOT_TESTED", "status": "blocked", "detail": "Test provider connections first: " + ", ".join(sorted(untested_providers)), "actionPath": "/settings"}
+            model_check = {"code": "INCUBATION_PROVIDER_NOT_TESTED", "status": "blocked", "detail": "请先完成 Provider 连接测试：" + "、".join(sorted(untested_providers)), "actionPath": "/settings"}
         else:
-            model_check = {"code": "INCUBATION_MODELS_READY", "status": "ready", "detail": "All five incubation model roles are available and connection-tested.", "actionPath": "/settings"}
+            model_check = {"code": "INCUBATION_MODELS_READY", "status": "ready", "detail": "五个孵化模型角色均已可用，并且通过连接测试。", "actionPath": "/settings"}
         with self.service.db.project(project.id, project.folder_path) as session:
             brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
             baseline = session.scalar(select(StyleBaseline).where(StyleBaseline.project_id == project.id, StyleBaseline.is_current.is_(True)))
@@ -1379,11 +1386,11 @@ class Phase13Service:
             doc = session.get(CanonDocument, "story-core")
             checks = [
                 model_check,
-                {"code": "STORY_BRIEF_ACCEPTED", "status": "ready" if brief else "blocked", "detail": "Accepted StoryBrief exists." if brief else "Accept a StoryBrief proposal first."},
-                {"code": "CANON_DRAFT", "status": "ready" if doc and doc.status == "draft" and bool(doc.content_markdown.strip()) else "blocked", "detail": "Draft Canon exists." if doc and doc.status == "draft" else "Create and apply a Canon draft first."},
-                {"code": "OPENING_SELECTED", "status": "ready" if selected else "blocked", "detail": "A human selected an opening candidate." if selected else "Select an opening candidate explicitly."},
-                {"code": "STYLE_BASELINE", "status": "ready" if baseline else "blocked", "detail": "Three manually approved experimental chapters established the style baseline." if baseline else "Expand the selected candidate and approve all three experimental chapters."},
-                {"code": "FIRST_THREE_MANUAL_ONLY", "status": "warning", "detail": "The first three production chapters require later manual approval; automation is not opened by incubation."},
+                {"code": "STORY_BRIEF_ACCEPTED", "status": "ready" if brief else "blocked", "detail": "StoryBrief 已由你确认。" if brief else "请先确认一个 StoryBrief 提案。"},
+                {"code": "CANON_DRAFT", "status": "ready" if doc and doc.status == "draft" and bool(doc.content_markdown.strip()) else "blocked", "detail": "Canon 草稿已经建立。" if doc and doc.status == "draft" else "请先生成并应用 Canon 候选。"},
+                {"code": "OPENING_SELECTED", "status": "ready" if selected else "blocked", "detail": "开篇方向已由你选择。" if selected else "请从三个开篇候选中明确选择一个方向。"},
+                {"code": "STYLE_BASELINE", "status": "ready" if baseline else "blocked", "detail": "三章人工批准的实验稿已建立文风基线。" if baseline else "请扩写选中的开篇，并人工批准全部三章实验稿。"},
+                {"code": "FIRST_THREE_MANUAL_ONLY", "status": "warning", "detail": "正式作品的前三章仍需人工批准；创意孵化不会自动开启托管。"},
             ]
             ready = all(item["status"] == "ready" for item in checks if item["status"] != "warning")
             return {"projectId": project.id, "ready": ready, "stage": "ready_for_manual_handoff" if ready else "incubating", "checks": checks, "currentStoryBriefId": brief.id if brief else None, "selectedOpeningCandidateId": selected.id if selected else None, "styleBaselineId": baseline.id if baseline else None, "updatedAt": _now()}

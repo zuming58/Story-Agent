@@ -143,7 +143,7 @@ test("story incubator restores its six-stage discovery workspace", async ({ page
   await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
   await expect(page.getByRole("button", { name: /检查方向/ })).toBeVisible();
 
-  await page.getByRole("button", { name: /市场调研/ }).click();
+  await page.getByTestId("incubator-stage-2").click();
   await expect(page.getByText("市场证据工作台")).toBeVisible();
   await expect(page.getByLabel("Tavily API Key")).toHaveAttribute("type", "password");
   await expect(page.getByLabel("Firecrawl API Key")).toHaveAttribute("type", "password");

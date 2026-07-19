@@ -14,6 +14,24 @@ const stages = [
   ["人机共创", "讨论到你真正认可"], ["StoryBrief", "冻结创作承诺"], ["Canon 与开篇", "三种开头先试后定"],
 ] as const;
 
+const readinessLabels: Record<string, string> = {
+  INCUBATION_MODEL_ROLE_MISSING: "模型角色未配置",
+  INCUBATION_MODEL_UNAVAILABLE: "模型或密钥不可用",
+  INCUBATION_PROVIDER_NOT_TESTED: "Provider 尚未测试",
+  INCUBATION_MODELS_READY: "孵化模型已就绪",
+  STORY_BRIEF_ACCEPTED: "StoryBrief 尚未确认",
+  CANON_DRAFT: "Canon 草稿尚未建立",
+  OPENING_SELECTED: "开篇方向尚未选择",
+  STYLE_BASELINE: "文风基线尚未建立",
+  FIRST_THREE_MANUAL_ONLY: "前三章需人工批准",
+};
+
+const readinessStageLabels: Record<string, string> = {
+  research_brief: "等待填写研究目标",
+  incubating: "正在完成创意孵化",
+  ready_for_manual_handoff: "可以进入人工确认",
+};
+
 function lines(value: string) { return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean); }
 function errorText(error: unknown) {
   if (error instanceof ApiClientError) return `${error.payload.code}：${error.payload.message}`;
@@ -148,11 +166,11 @@ export function StoryIncubatorPage() {
 
   if (!project) return <div className="connection-state"><strong>请先选择作品</strong></div>;
   return <div className="incubator-page">
-    <header className="incubator-heading"><div><span className="workbench-kicker"><Compass /> STORY DISCOVERY LAB</span><h1>故事创意孵化室</h1><p>先找到值得写的故事，再把它固化为可执行的 Canon。研究证据、你的决定与模型建议始终分开。</p></div><div className={`incubator-readiness ${readinessQuery.data?.ready ? "is-ready" : ""}`}><ShieldCheck /><div><strong>{readinessQuery.data?.ready ? "可以锁定 Canon" : "孵化尚未完成"}</strong><span>{readinessQuery.data?.stage ?? "research_brief"}</span></div></div></header>
+    <header className="incubator-heading"><div><span className="workbench-kicker"><Compass /> STORY DISCOVERY LAB</span><h1>故事创意孵化室</h1><p>先找到值得写的故事，再把它固化为可执行的 Canon。研究证据、你的决定与模型建议始终分开。</p></div><div className={`incubator-readiness ${readinessQuery.data?.ready ? "is-ready" : ""}`}><ShieldCheck /><div><strong>{readinessQuery.data?.ready ? "可以锁定 Canon" : "孵化尚未完成"}</strong><span>{readinessStageLabels[readinessQuery.data?.stage ?? "research_brief"] ?? "正在检查孵化状态"}</span></div></div></header>
 
-    <nav className="incubator-rail" aria-label="创意孵化步骤">{stages.map(([label, detail], index) => <button key={label} className={`${stage === index ? "is-active" : ""}${completed[index] ? " is-done" : ""}`} onClick={() => setStage(index)}><i>{completed[index] ? <Check /> : index + 1}</i><span><strong>{label}</strong><small>{detail}</small></span><ArrowRight /></button>)}</nav>
+    <nav className="incubator-rail" aria-label="创意孵化步骤">{stages.map(([label, detail], index) => <button key={label} data-testid={`incubator-stage-${index + 1}`} className={`${stage === index ? "is-active" : ""}${completed[index] ? " is-done" : ""}`} onClick={() => setStage(index)}><i>{completed[index] ? <Check /> : index + 1}</i><span><strong>{label}</strong><small>{detail}</small></span><ArrowRight /></button>)}</nav>
     {error && <div className="incubator-error"><WarningCircle /><span>{error}</span><button onClick={() => setError(null)}><X /></button></div>}
-    {readinessQuery.data?.checks.some((item) => item.status === "blocked") && <div className="incubator-check-strip" aria-label="孵化阻断项">{readinessQuery.data.checks.filter((item) => item.status === "blocked").slice(0, 3).map((item) => <button key={item.code} onClick={() => item.actionPath && navigate(item.actionPath)} disabled={!item.actionPath}><WarningCircle /><span><strong>{item.code}</strong><small>{item.detail}</small></span>{item.actionPath && <ArrowRight />}</button>)}</div>}
+    {readinessQuery.data?.checks.some((item) => item.status === "blocked") && <div className="incubator-check-strip" aria-label="孵化阻断项">{readinessQuery.data.checks.filter((item) => item.status === "blocked").slice(0, 3).map((item) => <button key={item.code} onClick={() => item.actionPath && navigate(item.actionPath)} disabled={!item.actionPath}><WarningCircle /><span><strong>{readinessLabels[item.code] ?? "尚未完成"}</strong><small>{item.detail}</small></span>{item.actionPath && <ArrowRight />}</button>)}</div>}
 
     <section className="incubator-workspace">
       {stage === 0 && <div className="incubator-panel brief-lab"><header><div><Lightbulb /><span><strong>创作与调研目标</strong><small>这里不是 Canon，只是决定要研究什么</small></span></div><em>{currentBrief ? `V${currentBrief.versionNumber}` : "DRAFT"}</em></header><div className="incubator-form-grid">

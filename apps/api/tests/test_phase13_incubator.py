@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -203,6 +204,41 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
     roles = {item["role"] for item in runs}
     assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:story-brief", "story_incubator:canon", "research_analyst:canon-analyzer", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
+
+
+def test_query_plan_repairs_valid_json_with_missing_queries(client, monkeypatch):
+    phase13 = client.app.state.story_service.phase13
+    calls = []
+    perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
+    outputs = [
+        {"analysis": "The plan should cover six perspectives."},
+        {"queries": [{"perspective": item, "query": f"public query for {item}"} for item in perspectives]},
+    ]
+
+    def fake_complete(*args, **kwargs):
+        calls.append({"runRole": args[2], "payload": args[5]})
+        return outputs.pop(0), f"run-{len(calls)}"
+
+    monkeypatch.setattr(phase13, "_complete_model_json", fake_complete)
+    planned = phase13._model_queries(SimpleNamespace(id="project-test"), {"genre": "mixed genre"}, "request-test", "job-test")
+
+    assert [perspective for perspective, _ in planned] == perspectives
+    assert [item["runRole"] for item in calls] == ["research_planner:query-plan", "research_planner:query-plan:schema-repair"]
+    assert calls[1]["payload"]["validationError"] == "RESEARCH_QUERY_PLAN_INVALID"
+
+
+def test_query_plan_still_fails_when_schema_repair_is_incomplete(client, monkeypatch):
+    phase13 = client.app.state.story_service.phase13
+    outputs = [
+        {"queries": []},
+        {"queries": [{"perspective": "platform_trends", "query": "one query only"}]},
+    ]
+
+    monkeypatch.setattr(phase13, "_complete_model_json", lambda *args, **kwargs: (outputs.pop(0), "run-test"))
+    with pytest.raises(StoryError) as error:
+        phase13._model_queries(SimpleNamespace(id="project-test"), {"genre": "mixed genre"}, "request-test", "job-test")
+
+    assert error.value.code == "RESEARCH_QUERY_PLAN_INCOMPLETE"
 
 
 def test_phase14_deterministic_canon_and_opening_gates(client):

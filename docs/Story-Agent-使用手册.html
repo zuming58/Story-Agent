@@ -233,19 +233,21 @@
       <div class="shot-wrap"><img src="assets/user-guide/03-incubator.png" alt="创意孵化截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span><span class="pin p5">5</span></div>
       <div class="callouts">
         <div class="callout"><b>1</b><div><strong>六阶段进度条</strong><p>研究目标 → 市场调研 → 故事机会 → 人机共创 → StoryBrief → Canon 与开篇。</p></div></div>
-        <div class="callout"><b>2</b><div><strong>研究目标表单</strong><p>填写题材、平台、读者、情绪承诺、商业目标、参考作品和禁写内容。</p></div></div>
-        <div class="callout"><b>3</b><div><strong>真实市场调研</strong><p>Tavily 用于搜索，Firecrawl 用于读取页面，DeepSeek 负责归纳；密钥保存在 Windows 凭据管理器。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>研究目标表单</strong><p>题材方向可自由组合填写；新研究目标自动继承作品计划章节。还可限定或排除研究域名。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>真实市场调研</strong><p>Tavily 发现公开页面，Firecrawl 提取可访问正文，DeepSeek 负责归纳；密钥保存在 Windows 凭据管理器。</p></div></div>
         <div class="callout"><b>4</b><div><strong>右侧故事 Agent</strong><p>在共创阶段与它讨论取舍。你的决定、模型建议和研究证据会分开保存。</p></div></div>
         <div class="callout"><b>5</b><div><strong>孵化就绪状态</strong><p>只有研究、方向、讨论、StoryBrief、Canon 和开篇都满足条件，才会显示可以向下游推进。</p></div></div>
       </div>
       <table><thead><tr><th>阶段</th><th>你要做什么</th><th>完成标志</th></tr></thead><tbody>
-        <tr><td><strong>1. 研究目标</strong></td><td>说清写给谁看、想让读者获得什么感受，以及哪些内容不能写。</td><td>点击“保存并进入调研”。修改目标会让旧研究失效，这是正常保护。</td></tr>
-        <tr><td><strong>2. 市场调研</strong></td><td>首次填写搜索/抓取密钥，点击“开始真实调研”；失败可恢复，运行中可取消。</td><td>阅读报告后点“接受研究报告”；拒绝不会进入故事方向。</td></tr>
+        <tr><td><strong>1. 研究目标</strong></td><td>说清写给谁看、想让读者获得什么感受，以及哪些内容不能写。题材可写成“古代悬疑探案 + 女性成长 + 言情”。</td><td>新目标继承作品计划章节；旧目标与作品不一致时，点“同步”后保存新版本。</td></tr>
+        <tr><td><strong>2. 市场调研</strong></td><td>首次填写 Tavily 搜索和 Firecrawl 提取密钥，点击“开始真实调研”；失败可恢复，运行中可取消。</td><td>只处理公开可访问网页；登录、付费墙或反爬内容不保证可读。阅读后人工接受或拒绝报告。</td></tr>
         <tr><td><strong>3. 故事机会</strong></td><td>生成 3—5 个方向，比较核心卖点、人物欲望、冲突和连载发动机。</td><td>排除不喜欢的，点击“选这个方向”。</td></tr>
         <tr><td><strong>4. 人机共创</strong></td><td>至少进行两轮真实讨论，明确想要和不要什么。</td><td>决策台账中能区分“已确认 / 待确认 / 已否决”。</td></tr>
         <tr><td><strong>5. StoryBrief</strong></td><td>生成提案并审阅。它是后续 Canon 的上游合同。</td><td>点击“确认成为当前 StoryBrief”；不满意就拒绝后继续讨论。</td></tr>
         <tr><td><strong>6. Canon 与开篇</strong></td><td>生成 Canon 候选，通过 Analyzer 后应用到草稿；再生成三个不同策略的开头。</td><td>选一个开篇，扩写第 2—3 章，并逐章人工批准。</td></tr>
       </tbody></table>
+      <div class="notice"><strong>网站范围：</strong>“限定研究网站/域名”留空时广搜公开网页；填写后只允许这些域名。“排除网站/域名”用于过滤不希望进入证据链的来源。知乎、小红书、晋江、起点等网站只能研究其公开且 Provider 可访问的页面。</div>
+      <div class="notice"><strong>OpenCLI / OpenClaw：</strong>当前版本尚未把本机浏览器会话接成 Story Agent 的研究 Provider。电脑已安装并不代表“开始真实调研”会自动调用它；当前按钮只走 Tavily + Firecrawl + 已绑定的研究模型。</div>
       <div class="notice red"><strong>不要跳过这一页：</strong>如果故事本身没有吸引力，后面的连续性和自动写作做得再稳定也没有意义。孵化没有完成时，不建议直接开启自动托管。</div>
     </section>
 

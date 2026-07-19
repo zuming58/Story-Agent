@@ -3,7 +3,7 @@ import {
   ArrowRight, Books, Brain, Check, CheckCircle, CircleNotch, Compass, Flask,
   Lightbulb, LockKey, MagnifyingGlass, PaperPlaneTilt, ShieldCheck, Sparkle, WarningCircle, X,
 } from "@phosphor-icons/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiClientError } from "../api/client";
 import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
@@ -32,7 +32,23 @@ const readinessStageLabels: Record<string, string> = {
   ready_for_manual_handoff: "可以进入人工确认",
 };
 
+const researchErrorMessages: Record<string, string> = {
+  RESEARCH_QUERY_PLAN_INVALID: "研究模型没有按要求返回查询列表。系统已增加结构修复，更新后请点击“恢复任务”重试。",
+  RESEARCH_QUERY_PLAN_INCOMPLETE: "研究模型返回的六类查询不完整。系统会先尝试结构修复，仍不完整时才停止。",
+  SEARCH_API_KEY_MISSING: "Tavily 密钥尚未配置，请更新凭据后恢复任务。",
+  FETCH_API_KEY_MISSING: "Firecrawl 密钥尚未配置，请更新凭据后恢复任务。",
+};
+
 function lines(value: string) { return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean); }
+function createBriefForm(targetChapters = "") {
+  return {
+    format: "long-form" as "long-form" | "short-form", platform: "番茄小说", genre: "",
+    audience: "喜欢强钩子、具体人物欲望和持续悬念的成年读者", targetChapters,
+    emotionalValue: "紧张\n好奇\n情绪释放", includedDomains: "", excludedDomains: "",
+    referenceWorks: "", forbiddenContent: "不模仿具体作者原文\n不以堆设定代替剧情", commercialGoals: "前三章留存\n稳定追读",
+    notes: "先研究读者为什么继续读、为什么弃书，再讨论故事。",
+  };
+}
 function errorText(error: unknown) {
   if (error instanceof ApiClientError) return `${error.payload.code}：${error.payload.message}`;
   return error instanceof Error ? error.message : "操作失败";
@@ -49,13 +65,8 @@ export function StoryIncubatorPage() {
   const [error, setError] = useState<string | null>(null);
   const [researchKeys, setResearchKeys] = useState({ tavily: "", firecrawl: "" });
   const [message, setMessage] = useState("");
-  const [briefForm, setBriefForm] = useState({
-    format: "long-form" as "long-form" | "short-form", platform: "番茄小说", genre: "现代中式悬疑",
-    audience: "喜欢强钩子、具体人物欲望和持续悬念的成年读者", targetChapters: "120",
-    emotionalValue: "紧张\n好奇\n情绪释放", includedDomains: "", excludedDomains: "",
-    referenceWorks: "", forbiddenContent: "不模仿具体作者原文\n不以堆设定代替剧情", commercialGoals: "前三章留存\n稳定追读",
-    notes: "先研究读者为什么继续读、为什么弃书，再讨论故事。",
-  });
+  const [briefForm, setBriefForm] = useState(() => createBriefForm());
+  const initializedDraftProjectId = useRef<string | null>(null);
 
   const enabled = Boolean(project);
   const briefsQuery = useQuery({ queryKey: ["incubator-briefs", project?.id], queryFn: () => api.researchBriefs(project!.id), enabled });
@@ -92,22 +103,42 @@ export function StoryIncubatorPage() {
   ], [currentBrief, currentJob?.status, acceptedOpportunity, activeSession?.messages.length, currentStoryBrief, readinessQuery.data?.ready]);
 
   useEffect(() => {
-    if (!currentBrief) return;
+    if (!project || !briefsQuery.isSuccess) return;
+    if (currentBrief) {
+      initializedDraftProjectId.current = project.id;
+      setBriefForm({
+        format: currentBrief.format,
+        platform: currentBrief.platform,
+        genre: currentBrief.genre,
+        audience: currentBrief.audience,
+        targetChapters: String(currentBrief.format === "long-form" ? (currentBrief.targetChapters ?? "") : (currentBrief.targetWords ?? "")),
+        emotionalValue: currentBrief.emotionalValue.join("\n"),
+        includedDomains: currentBrief.includedDomains.join("\n"),
+        excludedDomains: currentBrief.excludedDomains.join("\n"),
+        referenceWorks: currentBrief.referenceWorks.join("\n"),
+        forbiddenContent: currentBrief.forbiddenContent.join("\n"),
+        commercialGoals: currentBrief.commercialGoals.join("\n"),
+        notes: currentBrief.notes,
+      });
+      return;
+    }
+    if (initializedDraftProjectId.current === project.id) return;
+    initializedDraftProjectId.current = project.id;
+    const isShortForm = project.mode === "short-form";
     setBriefForm({
-      format: currentBrief.format,
-      platform: currentBrief.platform,
-      genre: currentBrief.genre,
-      audience: currentBrief.audience,
-      targetChapters: String(currentBrief.format === "long-form" ? (currentBrief.targetChapters ?? 120) : (currentBrief.targetWords ?? 8000)),
-      emotionalValue: currentBrief.emotionalValue.join("\n"),
-      includedDomains: currentBrief.includedDomains.join("\n"),
-      excludedDomains: currentBrief.excludedDomains.join("\n"),
-      referenceWorks: currentBrief.referenceWorks.join("\n"),
-      forbiddenContent: currentBrief.forbiddenContent.join("\n"),
-      commercialGoals: currentBrief.commercialGoals.join("\n"),
-      notes: currentBrief.notes,
+      ...createBriefForm(isShortForm ? "8000" : String(project.totalChapters)),
+      format: isShortForm ? "short-form" : "long-form",
     });
-  }, [currentBrief?.id, currentBrief?.revision]);
+  }, [briefsQuery.isSuccess, currentBrief, project]);
+
+  const savedChapterMismatch = Boolean(
+    project && currentBrief?.format === "long-form" && currentBrief.targetChapters !== project.totalChapters,
+  );
+  const formMatchesProjectChapters = Boolean(project && Number(briefForm.targetChapters) === project.totalChapters);
+  const targetAmount = Number(briefForm.targetChapters);
+  const targetAmountValid = Number.isInteger(targetAmount) && (
+    briefForm.format === "long-form" ? targetAmount >= 1 && targetAmount <= 5000 : targetAmount >= 1000 && targetAmount <= 20_000_000
+  );
 
   useEffect(() => {
     setAgentContext(["创意孵化", stages[stage][0], project?.title ?? "当前作品"]);
@@ -176,19 +207,21 @@ export function StoryIncubatorPage() {
       {stage === 0 && <div className="incubator-panel brief-lab"><header><div><Lightbulb /><span><strong>创作与调研目标</strong><small>这里不是 Canon，只是决定要研究什么</small></span></div><em>{currentBrief ? `V${currentBrief.versionNumber}` : "DRAFT"}</em></header><div className="incubator-form-grid">
         <label><span>作品形态</span><select value={briefForm.format} onChange={(e) => setBriefForm({ ...briefForm, format: e.target.value as "long-form" | "short-form" })}><option value="long-form">长篇网文</option><option value="short-form">短篇小说</option></select></label>
         <label><span>目标平台</span><input value={briefForm.platform} onChange={(e) => setBriefForm({ ...briefForm, platform: e.target.value })} /></label>
-        <label><span>题材方向</span><input value={briefForm.genre} onChange={(e) => setBriefForm({ ...briefForm, genre: e.target.value })} /></label>
-        <label><span>{briefForm.format === "long-form" ? "计划章节数" : "目标总字数"}</span><input type="number" value={briefForm.targetChapters} onChange={(e) => setBriefForm({ ...briefForm, targetChapters: e.target.value })} /></label>
+        <label><span>题材方向（可混合填写）</span><input value={briefForm.genre} onChange={(e) => setBriefForm({ ...briefForm, genre: e.target.value })} placeholder="例如：古代悬疑探案 + 女性成长 + 言情" /></label>
+        <div className="incubator-field-stack"><label><span>{briefForm.format === "long-form" ? "计划章节数" : "目标总字数"}</span><input type="number" value={briefForm.targetChapters} onChange={(e) => setBriefForm({ ...briefForm, targetChapters: e.target.value })} /></label>{savedChapterMismatch && <div className="chapter-sync-note"><span>作品计划为 {project.totalChapters} 章</span>{formMatchesProjectChapters ? <small>保存后生成新的研究目标版本</small> : <button type="button" onClick={() => setBriefForm({ ...briefForm, targetChapters: String(project.totalChapters) })}>同步</button>}</div>}</div>
         <label className="wide"><span>目标读者</span><textarea value={briefForm.audience} onChange={(e) => setBriefForm({ ...briefForm, audience: e.target.value })} /></label>
         <label><span>希望提供的情绪价值（每行一个）</span><textarea value={briefForm.emotionalValue} onChange={(e) => setBriefForm({ ...briefForm, emotionalValue: e.target.value })} /></label>
         <label><span>商业目标（每行一个）</span><textarea value={briefForm.commercialGoals} onChange={(e) => setBriefForm({ ...briefForm, commercialGoals: e.target.value })} /></label>
+        <label><span>限定研究网站/域名（每行一个，可选）</span><textarea value={briefForm.includedDomains} onChange={(e) => setBriefForm({ ...briefForm, includedDomains: e.target.value })} placeholder={"留空则广搜公开网页；例如：zhihu.com\nxiaohongshu.com"} /></label>
+        <label><span>排除网站/域名（每行一个，可选）</span><textarea value={briefForm.excludedDomains} onChange={(e) => setBriefForm({ ...briefForm, excludedDomains: e.target.value })} placeholder="不希望进入证据范围的网站" /></label>
         <label><span>参考作品（只研究抽象机制）</span><textarea value={briefForm.referenceWorks} onChange={(e) => setBriefForm({ ...briefForm, referenceWorks: e.target.value })} /></label>
         <label><span>明确禁写内容</span><textarea value={briefForm.forbiddenContent} onChange={(e) => setBriefForm({ ...briefForm, forbiddenContent: e.target.value })} /></label>
         <label className="wide"><span>补充说明</span><textarea value={briefForm.notes} onChange={(e) => setBriefForm({ ...briefForm, notes: e.target.value })} /></label>
-      </div><footer><span>保存后仍可继续修改；新版本会使旧研究任务失效，避免混用结论。</span><button className="gold-action" disabled={mutation.isPending || !briefForm.genre || !briefForm.audience} onClick={saveBrief}><Check />保存并进入调研</button></footer></div>}
+      </div><footer><span>保存后仍可继续修改；新版本会使旧研究任务失效，避免混用结论。</span><button className="gold-action" disabled={mutation.isPending || !briefForm.genre.trim() || !briefForm.audience.trim() || !targetAmountValid} onClick={saveBrief}><Check />保存并进入调研</button></footer></div>}
 
-      {stage === 1 && <div className="research-layout"><main className="incubator-panel research-console"><header><div><MagnifyingGlass /><span><strong>市场证据工作台</strong><small>搜索与正文提取由专用 Provider 完成，DeepSeek 负责分析</small></span></div><em>{currentJob?.status ?? "NOT STARTED"}</em></header>{!currentJob ? <div className="provider-key-grid"><label><span>Tavily API Key</span><input type="password" value={researchKeys.tavily} onChange={(e) => setResearchKeys({ ...researchKeys, tavily: e.target.value })} placeholder="首次使用需要，保存到 Windows 凭据管理器" /></label><label><span>Firecrawl API Key</span><input type="password" value={researchKeys.firecrawl} onChange={(e) => setResearchKeys({ ...researchKeys, firecrawl: e.target.value })} placeholder="首次使用需要，页面和 API 都不会回显" /></label><button className="gold-action" onClick={startResearch} disabled={!currentBrief || mutation.isPending}>{mutation.isPending ? <CircleNotch className="spin" /> : <MagnifyingGlass />}开始真实调研</button></div> : <>
+      {stage === 1 && <div className="research-layout"><main className="incubator-panel research-console"><header><div><MagnifyingGlass /><span><strong>市场证据工作台</strong><small>Tavily 发现公开页面 · Firecrawl 提取可访问正文 · DeepSeek 归纳证据</small></span></div><em>{currentJob?.status ?? "NOT STARTED"}</em></header><div className="research-scope-note"><ShieldCheck /><span>仅研究公开网页；登录、付费墙或反爬页面可能无法读取。留空则广搜，填写限定域名后只研究这些网站。</span></div>{!currentJob ? <div className="provider-key-grid"><label><span>Tavily API Key</span><input type="password" value={researchKeys.tavily} onChange={(e) => setResearchKeys({ ...researchKeys, tavily: e.target.value })} placeholder="首次使用需要，保存到 Windows 凭据管理器" /></label><label><span>Firecrawl API Key</span><input type="password" value={researchKeys.firecrawl} onChange={(e) => setResearchKeys({ ...researchKeys, firecrawl: e.target.value })} placeholder="首次使用需要，页面和 API 都不会回显" /></label><button className="gold-action" onClick={startResearch} disabled={!currentBrief || mutation.isPending}>{mutation.isPending ? <CircleNotch className="spin" /> : <MagnifyingGlass />}开始真实调研</button></div> : <>
         {researchNeedsRecovery && <div className="provider-key-grid provider-key-recovery"><label><span>更新 Tavily API Key（可选）</span><input type="password" value={researchKeys.tavily} onChange={(e) => setResearchKeys({ ...researchKeys, tavily: e.target.value })} placeholder="留空则继续使用凭据管理器中的值" /></label><label><span>更新 Firecrawl API Key（可选）</span><input type="password" value={researchKeys.firecrawl} onChange={(e) => setResearchKeys({ ...researchKeys, firecrawl: e.target.value })} placeholder="完整密钥不会回显" /></label><button onClick={startResearch} disabled={mutation.isPending || (!researchKeys.tavily && !researchKeys.firecrawl)}>更新凭据</button></div>}
-        {currentJob.errorCode && <div className="research-job-error"><WarningCircle /><div><strong>{currentJob.errorCode}</strong><span>{currentJob.errorMessage ?? "研究任务需要处理后才能恢复。"}</span></div></div>}
+        {currentJob.errorCode && <div className="research-job-error"><WarningCircle /><div><strong>{currentJob.errorCode}</strong><span>{researchErrorMessages[currentJob.errorCode] ?? currentJob.errorMessage ?? "研究任务需要处理后才能恢复。"}</span></div></div>}
         <div className="research-metrics"><article><span>查询</span><strong>{currentJob.queryCount}</strong></article><article><span>来源页面</span><strong>{currentJob.pageCount}</strong></article><article><span>证据片段</span><strong>{evidenceQuery.data?.length ?? 0}</strong></article><article><span>预计费用</span><strong>¥ / ${currentJob.estimatedCost.toFixed(4)}</strong></article></div>
         <div className="research-actions">{["failed", "cancelled", "insufficient_evidence"].includes(currentJob.status) && <button onClick={() => actOnJob("resume")}>恢复任务</button>}{["planning", "searching", "fetching", "analyzing"].includes(currentJob.status) && <button onClick={() => actOnJob("cancel")}>取消</button>}{currentJob.status === "awaiting_review" && <><button className="accept" onClick={() => actOnJob("accept")}><Check />接受研究报告</button><button onClick={() => actOnJob("reject")}><X />拒绝</button></>}</div>
         <div className="research-columns"><section><h3>竞品机制 <b>{competitorsQuery.data?.length ?? 0}</b></h3>{competitorsQuery.data?.slice(0, 6).map((item) => <article key={item.id}><strong>{item.name}</strong><span>{Math.round(item.confidence * 100)}% 可信度 · {item.evidenceIds.length} 条证据</span></article>)}</section><section><h3>研究发现 <b>{findingsQuery.data?.length ?? 0}</b></h3>{findingsQuery.data?.slice(0, 8).map((item) => <article key={item.id}><strong>{item.statement}</strong><span>{item.claimType} · {item.evidenceIds.length} 条引用</span></article>)}</section></div>

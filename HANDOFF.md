@@ -1,3 +1,43 @@
+# 2026-07-19 真实用户测试小修：孵化题材、章节继承与调研边界
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**题材方向和计划章节问题已修复；真实调研仍使用 Tavily + Firecrawl + 已绑定研究模型，OpenCLI/OpenClaw 尚未接入研究 Provider。**
+
+## 用户反馈与修复
+
+- 移除创意孵化研究目标中硬编码的“现代中式悬疑”；题材方向改为自由文本，明确支持“古代悬疑探案 + 女性成长 + 言情”等混合题材。
+- 新作品尚无研究 Brief 时，长篇计划章节自动继承 `project.totalChapters`，不再固定显示 120；短篇保持按目标总字数填写。
+- 已保存 Brief 与作品计划章节不一致时不静默覆盖，页面显示“作品计划为 N 章”和“同步”按钮；同步只更新表单，用户保存后仍通过现有 revision 机制创建新 Brief 版本。
+- 研究目标页显示既有 `includedDomains` / `excludedDomains` 能力。`includedDomains` 的真实语义是限定域名：留空广搜，填写后只允许这些网站；排除域名继续过滤来源。
+- 市场调研页明确职责：Tavily 发现公开页面，Firecrawl 提取可访问正文，DeepSeek/绑定研究模型归纳证据；登录、付费墙和反爬内容不保证可读。
+- 真实首次调研暴露 `RESEARCH_QUERY_PLAN_INVALID`：模型返回了合法 JSON，但缺少必需的 `queries` 数组。查询规划提示现已给出精确 JSON 结构；结构校验失败时增加一次有独立 ModelRun 的 schema repair，修复后仍严格校验六个视角，绝不回退到固定模板查询。
+- 查询规划、查询不完整和研究密钥缺失错误在页面显示中文操作提示；已有失败任务可在后端更新后直接点击“恢复任务”。
+- Playwright 的 API/Web 端口支持环境变量覆盖，真实用户服务占用 `8765/5173` 时可用隔离端口和临时数据目录完成回归，不关闭用户页面、不碰正式 `.data`。
+- 用户手册同步题材、章节、域名和 Provider 边界。
+
+## 调研能力边界
+
+- 当前“开始真实调研”只调用 Tavily 与 Firecrawl；本机安装 OpenCLI/OpenClaw 不会被按钮自动使用。
+- 当前可以研究知乎、小红书、晋江、起点等平台的公开且 Provider 可访问页面、公开榜单、书籍简介、公开评论和行业资料；不能承诺获取登录后、付费或反爬保护内容。
+- 若后续增加浏览器深读，应作为显式的本地研究 Provider 开发，并补齐会话授权、验证码停止、来源版本冻结、证据引用、revision、SSRF、跨作品隔离、审计和确定性测试，不能绕过现有研究证据链。
+
+## 测试
+
+- Web 单测：`3 files / 15 passed`，覆盖 1000 章继承、混合题材输入和旧 Brief 显式同步。
+- Build：通过，仅有既有 Vite chunk-size warning。
+- API 专项：`test_phase13_incubator.py` 为 `11 passed`，新增“合法 JSON 缺少 queries 时结构修复成功”和“修复后仍不完整时明确失败”回归；`test_projects.py + test_model_provider.py` 为 `5 passed`。
+- Playwright 全量：使用隔离端口与临时数据目录，`desktop-1440 10 passed`、`desktop-1280 10 passed`，共 `20 passed`。
+- 根 `npm run test`：API 长回归在桌面 124 秒命令上限被中止，无失败断言；继续扩大并行度会造成 Windows SQLite/文件系统争用，因此未把超时误记为通过。Web 单测与相关 API 专项均另行完整通过。
+- `git diff --check`：提交前执行；只有既有 Windows LF/CRLF 提示。
+
+## 已知限制
+
+- 用户首次真实尝试已调用研究规划模型，但在 Tavily 搜索前因查询计划结构失败，查询/来源/证据均为 0；修复后尚未由用户点击“恢复任务”验证真实服务。自动测试未调用外部服务、未消费用户额度。
+- OpenCLI/OpenClaw 混合调研是后续独立功能，不属于本次小修的已完成能力。
+
+---
+
 # 2026-07-19 真实用户测试小修：设置入口与齿轮语义收敛
 
 当前分支：`agent/model-backed-story-incubator`

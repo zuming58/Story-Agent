@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -242,11 +242,45 @@ describe("Story Agent shell", () => {
     expect(screen.getByRole("button", { name: /保存并进入调研/ })).toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /检查方向/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("计划章节数")).toHaveValue(1000));
+    const genre = screen.getByLabelText("题材方向（可混合填写）");
+    expect(genre).toHaveValue("");
+    await user.type(genre, "古代悬疑探案 + 女性成长 + 言情");
+    expect(genre).toHaveValue("古代悬疑探案 + 女性成长 + 言情");
+    expect(screen.getByLabelText("限定研究网站/域名（每行一个，可选）")).toBeInTheDocument();
+    expect(screen.getByLabelText("排除网站/域名（每行一个，可选）")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /市场调研/ }));
     expect(await screen.findByText("市场证据工作台")).toBeInTheDocument();
+    expect(screen.getByText(/仅研究公开网页/)).toBeInTheDocument();
     expect(screen.getByLabelText("Tavily API Key")).toHaveAttribute("type", "password");
     expect(screen.getByLabelText("Firecrawl API Key")).toHaveAttribute("type", "password");
+  });
+
+  it("offers an explicit revision-safe sync when a saved brief differs from the project plan", async () => {
+    const savedBrief = {
+      id: "brief-120", projectId: project.id, versionNumber: 1, format: "long-form", platform: "番茄小说",
+      genre: "古代悬疑探案", audience: "成年读者", targetChapters: 120, targetWords: null,
+      emotionalValue: ["紧张"], researchDateRange: {}, includedDomains: [], excludedDomains: [], referenceWorks: [],
+      forbiddenContent: [], commercialGoals: [], notes: "", checksum: "brief-checksum", status: "current", revision: 3,
+      createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z",
+    };
+    const defaultFetch = vi.mocked(fetch).getMockImplementation();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/research/briefs") && !init?.method) return json([savedBrief]);
+      return defaultFetch?.(input, init) ?? json({ status: "ok" });
+    });
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/incubator"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    await waitFor(() => expect(screen.getByLabelText("计划章节数")).toHaveValue(120));
+    expect(screen.getByText("作品计划为 1000 章")).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).includes("/research/briefs") && init?.method === "POST")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "同步" }));
+    expect(screen.getByLabelText("计划章节数")).toHaveValue(1000);
+    expect(screen.getByText("保存后生成新的研究目标版本")).toBeInTheDocument();
   });
 
   it("saves the Canon story core as a database-backed draft", async () => {

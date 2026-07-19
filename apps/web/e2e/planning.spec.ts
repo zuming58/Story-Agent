@@ -1,12 +1,13 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
-async function createProject(page: Page, testInfo: TestInfo, suffix: string) {
+async function createProject(page: Page, testInfo: TestInfo, suffix: string, plannedChapters = 100) {
   await page.goto("/overview");
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: "新建作品" }).click();
   const title = `E2E-${testInfo.project.name}-${suffix}-${Date.now()}`;
   await page.getByLabel("作品名称").fill(title);
+  await page.getByLabel("计划章节").fill(String(plannedChapters));
   await page.getByRole("button", { name: "创建并开始构思" }).click();
   // Project creation initializes and migrates an isolated SQLite database.
   // A cold Windows filesystem/antivirus scan can take more than 15 seconds;
@@ -184,15 +185,22 @@ test("automation desk exposes trial sizes, blockers and persisted policy", async
 });
 
 test("story incubator restores its six-stage discovery workspace", async ({ page }, testInfo) => {
-  await createProject(page, testInfo, "incubator");
+  await createProject(page, testInfo, "incubator", 1000);
   await page.getByRole("link", { name: /创意孵化/ }).click();
   await expect(page.getByRole("heading", { name: "故事创意孵化室" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "创意孵化步骤" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
   await expect(page.getByRole("button", { name: /检查方向/ })).toBeVisible();
+  await expect(page.getByLabel("计划章节数")).toHaveValue("1000");
+  const genre = page.getByLabel("题材方向（可混合填写）");
+  await expect(genre).toHaveValue("");
+  await genre.fill("古代悬疑探案 + 女性成长 + 言情");
+  await expect(genre).toHaveValue("古代悬疑探案 + 女性成长 + 言情");
+  await expect(page.getByLabel("限定研究网站/域名（每行一个，可选）")).toBeVisible();
 
   await page.getByTestId("incubator-stage-2").click();
   await expect(page.getByText("市场证据工作台")).toBeVisible();
+  await expect(page.getByText(/仅研究公开网页/)).toBeVisible();
   await expect(page.getByLabel("Tavily API Key")).toHaveAttribute("type", "password");
   await expect(page.getByLabel("Firecrawl API Key")).toHaveAttribute("type", "password");
   await page.reload();

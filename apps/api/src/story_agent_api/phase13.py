@@ -1668,13 +1668,50 @@ class Phase13Service:
             "research_planner",
             "research_planner:query-plan",
             request_id,
-            "You are a market-research query planner. Produce exactly one concise public-web query for each required perspective. Do not invent facts, copyrighted text, or named-author imitation.",
-            {"phase14Step": "query_plan", "brief": brief, "perspectives": list(PERSPECTIVES)},
+            (
+                "You are a market-research query planner. Produce exactly one concise public-web query for each required perspective. "
+                "Return this exact JSON shape: {\"queries\":[{\"perspective\":\"platform_trends\",\"query\":\"...\"}]}. "
+                "The queries array must contain all supplied perspective keys exactly once. "
+                "Do not invent facts, copyrighted text, or named-author imitation."
+            ),
+            {
+                "phase14Step": "query_plan",
+                "brief": brief,
+                "perspectives": list(PERSPECTIVES),
+                "requiredOutput": {"queries": [{"perspective": "one supplied perspective key", "query": "one concise public-web query"}]},
+            },
             budget_job_id=job_id,
         )
+        try:
+            return self._validate_model_queries(output)
+        except StoryError as first_error:
+            repaired, _ = self._complete_model_json(
+                project,
+                "research_planner",
+                "research_planner:query-plan:schema-repair",
+                request_id,
+                (
+                    "Repair the query plan structure without changing the research brief. "
+                    "Return exactly one queries array containing every required perspective exactly once. "
+                    "Each item must contain only a supplied perspective key and a non-empty public-web query."
+                ),
+                {
+                    "phase14Step": "query_plan_schema_repair",
+                    "brief": brief,
+                    "perspectives": list(PERSPECTIVES),
+                    "invalidOutput": output,
+                    "validationError": first_error.code,
+                    "requiredOutput": {"queries": [{"perspective": "one supplied perspective key", "query": "one concise public-web query"}]},
+                },
+                budget_job_id=job_id,
+            )
+            return self._validate_model_queries(repaired)
+
+    @staticmethod
+    def _validate_model_queries(output: dict[str, Any]) -> list[tuple[str, str]]:
         items = output.get("queries")
         if not isinstance(items, list):
-            raise StoryError(422, "RESEARCH_QUERY_PLAN_INVALID", "The research planner did not return queries.")
+            raise StoryError(422, "RESEARCH_QUERY_PLAN_INVALID", "The research planner did not return a queries array.")
         planned: list[tuple[str, str]] = []
         seen: set[str] = set()
         for item in items:

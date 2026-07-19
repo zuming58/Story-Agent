@@ -276,7 +276,12 @@ export type ModelRole =
   | "story_editor"
   | "style_reviewer"
   | "reviser"
-  | "embedding";
+  | "embedding"
+  | "research_planner"
+  | "research_analyst"
+  | "story_incubator"
+  | "reader_simulator"
+  | "opening_editor";
 
 export interface ModelRoleBinding {
   role: ModelRole;
@@ -672,7 +677,7 @@ export interface OpeningExperiment {
 }
 
 export interface IncubationReadiness {
-  projectId: string; ready: boolean; stage: string; checks: Array<{ code: string; status: string; detail?: string }>;
+  projectId: string; ready: boolean; stage: string; checks: Array<{ code: string; status: string; detail?: string; actionPath?: string | null }>;
   currentStoryBriefId: string | null; selectedOpeningCandidateId: string | null; styleBaselineId: string | null; updatedAt: string;
 }
 

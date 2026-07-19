@@ -4,6 +4,7 @@ import {
   Lightbulb, LockKey, MagnifyingGlass, PaperPlaneTilt, ShieldCheck, Sparkle, WarningCircle, X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, ApiClientError } from "../api/client";
 import { useStoryWorkspace } from "../context/StoryWorkspaceContext";
 import { useStoryStore } from "../store/useStoryStore";
@@ -22,6 +23,7 @@ function jsonPreview(value: unknown) { return JSON.stringify(value ?? {}, null, 
 
 export function StoryIncubatorPage() {
   const { project } = useStoryWorkspace();
+  const navigate = useNavigate();
   const client = useQueryClient();
   const setNotice = useStoryStore((state) => state.setNotice);
   const setAgentContext = useStoryStore((state) => state.setAgentContext);
@@ -59,6 +61,8 @@ export function StoryIncubatorPage() {
   const latestCanonProposal = incubationCanonProposals[0] ?? null;
   const latestExperiment = experimentsQuery.data?.[0] ?? null;
   const currentCanon = canonQuery.data?.documents.find((item) => item.id === "story-core") ?? canonQuery.data?.documents[0] ?? null;
+  const researchNeedsRecovery = Boolean(currentJob && ["failed", "cancelled", "insufficient_evidence"].includes(currentJob.status));
+  const ideationUserTurns = activeSession?.messages.filter((item) => item.role === "user").length ?? 0;
 
   const evidenceQuery = useQuery({ queryKey: ["incubator-evidence", currentJob?.id], queryFn: () => api.researchEvidence(currentJob!.id), enabled: Boolean(currentJob) });
   const competitorsQuery = useQuery({ queryKey: ["incubator-competitors", currentJob?.id], queryFn: () => api.researchCompetitors(currentJob!.id), enabled: Boolean(currentJob) });
@@ -68,6 +72,24 @@ export function StoryIncubatorPage() {
     Boolean(currentBrief), currentJob?.status === "accepted", Boolean(acceptedOpportunity), Boolean(activeSession?.messages.length),
     Boolean(currentStoryBrief), Boolean(readinessQuery.data?.ready),
   ], [currentBrief, currentJob?.status, acceptedOpportunity, activeSession?.messages.length, currentStoryBrief, readinessQuery.data?.ready]);
+
+  useEffect(() => {
+    if (!currentBrief) return;
+    setBriefForm({
+      format: currentBrief.format,
+      platform: currentBrief.platform,
+      genre: currentBrief.genre,
+      audience: currentBrief.audience,
+      targetChapters: String(currentBrief.format === "long-form" ? (currentBrief.targetChapters ?? 120) : (currentBrief.targetWords ?? 8000)),
+      emotionalValue: currentBrief.emotionalValue.join("\n"),
+      includedDomains: currentBrief.includedDomains.join("\n"),
+      excludedDomains: currentBrief.excludedDomains.join("\n"),
+      referenceWorks: currentBrief.referenceWorks.join("\n"),
+      forbiddenContent: currentBrief.forbiddenContent.join("\n"),
+      commercialGoals: currentBrief.commercialGoals.join("\n"),
+      notes: currentBrief.notes,
+    });
+  }, [currentBrief?.id, currentBrief?.revision]);
 
   useEffect(() => {
     setAgentContext(["创意孵化", stages[stage][0], project?.title ?? "当前作品"]);
@@ -99,7 +121,7 @@ export function StoryIncubatorPage() {
   };
   const startResearch = () => {
     if (!project || !currentBrief) return;
-    void run("市场调研已完成或进入待审阅状态", () => api.createResearchJob(project.id, {
+    void run(currentJob ? "研究凭据已安全更新，请点击恢复任务" : "市场调研已启动", () => api.createResearchJob(project.id, {
       briefId: currentBrief.id, expectedBriefRevision: currentBrief.revision, idempotencyKey: `research:${currentBrief.checksum}`,
       searchProvider: "tavily", fetchProvider: "firecrawl", searchApiKey: researchKeys.tavily || undefined, fetchApiKey: researchKeys.firecrawl || undefined,
       runImmediately: true, limits: { maxQueries: 6, maxPages: 24, maxTotalChars: 160000, maxCost: 8, maxRuntimeSeconds: 900, minimumSourceTypes: 3 },
@@ -130,6 +152,7 @@ export function StoryIncubatorPage() {
 
     <nav className="incubator-rail" aria-label="创意孵化步骤">{stages.map(([label, detail], index) => <button key={label} className={`${stage === index ? "is-active" : ""}${completed[index] ? " is-done" : ""}`} onClick={() => setStage(index)}><i>{completed[index] ? <Check /> : index + 1}</i><span><strong>{label}</strong><small>{detail}</small></span><ArrowRight /></button>)}</nav>
     {error && <div className="incubator-error"><WarningCircle /><span>{error}</span><button onClick={() => setError(null)}><X /></button></div>}
+    {readinessQuery.data?.checks.some((item) => item.status === "blocked") && <div className="incubator-check-strip" aria-label="孵化阻断项">{readinessQuery.data.checks.filter((item) => item.status === "blocked").slice(0, 3).map((item) => <button key={item.code} onClick={() => item.actionPath && navigate(item.actionPath)} disabled={!item.actionPath}><WarningCircle /><span><strong>{item.code}</strong><small>{item.detail}</small></span>{item.actionPath && <ArrowRight />}</button>)}</div>}
 
     <section className="incubator-workspace">
       {stage === 0 && <div className="incubator-panel brief-lab"><header><div><Lightbulb /><span><strong>创作与调研目标</strong><small>这里不是 Canon，只是决定要研究什么</small></span></div><em>{currentBrief ? `V${currentBrief.versionNumber}` : "DRAFT"}</em></header><div className="incubator-form-grid">
@@ -146,6 +169,8 @@ export function StoryIncubatorPage() {
       </div><footer><span>保存后仍可继续修改；新版本会使旧研究任务失效，避免混用结论。</span><button className="gold-action" disabled={mutation.isPending || !briefForm.genre || !briefForm.audience} onClick={saveBrief}><Check />保存并进入调研</button></footer></div>}
 
       {stage === 1 && <div className="research-layout"><main className="incubator-panel research-console"><header><div><MagnifyingGlass /><span><strong>市场证据工作台</strong><small>搜索与正文提取由专用 Provider 完成，DeepSeek 负责分析</small></span></div><em>{currentJob?.status ?? "NOT STARTED"}</em></header>{!currentJob ? <div className="provider-key-grid"><label><span>Tavily API Key</span><input type="password" value={researchKeys.tavily} onChange={(e) => setResearchKeys({ ...researchKeys, tavily: e.target.value })} placeholder="首次使用需要，保存到 Windows 凭据管理器" /></label><label><span>Firecrawl API Key</span><input type="password" value={researchKeys.firecrawl} onChange={(e) => setResearchKeys({ ...researchKeys, firecrawl: e.target.value })} placeholder="首次使用需要，页面和 API 都不会回显" /></label><button className="gold-action" onClick={startResearch} disabled={!currentBrief || mutation.isPending}>{mutation.isPending ? <CircleNotch className="spin" /> : <MagnifyingGlass />}开始真实调研</button></div> : <>
+        {researchNeedsRecovery && <div className="provider-key-grid provider-key-recovery"><label><span>更新 Tavily API Key（可选）</span><input type="password" value={researchKeys.tavily} onChange={(e) => setResearchKeys({ ...researchKeys, tavily: e.target.value })} placeholder="留空则继续使用凭据管理器中的值" /></label><label><span>更新 Firecrawl API Key（可选）</span><input type="password" value={researchKeys.firecrawl} onChange={(e) => setResearchKeys({ ...researchKeys, firecrawl: e.target.value })} placeholder="完整密钥不会回显" /></label><button onClick={startResearch} disabled={mutation.isPending || (!researchKeys.tavily && !researchKeys.firecrawl)}>更新凭据</button></div>}
+        {currentJob.errorCode && <div className="research-job-error"><WarningCircle /><div><strong>{currentJob.errorCode}</strong><span>{currentJob.errorMessage ?? "研究任务需要处理后才能恢复。"}</span></div></div>}
         <div className="research-metrics"><article><span>查询</span><strong>{currentJob.queryCount}</strong></article><article><span>来源页面</span><strong>{currentJob.pageCount}</strong></article><article><span>证据片段</span><strong>{evidenceQuery.data?.length ?? 0}</strong></article><article><span>预计费用</span><strong>¥ / ${currentJob.estimatedCost.toFixed(4)}</strong></article></div>
         <div className="research-actions">{["failed", "cancelled", "insufficient_evidence"].includes(currentJob.status) && <button onClick={() => actOnJob("resume")}>恢复任务</button>}{["planning", "searching", "fetching", "analyzing"].includes(currentJob.status) && <button onClick={() => actOnJob("cancel")}>取消</button>}{currentJob.status === "awaiting_review" && <><button className="accept" onClick={() => actOnJob("accept")}><Check />接受研究报告</button><button onClick={() => actOnJob("reject")}><X />拒绝</button></>}</div>
         <div className="research-columns"><section><h3>竞品机制 <b>{competitorsQuery.data?.length ?? 0}</b></h3>{competitorsQuery.data?.slice(0, 6).map((item) => <article key={item.id}><strong>{item.name}</strong><span>{Math.round(item.confidence * 100)}% 可信度 · {item.evidenceIds.length} 条证据</span></article>)}</section><section><h3>研究发现 <b>{findingsQuery.data?.length ?? 0}</b></h3>{findingsQuery.data?.slice(0, 8).map((item) => <article key={item.id}><strong>{item.statement}</strong><span>{item.claimType} · {item.evidenceIds.length} 条引用</span></article>)}</section></div>
@@ -155,7 +180,7 @@ export function StoryIncubatorPage() {
 
       {stage === 3 && <div className="ideation-layout"><aside className="incubator-panel decision-ledger"><header><div><Brain /><span><strong>共创台账</strong><small>模型建议不会自动变成正式设定</small></span></div></header>{["confirmedDecisions", "openQuestions", "aiSuggestions", "conflicts"].map((key) => <section key={key}><h3>{key}</h3>{((activeSession?.state[key] as unknown[]) ?? []).map((item, index) => <p key={index}>{String(item)}</p>)}</section>)}</aside><main className="incubator-panel ideation-chat"><header><div><Sparkle /><span><strong>和故事策划 Agent 讨论</strong><small>{acceptedOpportunity?.highConcept ?? "请先选择一个故事方向"}</small></span></div><em>{activeSession ? `REV ${activeSession.revision}` : "NEW"}</em></header><div className="ideation-messages">{activeSession?.messages.map((item) => <article key={item.id} className={`is-${item.role}`}><strong>{item.role === "user" ? "你" : "故事策划"}</strong><p>{item.content}</p></article>)}{!activeSession?.messages.length && <div className="incubator-empty"><Brain /><strong>先说出你真正想写什么、最不想要什么，至少讨论两三轮。</strong></div>}</div><footer><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="例如：这个方向太冷，我希望主角第一章就做一个让读者心疼但佩服的选择……" /><button className="gold-action" onClick={() => void sendMessage()} disabled={!acceptedOpportunity || !message.trim() || mutation.isPending}><PaperPlaneTilt />发送</button></footer></main></div>}
 
-      {stage === 4 && <div className="incubator-panel storybrief-review"><header><div><LockKey /><span><strong>StoryBrief 决策闸门</strong><small>这是 Canon 的上游合同，不确认就不会向下游写入</small></span></div>{activeSession && !pendingBriefProposal && !currentStoryBrief && <button className="gold-action" onClick={() => void generateStoryBrief()} disabled={mutation.isPending}><Sparkle />生成 StoryBrief 提案</button>}</header>{pendingBriefProposal ? <><div className="storybrief-json"><pre>{jsonPreview(pendingBriefProposal.proposedBrief)}</pre></div><footer><button onClick={() => decideBrief("reject")}><X />拒绝</button><button className="accept" onClick={() => decideBrief("apply")}><Check />确认成为当前 StoryBrief</button></footer></> : currentStoryBrief ? <><div className="brief-authority"><CheckCircle /><div><strong>StoryBrief V{currentStoryBrief.versionNumber} 已生效</strong><span>Checksum {currentStoryBrief.checksum.slice(0, 12)} · 后续 Canon 必须从此版本生成</span></div></div><div className="storybrief-json"><pre>{jsonPreview(currentStoryBrief.brief)}</pre></div></> : <div className="incubator-empty"><LockKey /><strong>完成共创讨论后生成提案。你仍需要人工确认。</strong></div>}</div>}
+      {stage === 4 && <div className="incubator-panel storybrief-review"><header><div><LockKey /><span><strong>StoryBrief 决策闸门</strong><small>这是 Canon 的上游合同，不确认就不会向下游写入</small></span></div>{activeSession && !pendingBriefProposal && !currentStoryBrief && <button className="gold-action" onClick={() => void generateStoryBrief()} disabled={mutation.isPending || ideationUserTurns < 2}><Sparkle />生成 StoryBrief 提案 · {ideationUserTurns}/2 轮</button>}</header>{pendingBriefProposal ? <><div className="storybrief-json"><pre>{jsonPreview(pendingBriefProposal.proposedBrief)}</pre></div><footer><button onClick={() => decideBrief("reject")}><X />拒绝</button><button className="accept" onClick={() => decideBrief("apply")}><Check />确认成为当前 StoryBrief</button></footer></> : currentStoryBrief ? <><div className="brief-authority"><CheckCircle /><div><strong>StoryBrief V{currentStoryBrief.versionNumber} 已生效</strong><span>Checksum {currentStoryBrief.checksum.slice(0, 12)} · 后续 Canon 必须从此版本生成</span></div></div><div className="storybrief-json"><pre>{jsonPreview(currentStoryBrief.brief)}</pre></div></> : <div className="incubator-empty"><LockKey /><strong>{ideationUserTurns < 2 ? `至少完成两轮真实讨论后再冻结 StoryBrief；当前 ${ideationUserTurns}/2 轮。` : "共创讨论已达到最低轮次，可以生成提案；你仍需要人工确认。"}</strong></div>}</div>}
 
       {stage === 5 && <div className="canon-opening-layout"><section className="incubator-panel canon-candidate"><header><div><ShieldCheck /><span><strong>通用 Canon 候选</strong><small>独立 Analyzer 交叉校验，失败提案不能应用</small></span></div>{currentStoryBrief && !latestCanonProposal && <button className="gold-action" onClick={generateCanon} disabled={mutation.isPending}><Sparkle />生成 Canon 候选</button>}</header>{latestCanonProposal ? <><div className={`canon-verdict ${latestCanonProposal.readiness.ready ? "is-ready" : "is-blocked"}`}><strong>{latestCanonProposal.readiness.ready ? "完整性通过" : "候选被阻断"}</strong><span>{latestCanonProposal.readiness.checks.filter((item) => item.status !== "ready").length} 个待处理项</span></div><div className="architecture-check-grid">{latestCanonProposal.readiness.checks.map((item) => <span key={item.code} className={`is-${item.status}`}>{item.status === "ready" ? <Check /> : <WarningCircle />}{item.code}</span>)}</div><details><summary>查看 Canon Markdown</summary><pre>{latestCanonProposal.contentMarkdown}</pre></details>{latestCanonProposal.status === "pending" && <footer><button className="accept" disabled={!latestCanonProposal.readiness.ready} onClick={applyCanon}><Check />应用到 Canon 草稿</button></footer>}</> : <div className="incubator-empty"><ShieldCheck /><strong>先确认 StoryBrief，再生成符合当前题材的结构化 Canon。</strong></div>}</section>
         <section className="incubator-panel opening-arena"><header><div><Flask /><span><strong>三开篇实验场</strong><small>强事件、强人物、强悬念分别生成并独立评审</small></span></div>{currentStoryBrief && currentCanon && !latestExperiment && <button className="gold-action" onClick={createExperiment} disabled={mutation.isPending || canonQuery.data?.locked}><Flask />生成三个开篇</button>}</header><div className="opening-grid">{latestExperiment?.candidates.map((candidate) => <article key={candidate.id} className={candidate.status === "selected" ? "is-selected" : ""}><header><span>{candidate.strategyLabel}</span><b>{candidate.evaluations.find((item) => item.reviewerRole === "reader_simulator")?.scores.continueReading ?? "—"}</b></header><h3>{candidate.chapters[0]?.title}</h3><p>{candidate.chapters[0]?.content.slice(0, 220)}…</p><div>{candidate.evaluations.map((review) => <span key={review.id}>{review.reviewerRole}: {review.recommendation}</span>)}</div>{candidate.status === "candidate" && <footer><button onClick={() => latestExperiment && void run("开篇方向已选中", () => api.decideOpeningCandidate(candidate.id, "select", candidate.revision, latestExperiment.revision))}><Check />选择方向</button></footer>}{candidate.status === "selected" && candidate.chapterCount === 1 && <footer><button onClick={() => latestExperiment && void run("已扩写为三章实验稿", () => api.expandOpeningExperiment(latestExperiment.id, candidate.id, latestExperiment.revision, candidate.revision))}>扩写第 2—3 章</button></footer>}{candidate.status === "selected" && candidate.chapterCount === 3 && <footer className="chapter-approvals">{candidate.chapters.map((chapter) => <button key={chapter.chapterNumber} disabled={chapter.manualApproved} onClick={() => void run(`第 ${chapter.chapterNumber} 章实验稿已批准`, () => api.approveOpeningChapter(candidate.id, chapter.chapterNumber, candidate.revision))}>{chapter.manualApproved ? <CheckCircle /> : <Check />}{chapter.chapterNumber}章</button>)}</footer>}</article>)}</div>{!latestExperiment && <div className="incubator-empty"><Flask /><strong>Canon 应用为草稿后，先比较三个真实开头，不要直接开始连载。</strong></div>}</section></div>}

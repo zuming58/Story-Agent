@@ -12,7 +12,7 @@ async function createProject(page: Page, testInfo: TestInfo, suffix: string) {
   // A cold Windows filesystem/antivirus scan can take more than 15 seconds;
   // keep the test above the measured cold-start envelope so Playwright never
   // kills the API halfway through an Alembic migration.
-  await expect(page).toHaveURL(/\/canon$/, { timeout: 45_000 });
+  await expect(page).toHaveURL(/\/incubator$/, { timeout: 45_000 });
   await page.goto("/planning");
   await expect(page.getByRole("heading", { name: "故事规划中心" })).toBeVisible();
   const projects = await (await page.request.get("/api/v1/projects")).json();
@@ -131,6 +131,25 @@ test("automation desk exposes trial sizes, blockers and persisted policy", async
   await page.reload();
   await expect(page.getByLabel("运行时间")).toHaveValue("07:35");
   await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
+});
+
+test("story incubator restores its six-stage discovery workspace", async ({ page }, testInfo) => {
+  await createProject(page, testInfo, "incubator");
+  await page.getByRole("link", { name: /创意孵化/ }).click();
+  await expect(page.getByRole("heading", { name: "故事创意孵化室" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "创意孵化步骤" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /检查方向/ })).toBeVisible();
+
+  await page.getByRole("button", { name: /市场调研/ }).click();
+  await expect(page.getByText("市场证据工作台")).toBeVisible();
+  await expect(page.getByLabel("Tavily API Key")).toHaveAttribute("type", "password");
+  await expect(page.getByLabel("Firecrawl API Key")).toHaveAttribute("type", "password");
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "故事创意孵化室" })).toBeVisible();
+
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
 });

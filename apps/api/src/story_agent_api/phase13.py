@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from .models import (
     CanonDocument,
@@ -16,6 +17,9 @@ from .models import (
     IdeationMessage,
     IdeationSession,
     MarketResearchBrief,
+    ModelConfig,
+    ModelProvider,
+    ModelRoleBinding,
     ModelRun,
     OpeningCandidate,
     OpeningExperiment,
@@ -960,6 +964,22 @@ class Phase13Service:
         project, session_row = self._project_for_ideation_session(session_id)
         generated: dict[str, Any] | None = None
         model_run_id: str | None = None
+        with self.service.db.project(project.id, project.folder_path) as session:
+            row = session.get(IdeationSession, session_row.id)
+            assert row
+            self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+            self._assert_ideation_upstream(session, row)
+            user_message_count = int(session.scalar(select(func.count()).select_from(IdeationMessage).where(
+                IdeationMessage.session_id == row.id,
+                IdeationMessage.role == "user",
+            )) or 0)
+            if user_message_count < 2:
+                raise StoryError(
+                    409,
+                    "IDEATION_DISCUSSION_REQUIRED",
+                    "Discuss the selected direction for at least two user turns before freezing a StoryBrief.",
+                    {"currentUserTurns": user_message_count, "requiredUserTurns": 2},
+                )
         if payload.brief is None:
             with self.service.db.project(project.id, project.folder_path) as session:
                 row = session.get(IdeationSession, session_row.id)
@@ -1323,12 +1343,42 @@ class Phase13Service:
 
     def readiness(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
+        required_roles = {"research_planner", "research_analyst", "story_incubator", "reader_simulator", "opening_editor"}
+        missing_roles: list[str] = []
+        unavailable_roles: list[str] = []
+        untested_providers: set[str] = set()
+        with self.service.db.catalog() as catalog_session:
+            bindings = catalog_session.scalars(
+                select(ModelRoleBinding)
+                .where(ModelRoleBinding.role.in_(required_roles))
+                .options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider))
+            ).all()
+            by_role = {binding.role: binding for binding in bindings}
+            for role in sorted(required_roles):
+                binding = by_role.get(role)
+                model = binding.model if binding else None
+                provider: ModelProvider | None = model.provider if model else None
+                if not model:
+                    missing_roles.append(role)
+                elif not model.is_enabled or not provider or not provider.is_enabled or not provider.api_key_ref:
+                    unavailable_roles.append(role)
+                elif provider.last_test_status != "success":
+                    untested_providers.add(provider.name)
+        if missing_roles:
+            model_check = {"code": "INCUBATION_MODEL_ROLE_MISSING", "status": "blocked", "detail": "Bind the required incubation roles: " + ", ".join(missing_roles), "actionPath": "/settings"}
+        elif unavailable_roles:
+            model_check = {"code": "INCUBATION_MODEL_UNAVAILABLE", "status": "blocked", "detail": "Enable models, providers, and credentials for: " + ", ".join(unavailable_roles), "actionPath": "/settings"}
+        elif untested_providers:
+            model_check = {"code": "INCUBATION_PROVIDER_NOT_TESTED", "status": "blocked", "detail": "Test provider connections first: " + ", ".join(sorted(untested_providers)), "actionPath": "/settings"}
+        else:
+            model_check = {"code": "INCUBATION_MODELS_READY", "status": "ready", "detail": "All five incubation model roles are available and connection-tested.", "actionPath": "/settings"}
         with self.service.db.project(project.id, project.folder_path) as session:
             brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
             baseline = session.scalar(select(StyleBaseline).where(StyleBaseline.project_id == project.id, StyleBaseline.is_current.is_(True)))
             selected = session.scalar(select(OpeningCandidate).where(OpeningCandidate.project_id == project.id, OpeningCandidate.status == "selected"))
             doc = session.get(CanonDocument, "story-core")
             checks = [
+                model_check,
                 {"code": "STORY_BRIEF_ACCEPTED", "status": "ready" if brief else "blocked", "detail": "Accepted StoryBrief exists." if brief else "Accept a StoryBrief proposal first."},
                 {"code": "CANON_DRAFT", "status": "ready" if doc and doc.status == "draft" and bool(doc.content_markdown.strip()) else "blocked", "detail": "Draft Canon exists." if doc and doc.status == "draft" else "Create and apply a Canon draft first."},
                 {"code": "OPENING_SELECTED", "status": "ready" if selected else "blocked", "detail": "A human selected an opening candidate." if selected else "Select an opening candidate explicitly."},
@@ -1750,9 +1800,19 @@ class Phase13Service:
                 return set()
             return {str(item.get(field) or "").strip().casefold() for item in items if isinstance(item, dict) and str(item.get(field) or "").strip()}
 
-        missing_entities = sorted(names(generated, "entities", "canonicalName") - names(analyzed, "entities", "canonicalName"))
-        missing_rules = sorted(names(generated, "rules", "ruleCode") - names(analyzed, "rules", "ruleCode"))
-        return {"ready": not missing_entities and not missing_rules, "missingEntities": missing_entities, "missingRules": missing_rules}
+        generated_entities, analyzed_entities = names(generated, "entities", "canonicalName"), names(analyzed, "entities", "canonicalName")
+        generated_rules, analyzed_rules = names(generated, "rules", "ruleCode"), names(analyzed, "rules", "ruleCode")
+        missing_entities = sorted(generated_entities - analyzed_entities)
+        unexpected_entities = sorted(analyzed_entities - generated_entities)
+        missing_rules = sorted(generated_rules - analyzed_rules)
+        unexpected_rules = sorted(analyzed_rules - generated_rules)
+        return {
+            "ready": not missing_entities and not unexpected_entities and not missing_rules and not unexpected_rules,
+            "missingEntities": missing_entities,
+            "unexpectedEntities": unexpected_entities,
+            "missingRules": missing_rules,
+            "unexpectedRules": unexpected_rules,
+        }
 
     @staticmethod
     def _generic_canon_checks(markdown: str, structured: dict[str, Any], brief: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1779,7 +1839,15 @@ class Phase13Service:
         protagonist = str(brief.get("protagonist") or "").strip().casefold()
         entity_names = {str(item.get("canonicalName") or "").strip().casefold() for item in entities if isinstance(item, dict)} if isinstance(entities, list) else set()
         cross_check = structured.get("_generationCrossCheck", {"ready": True})
-        night_watch_terms = ("夜巡人", "沈砚", "雾城", "七卷", "六阶")
+        # A single generic phrase such as “雾城” must not make an otherwise
+        # valid user concept impossible. Treat the old seed as leaked only
+        # when distinctive names appear without being requested by the Brief,
+        # or when several weaker template terms travel together.
+        brief_text = dumps(brief)
+        night_watch_terms = ("夜巡人", "沈砚", "夜巡司", "巡夜灯", "镇纸钉", "潮湿账页", "雾城", "七卷", "六阶")
+        residue = {term for term in night_watch_terms if term in markdown and term not in brief_text}
+        distinctive_residue = residue.intersection({"沈砚", "夜巡司", "巡夜灯", "镇纸钉", "潮湿账页"})
+        residue_blocked = bool(distinctive_residue) or len(residue) >= 2
         checks = [
             {"code": "CANON_GENERIC_CORE", "status": "ready" if ("story core" in normalized or "故事内核" in markdown) else "blocked", "detail": "Story core must be explicit."},
             {"code": "CANON_GENERIC_CONFLICT", "status": "ready" if ("conflict" in normalized or "冲突" in markdown) else "blocked", "detail": "Core conflict must be explicit."},
@@ -1789,7 +1857,7 @@ class Phase13Service:
             {"code": "CANON_GENERIC_RULES", "status": "ready" if rules_valid else "blocked", "detail": "At least one enforceable structured rule is required."},
             {"code": "CANON_GENERIC_PROTAGONIST", "status": "ready" if (not protagonist or protagonist in entity_names) else "blocked", "detail": "The StoryBrief protagonist must exist in structured Canon."},
             {"code": "CANON_GENERIC_ANALYZER_CROSSCHECK", "status": "ready" if isinstance(cross_check, dict) and cross_check.get("ready") is True else "blocked", "detail": "Independent Canon extraction must agree with generated entities and rules."},
-            {"code": "CANON_GENERIC_NO_NIGHT_WATCH", "status": "ready" if not any(term in markdown for term in night_watch_terms) else "blocked", "detail": "No Night Watch template residue is allowed in a generic project."},
+            {"code": "CANON_GENERIC_NO_NIGHT_WATCH", "status": "blocked" if residue_blocked else "ready", "detail": "No unrequested Night Watch template residue is allowed in a generic project.", "evidence": sorted(residue)},
         ]
         return {"ready": all(item["status"] == "ready" for item in checks), "checks": checks}
 

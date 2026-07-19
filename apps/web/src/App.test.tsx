@@ -48,6 +48,20 @@ describe("Story Agent shell", () => {
       if (url.includes("/audit-events")) return json([]);
       if (url.includes("/model-runs")) return json([]);
       if (url.includes("/trial-readiness")) return json(readinessMock);
+      if (url.includes("/research/briefs")) return json([]);
+      if (url.includes("/research/jobs")) return json([]);
+      if (url.includes("/story-opportunities")) return json([]);
+      if (url.includes("/ideation/sessions")) return json([]);
+      if (url.includes("/story-brief/proposals")) return json([]);
+      if (url.includes("/story-brief/versions")) return json([]);
+      if (url.includes("/canon/generation-proposals")) return json([]);
+      if (url.includes("/opening-experiments")) return json([]);
+      if (url.includes("/incubation-readiness")) return json({
+        projectId: project.id,
+        ready: false,
+        stage: "research_brief",
+        checks: [],
+      });
       if (url.includes("/canon")) return json(canonMock);
       if (url.includes("/automation/policy")) return json(policyMock);
       if (url.includes("/automation/runs")) return json([]);
@@ -81,6 +95,7 @@ describe("Story Agent shell", () => {
       if (url.endsWith("/model-providers")) return json([]);
       if (url.endsWith("/model-role-bindings")) return json([
         { role: "planner", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-12T00:00:00Z" },
+        { role: "research_planner", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-12T00:00:00Z" },
       ]);
       return json({ status: "ok" });
     }));
@@ -104,6 +119,7 @@ describe("Story Agent shell", () => {
     render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
 
     expect(await screen.findByRole("heading", { name: "模型与费用设置" })).toBeInTheDocument();
+    expect(screen.getByText("市场调研规划")).toBeInTheDocument();
     const keyInput = screen.getByLabelText("新增 Provider API Key");
     await user.clear(screen.getByLabelText("新增 Provider 名称"));
     await user.type(screen.getByLabelText("新增 Provider 名称"), "测试 Provider");
@@ -164,6 +180,23 @@ describe("Story Agent shell", () => {
     expect(screen.getByRole("region", { name: "试写就绪检查" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /开始第 37—37 章/ })).toBeDisabled();
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+  });
+
+  it("opens the story incubation flow with a persistent Agent scope", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/incubator"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    expect(await screen.findByRole("heading", { name: "故事创意孵化室" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "创意孵化步骤" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /保存并进入调研/ })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /检查方向/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /市场调研/ }));
+    expect(await screen.findByText("市场证据工作台")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tavily API Key")).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText("Firecrawl API Key")).toHaveAttribute("type", "password");
   });
 
   it("saves the Canon story core as a database-backed draft", async () => {

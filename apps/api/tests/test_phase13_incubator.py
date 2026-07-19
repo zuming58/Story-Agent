@@ -17,6 +17,10 @@ from story_agent_api.services import StoryError
 
 
 class _FakeModelHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        response = json.dumps({"data": [{"id": "fake-incubator"}]}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
+
     def do_POST(self):  # noqa: N802
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(body or b"{}")
@@ -58,6 +62,7 @@ def _configure_models(client):
     model = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={"modelId":"fake-incubator","displayName":"Fake"}).json()
     for role in ("research_planner", "research_analyst", "story_incubator", "reader_simulator", "opening_editor"):
         assert client.put(f"/api/v1/model-role-bindings/{role}", json={"modelId":model["id"]}).status_code == 200
+    assert client.post(f"/api/v1/model-providers/{provider['id']}/test").json()["ok"] is True
     return server
 
 
@@ -145,7 +150,12 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     session = ideation.json()
     message = client.post(f"/api/v1/ideation/sessions/{session['id']}/messages", json={"expectedSessionRevision": session["revision"], "content": "No archive-number exposition."})
     assert message.status_code == 201, message.text
-    proposal = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": session["revision"] + 1})
+    premature = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": session["revision"] + 1})
+    assert premature.status_code == 409
+    assert premature.json()["code"] == "IDEATION_DISCUSSION_REQUIRED"
+    second_message = client.post(f"/api/v1/ideation/sessions/{session['id']}/messages", json={"expectedSessionRevision": session["revision"] + 1, "content": "The protagonist must make a costly choice in the first screen."})
+    assert second_message.status_code == 201, second_message.text
+    proposal = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": session["revision"] + 2})
     assert proposal.status_code == 201, proposal.text
     restored_proposals = client.get(f"/api/v1/projects/{project['id']}/story-brief/proposals?sessionId={session['id']}")
     assert restored_proposals.status_code == 200
@@ -205,6 +215,25 @@ def test_phase14_deterministic_canon_and_opening_gates(client):
     assert incomplete["ready"] is False
     assert {item["code"] for item in incomplete["checks"] if item["status"] == "blocked"} >= {"CANON_GENERIC_ENTITIES", "CANON_GENERIC_RULES", "CANON_GENERIC_PROTAGONIST"}
 
+    valid_structure = {
+        "entities": [{"canonicalName": "林知遥", "entityTypeName": "person", "attributesJson": {}}],
+        "relations": [],
+        "rules": [{"ruleCode": "CITY-01", "statement": "入夜后必须沿灯行走。", "constraintJson": {}}],
+        "_generationCrossCheck": {"ready": True},
+    }
+    generic_fog_city = phase13._generic_canon_checks(
+        "# 故事内核\n林知遥调查雾城失踪案。\n## 核心冲突\n真相与家人冲突。\n## 创作边界\n禁止无代价破局。",
+        valid_structure,
+        {"protagonist": "林知遥"},
+    )
+    assert generic_fog_city["ready"] is True
+    leaked_seed = phase13._generic_canon_checks(
+        "# 故事内核\n林知遥在夜巡司遇见沈砚。\n## 核心冲突\n调查冲突。\n## 创作边界\n禁止无代价破局。",
+        valid_structure,
+        {"protagonist": "林知遥"},
+    )
+    assert next(item for item in leaked_seed["checks"] if item["code"] == "CANON_GENERIC_NO_NIGHT_WATCH")["status"] == "blocked"
+
     with pytest.raises(StoryError) as short:
         phase13._validate_opening_content("too short", {"chapterWordRange": {"min": 100, "max": 200}})
     assert short.value.code == "OPENING_WORD_RANGE_INVALID"
@@ -212,6 +241,42 @@ def test_phase14_deterministic_canon_and_opening_gates(client):
     with pytest.raises(StoryError) as review:
         phase13._validate_opening_review({"scores": {"continueReading": 90}, "findings": []}, "content")
     assert review.value.code == "OPENING_REVIEW_MODEL_INVALID"
+
+
+def test_research_credentials_are_write_only_and_can_be_rotated_for_a_queued_job(client):
+    project = _project(client)
+    brief = _brief(client, project["id"])
+    payload = {
+        "expectedBriefRevision": brief["revision"],
+        "idempotencyKey": f"research:{brief['checksum']}",
+        "searchProvider": "tavily",
+        "fetchProvider": "firecrawl",
+        "searchApiKey": "tavily-secret-one",
+        "fetchApiKey": "firecrawl-secret-one",
+        "runImmediately": False,
+    }
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json=payload)
+    assert created.status_code == 201, created.text
+    assert created.json()["providerConfig"] == {
+        "searchProvider": "tavily",
+        "fetchProvider": "firecrawl",
+        "searchSecretConfigured": True,
+        "fetchSecretConfigured": True,
+    }
+    assert "tavily-secret-one" not in created.text
+    assert "firecrawl-secret-one" not in created.text
+
+    rotated = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        **payload,
+        "searchApiKey": "tavily-secret-two",
+        "fetchApiKey": "firecrawl-secret-two",
+    })
+    assert rotated.status_code == 201, rotated.text
+    assert rotated.json()["id"] == created.json()["id"]
+    secret_store = client.app.state.story_service.secret_store
+    assert secret_store.get_secret(f"research-provider:{project['id']}:tavily") == "tavily-secret-two"
+    assert secret_store.get_secret(f"research-provider:{project['id']}:firecrawl") == "firecrawl-secret-two"
+    assert "secret-two" not in rotated.text
 
 
 def test_ssrf_policy_rejects_local_and_private_addresses():

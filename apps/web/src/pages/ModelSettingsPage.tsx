@@ -24,6 +24,11 @@ const roleLabels: Record<ModelRole, string> = {
   style_reviewer: "文风审稿",
   reviser: "修订器",
   embedding: "Embedding",
+  research_planner: "市场调研规划",
+  research_analyst: "研究证据分析",
+  story_incubator: "故事创意孵化",
+  reader_simulator: "目标读者模拟",
+  opening_editor: "开篇编辑评审",
 };
 
 function statusText(status?: ProviderConnectionTest["status"]) {

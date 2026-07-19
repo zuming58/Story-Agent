@@ -612,6 +612,8 @@ class Phase13Service:
             evidence_perspectives = sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.id.in_(evidence_query_ids))).all()}) if evidence_query_ids else []
             query_rows = list(session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id)).all())
             source_counts = {query_id: count for query_id, count in session.execute(select(ResearchSource.query_id, func.count(ResearchSource.id)).where(ResearchSource.job_id == job.id).group_by(ResearchSource.query_id)).all()}
+            manual_report_query_ids = {query.id for query in query_rows if query.perspective == "integrated_report"}
+            integrated_report_evidence = any(source.query_id in manual_report_query_ids for source in sources.values() if source.id in evidence_sources)
             coverage = {
                 "sourceTypes": source_types,
                 "sourceTypeCount": len(source_types),
@@ -624,13 +626,16 @@ class Phase13Service:
                 "failedQueryCount": sum(1 for query in query_rows if query.status == "failed"),
                 "failedFetchCount": sum(1 for source in sources.values() if source.status == "failed"),
                 "manualSourceCount": sum(1 for source in sources.values() if source.status == "fetched" and source.source_type == "manual" and not source.excluded),
+                "integratedManualReportEvidence": integrated_report_evidence,
             }
             standard_coverage = len(source_types) >= coverage["minimumSourceTypes"] and set(evidence_perspectives) == set(PERSPECTIVES)
             manual_coverage = coverage["manualSourceCount"] >= len(PERSPECTIVES) and set(evidence_perspectives) == set(PERSPECTIVES)
-            coverage["manualCoverageMet"] = manual_coverage
+            integrated_report_coverage = integrated_report_evidence and bool(evidence_ids)
+            coverage["manualCoverageMet"] = manual_coverage or integrated_report_coverage
+            coverage["integratedManualReportCoverageMet"] = integrated_report_coverage
             job.coverage_json, job.report_revision = dumps(coverage), report_revision
             job.report_checksum = stable_digest({"job": job.id, "reportRevision": report_revision, "coverage": coverage, "evidence": sorted(evidence_ids)})
-            enough = standard_coverage or manual_coverage
+            enough = standard_coverage or manual_coverage or integrated_report_coverage
             job.status, job.completed_at, job.updated_at, job.revision = ("awaiting_review" if enough else "insufficient_evidence"), _now(), _now(), job.revision + 1
             session.add(self.service._audit("research_job.awaiting_review" if enough else "research_job.insufficient_evidence", "research_job", job.id, coverage, request_id))
             return self._job_dict(job)
@@ -757,6 +762,7 @@ class Phase13Service:
             content = str(payload.content).strip()[:int(limits.get("maxCharsPerPage", 20_000))]
             now = _now()
             source_id = str(uuid4())
+            perspective = payload.perspective or "integrated_report"
             source_url = str(payload.source_url or "").strip()
             canonical = ResearchSourcePolicy().validate_url(source_url) if source_url else f"manual://research/{source_id}"
             if session.scalar(select(ResearchSource.id).where(ResearchSource.job_id == job.id, ResearchSource.canonical_url == canonical)):
@@ -764,16 +770,16 @@ class Phase13Service:
             domain = urlsplit(canonical).hostname or "manual-entry"
             query = ResearchQuery(
                 id=str(uuid4()), project_id=project.id, job_id=job.id, attempt=job.attempt,
-                perspective=payload.perspective, query_text=f"Manual research: {payload.title}"[:1000],
+                perspective=perspective, query_text=f"Manual research: {payload.title}"[:1000],
                 sequence_number=(session.scalar(select(func.max(ResearchQuery.sequence_number)).where(ResearchQuery.job_id == job.id)) or 0) + 1,
-                fingerprint=stable_digest({"manual": True, "perspective": payload.perspective, "title": payload.title, "content": content}),
+                fingerprint=stable_digest({"manual": True, "perspective": perspective, "title": payload.title, "content": content}),
                 status="succeeded", result_count=1, created_at=now, completed_at=now,
-                provider_metadata_json=dumps({"origin": "manual"}),
+                provider_metadata_json=dumps({"origin": "manual", "kind": "integrated_report" if payload.perspective is None else "perspective_material"}),
             )
             source = ResearchSource(
                 id=source_id, project_id=project.id, job_id=job.id, query_id=query.id,
                 canonical_url=canonical, title=str(payload.title).strip(), domain=domain,
-                source_type="manual", provider_metadata_json=dumps({"origin": "manual", "sourceUrlProvided": bool(source_url)}),
+                source_type="manual", provider_metadata_json=dumps({"origin": "manual", "kind": "integrated_report" if payload.perspective is None else "perspective_material", "sourceUrlProvided": bool(source_url)}),
                 status="fetched", created_at=now, updated_at=now,
             )
             version = ResearchSourceVersion(
@@ -788,7 +794,7 @@ class Phase13Service:
             job.fetched_chars += len(content)
             job.status, job.error_code, job.error_message = "insufficient_evidence", None, None
             job.revision, job.updated_at = job.revision + 1, now
-            session.add(self.service._audit("research_manual_material.added", "research_job", job.id, {"sourceId": source.id, "perspective": payload.perspective, "hasSourceUrl": bool(source_url)}, request_id))
+            session.add(self.service._audit("research_manual_material.added", "research_job", job.id, {"sourceId": source.id, "perspective": perspective, "kind": "integrated_report" if payload.perspective is None else "perspective_material", "hasSourceUrl": bool(source_url)}, request_id))
             return self._job_dict(job)
 
     def analyze_manual_materials(self, job_id: str, payload: Any, request_id: str) -> dict[str, Any]:

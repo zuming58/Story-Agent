@@ -291,6 +291,29 @@ def test_manual_research_materials_remain_versioned_and_require_full_coverage(cl
     assert all(item["sourceType"] == "manual" and item["providerMetadata"]["origin"] == "manual" for item in sources)
 
 
+def test_single_integrated_manual_report_can_reach_human_research_review(client):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    }).json()
+    stopped = client.post(f"/api/v1/research/jobs/{created['id']}/cancel", json={"expectedRevision": created["revision"]}).json()
+    report = client.post(f"/api/v1/research/jobs/{stopped['id']}/manual-materials", json={
+        "expectedRevision": stopped["revision"], "title": "External reader and competitor research",
+        "content": "Female readers prefer a proactive protagonist, a concrete opening crisis, and escalating relationship stakes. " * 5,
+    })
+    assert report.status_code == 200, report.text
+    query = client.get(f"/api/v1/research/jobs/{stopped['id']}/queries").json()
+    assert query[-1]["perspective"] == "integrated_report"
+    analyzed = client.post(f"/api/v1/research/jobs/{stopped['id']}/analyze-manual-materials", json={"expectedRevision": report.json()["revision"]})
+    assert analyzed.status_code == 200, analyzed.text
+    assert analyzed.json()["status"] == "awaiting_review"
+    assert analyzed.json()["coverage"]["integratedManualReportCoverageMet"] is True
+    accepted = client.post(f"/api/v1/research/jobs/{stopped['id']}/accept", json={"expectedRevision": analyzed.json()["revision"]})
+    assert accepted.status_code == 200, accepted.text
+
+
 def test_phase14_deterministic_canon_and_opening_gates(client):
     phase13 = client.app.state.story_service.phase13
     incomplete = phase13._generic_canon_checks(

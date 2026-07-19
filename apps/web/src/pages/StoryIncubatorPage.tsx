@@ -40,7 +40,7 @@ const researchErrorMessages: Record<string, string> = {
 };
 
 const researchStages: Record<string, string> = { planning: "规划查询", searching: "搜索公开网页", fetching: "提取网页", analyzing: "抽取证据与分析", awaiting_review: "等待人工确认", accepted: "研究已接受", insufficient_evidence: "证据不足", failed: "任务失败", cancelled: "已取消" };
-const perspectiveLabels: Record<string, string> = { platform_trends: "平台趋势", genre_leaders: "同题材作品", reader_praise: "读者喜欢", reader_dropoff: "读者弃书", opening_strategy: "开篇策略", serial_engine: "连载机制" };
+const perspectiveLabels: Record<string, string> = { integrated_report: "外部综合报告", platform_trends: "平台趋势", genre_leaders: "同题材作品", reader_praise: "读者喜欢", reader_dropoff: "读者弃书", opening_strategy: "开篇策略", serial_engine: "连载机制" };
 const researchFailureHelp: Record<string, string> = { SEARCH_AUTH_FAILED: "Tavily 拒绝了当前密钥，请更新 Tavily API Key 后恢复任务。", SEARCH_RATE_LIMITED: "Tavily 当前限流，请稍后恢复任务，无需重输密钥。", SEARCH_PROVIDER_FAILED: "Tavily 搜索没有得到可用响应；请查看下方运行轨迹中的具体查询。" };
 
 function lines(value: string) { return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean); }
@@ -68,7 +68,7 @@ export function StoryIncubatorPage() {
   const [stage, setStage] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [researchKeys, setResearchKeys] = useState({ tavily: "", firecrawl: "" });
-  const [manualMaterial, setManualMaterial] = useState({ perspective: "platform_trends", title: "", sourceUrl: "", content: "" });
+  const [manualMaterial, setManualMaterial] = useState({ title: "", sourceUrl: "", content: "" });
   const [message, setMessage] = useState("");
   const [briefForm, setBriefForm] = useState(() => createBriefForm());
   const initializedDraftProjectId = useRef<string | null>(null);
@@ -188,9 +188,12 @@ export function StoryIncubatorPage() {
     }));
   };
   const actOnJob = (action: "run" | "resume" | "cancel" | "accept" | "reject") => currentJob && void run(`研究任务已${action === "accept" ? "接受" : action === "reject" ? "拒绝" : "更新"}`, () => api.researchJobAction(currentJob.id, action, currentJob.revision));
-  const addManualMaterial = () => currentJob && void run("人工调研材料已加入证据队列", () => api.addManualResearchMaterial(currentJob.id, {
-    expectedRevision: currentJob.revision, perspective: manualMaterial.perspective, title: manualMaterial.title.trim(), content: manualMaterial.content.trim(), sourceUrl: manualMaterial.sourceUrl.trim() || undefined,
-  })).then(() => setManualMaterial({ perspective: "platform_trends", title: "", sourceUrl: "", content: "" }));
+  const importAndAnalyzeResearchReport = () => currentJob && void run("正在分析外部综合调研报告", async () => {
+    const saved = await api.addManualResearchMaterial(currentJob.id, {
+      expectedRevision: currentJob.revision, title: manualMaterial.title.trim() || "外部综合调研报告", content: manualMaterial.content.trim(), sourceUrl: manualMaterial.sourceUrl.trim() || undefined,
+    });
+    return api.analyzeManualResearchMaterials(saved.id, saved.revision);
+  }).then(() => setManualMaterial({ title: "", sourceUrl: "", content: "" }));
   const analyzeManualMaterials = () => currentJob && void run("正在分析人工调研材料", () => api.analyzeManualResearchMaterials(currentJob.id, currentJob.revision));
   const generateOpportunities = () => currentJob && void run("已生成故事机会", () => api.createStoryOpportunities(currentJob.id, currentJob.revision));
   const decideOpportunity = (id: string, revision: number, action: "accept" | "reject") => void run(action === "accept" ? "已选定故事方向" : "已排除故事方向", () => api.decideStoryOpportunity(id, action, revision));
@@ -243,7 +246,7 @@ export function StoryIncubatorPage() {
           {currentJob.errorCode && <p>{researchFailureHelp[currentJob.errorCode] ?? currentJob.errorMessage}</p>}
           <ol>{researchQueriesQuery.data?.map((item) => <li key={item.id} className={`is-${item.status}`}><span>{perspectiveLabels[item.perspective] ?? item.perspective}</span><strong>{item.status === "failed" ? item.errorCode ?? "失败" : item.status === "succeeded" ? `${item.resultCount} 条结果` : item.status}</strong><small>{item.query}</small></li>)}</ol>
         </section>
-        <details className="manual-research-entry"><summary>人工录入调研材料</summary><p>材料不会触发搜索或抓取；每份材料都进入来源版本、证据抽取和人工确认链。要完成调研，六个视角都需要有可追溯材料。</p><div><label>调研视角<select value={manualMaterial.perspective} onChange={(event) => setManualMaterial({ ...manualMaterial, perspective: event.target.value })}>{Object.entries(perspectiveLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>材料标题<input value={manualMaterial.title} onChange={(event) => setManualMaterial({ ...manualMaterial, title: event.target.value })} /></label><label>公开来源链接（可选）<input value={manualMaterial.sourceUrl} onChange={(event) => setManualMaterial({ ...manualMaterial, sourceUrl: event.target.value })} placeholder="https://..." /></label><label>调研原文或摘要<textarea value={manualMaterial.content} onChange={(event) => setManualMaterial({ ...manualMaterial, content: event.target.value })} /></label></div><footer><button onClick={addManualMaterial} disabled={mutation.isPending || manualMaterial.title.trim().length < 1 || manualMaterial.content.trim().length < 80}>加入材料</button><button className="accept" onClick={analyzeManualMaterials} disabled={mutation.isPending || (currentJob.pageCount === 0)}>分析已加入材料</button></footer></details>
+        <details className="manual-research-entry" open><summary>导入外部综合调研报告</summary><p>把其他 Agent 或你自己的完整调研结论直接粘贴在这里。系统将它保存为“外部综合报告”来源，再由研究模型拆解证据、竞品机制与故事机会；不会调用 Tavily 或 Firecrawl，分析结果仍需你人工接受。</p><div><label>报告标题（可选）<input value={manualMaterial.title} onChange={(event) => setManualMaterial({ ...manualMaterial, title: event.target.value })} placeholder="例如：女性读者偏好与古代悬疑竞品调研" /></label><label>来源说明或公开链接（可选）<input value={manualMaterial.sourceUrl} onChange={(event) => setManualMaterial({ ...manualMaterial, sourceUrl: event.target.value })} placeholder="https://..." /></label><label>完整调研报告<textarea value={manualMaterial.content} onChange={(event) => setManualMaterial({ ...manualMaterial, content: event.target.value })} placeholder="粘贴完整调研结果：读者偏好、竞品、平台趋势、开篇建议、风险与不确定性均可由模型自行拆解。" /></label></div><footer>{currentJob.pageCount > 0 && <button onClick={analyzeManualMaterials} disabled={mutation.isPending}>重新分析已导入报告</button>}<button className="accept" onClick={importAndAnalyzeResearchReport} disabled={mutation.isPending || manualMaterial.content.trim().length < 300}>导入并分析报告</button></footer></details>
         <div className="research-actions">{["failed", "cancelled", "insufficient_evidence"].includes(currentJob.status) && <button onClick={() => actOnJob("resume")}>恢复任务</button>}{["planning", "searching", "fetching", "analyzing"].includes(currentJob.status) && <button onClick={() => actOnJob("cancel")}>取消</button>}{currentJob.status === "awaiting_review" && <><button className="accept" onClick={() => actOnJob("accept")}><Check />接受研究报告</button><button onClick={() => actOnJob("reject")}><X />拒绝</button></>}</div>
         <div className="research-columns"><section><h3>竞品机制 <b>{competitorsQuery.data?.length ?? 0}</b></h3>{competitorsQuery.data?.slice(0, 6).map((item) => <article key={item.id}><strong>{item.name}</strong><span>{Math.round(item.confidence * 100)}% 可信度 · {item.evidenceIds.length} 条证据</span></article>)}</section><section><h3>研究发现 <b>{findingsQuery.data?.length ?? 0}</b></h3>{findingsQuery.data?.slice(0, 8).map((item) => <article key={item.id}><strong>{item.statement}</strong><span>{item.claimType} · {item.evidenceIds.length} 条引用</span></article>)}</section></div>
       </>}</main><aside className="incubator-panel evidence-drawer"><header><div><Books /><span><strong>证据抽屉</strong><small>可追溯到冻结来源版本</small></span></div></header>{evidenceQuery.data?.slice(0, 12).map((item) => <article key={item.id}><span className={`claim-${item.claimType}`}>{item.claimType}</span><p>{item.claim}</p><blockquote>{item.excerpt}</blockquote></article>)}</aside></div>}

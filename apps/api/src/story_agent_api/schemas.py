@@ -1715,9 +1715,9 @@ class ResearchJobAction(ApiModel):
 
 class ManualResearchMaterialCreate(ApiModel):
     expected_revision: int = Field(ge=1)
-    perspective: Literal["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
-    title: str = Field(min_length=1, max_length=240)
-    content: str = Field(min_length=80, max_length=20_000)
+    perspective: Literal["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"] | None = None
+    title: str = Field(default="External research report", min_length=1, max_length=240)
+    content: str = Field(min_length=300, max_length=20_000)
     source_url: str | None = Field(default=None, max_length=2000)
 
 

@@ -1,26 +1,26 @@
-# 2026-07-19 真实用户调研恢复：运行轨迹、Tavily 诊断与人工材料入口
+# 2026-07-20 真实用户调研恢复：综合报告入口
 
 当前分支：`agent/model-backed-story-incubator`
 
-状态：**已完成本地验证并已提交。没有触发用户真实 Tavily、Firecrawl 或模型调用。**
+状态：**已完成本地验证，待提交。没有触发用户真实 Tavily、Firecrawl 或模型调用。**
 
 ## 本轮完成
 
 - 调研任务新增 `GET /api/v1/research/jobs/{job_id}/queries`：逐条返回调研视角、查询文本、运行状态、结果数和安全错误码，不返回 API Key 或正文。
 - Tavily HTTP 错误现在明确分类：`401/403 -> SEARCH_AUTH_FAILED`，`429 -> SEARCH_RATE_LIMITED`，其他 HTTP 状态安全显示为 `SEARCH_PROVIDER_FAILED (HTTP status)`；搜索异常同时落到对应 `ResearchQuery`，不再只显示空白计数。
 - 创意孵化调研台新增运行轨迹，活动任务每 2.5 秒刷新；显示当前阶段、搜索结果、发现来源、抓取失败与每条查询状态。右侧 Story Agent 没有被伪装成调研日志。
-- 新增人工调研材料入口：`POST /api/v1/research/jobs/{job_id}/manual-materials` 保存用户录入的标题、可选公开链接、调研视角和材料文本为来源版本；`POST /api/v1/research/jobs/{job_id}/analyze-manual-materials` 才会发起已绑定研究模型的证据抽取与报告分析，不会调用 Tavily/Firecrawl。
-- 人工材料保留来源、版本、checksum、revision、审计和项目隔离。它不绕过研究门槛：需六个固定视角均有证据，且至少六份人工材料，才能进入“等待人工确认”；仍必须手动接受研究报告。
+- 人工入口改为“导入外部综合调研报告”：用户可一次粘贴其他 Agent 或自己完成的完整调研报告，不再要求手工按六个视角拆分。`POST /api/v1/research/jobs/{job_id}/manual-materials` 将其保存为 `integrated_report` 来源版本；`POST /api/v1/research/jobs/{job_id}/analyze-manual-materials` 才会发起已绑定研究模型的证据抽取与报告分析，不会调用 Tavily/Firecrawl。
+- 综合报告保留来源、版本、checksum、revision、审计和项目隔离。模型必须从该报告抽出至少一条可追溯证据才能进入“等待人工确认”；仍必须手动接受研究报告，不能直接跳到故事机会。
 
 ## 用户当前调研判断
 
 - 截图中“查询 12、来源页面 0、证据片段 0、`insufficient_evidence`”表示搜索尝试累计了 12 条，但没有成功入库来源，不表示已抓取 12 个页面。
 - 这是搜索 Provider 产出问题，不是研究模型或写作模型“太强”造成的。刷新本地页面并再次操作后，运行轨迹会显示具体失败码；不要盲目反复换 Key 或点击恢复。
-- 使用人工入口时，每份内容应是自己的调研笔记、公开链接摘要或公开资料摘录，按六个视角分别录入。完成录入后点“分析已加入材料”，再人工查看并接受报告。
+- 使用人工入口时，直接粘贴一整份外部综合调研报告。点击“导入并分析报告”后，模型会拆解其中的读者偏好、竞品、平台趋势、开篇建议和不确定性；随后人工查看并接受报告。
 
 ## 验证
 
-- API 专项：`apps/api/tests/test_phase13_incubator.py`，`16 passed`。覆盖查询轨迹、Tavily 401/403/429/5xx 分类、人工材料版本化与六视角门槛。
+- API 新增用例：单份 `integrated_report` 经模型分析后进入人工研究确认，且接受操作仍为显式门槛；该定向用例通过。完整 Phase 13 专项在桌面 124 秒命令上限下中止，未将超时记为通过。
 - Web 单测：`3 files / 15 passed`。
 - Build：通过；仅有既有 Vite chunk-size warning。
 - Playwright：隔离端口下 `desktop-1440 10 passed`、`desktop-1280 10 passed`。
@@ -29,7 +29,7 @@
 ## 已知限制
 
 - 尚未重新发起用户真实调研，避免消耗额度。刷新到本轮 API 后，应先读取运行轨迹再决定是否由用户点击“恢复任务”。
-- 人工材料分析会调用已绑定的研究模型，因此仅在用户明确点击“分析已加入材料”时执行；它不会自动接受研究报告。
+- 人工报告分析会调用已绑定的研究模型，因此仅在用户明确点击“导入并分析报告”时执行；它不会自动接受研究报告。
 - `npm run test` 的完整 API 回归此前受桌面命令 124 秒上限影响，本轮已完成变更相关 API 专项、Web 全量、构建与双规格 Playwright，未将超时误记为通过。
 
 ---

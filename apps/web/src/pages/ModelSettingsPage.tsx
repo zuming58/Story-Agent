@@ -146,6 +146,8 @@ export function ModelSettingsPage() {
     for (const binding of bindings) if (binding.model) byId.set(binding.model.id, binding.model);
     return [...byId.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, "zh-CN"));
   }, [providerModelsQueries, bindings]);
+  const hasDeepSeekPreset = providers.some((provider) => provider.name === "DeepSeek 官方" && provider.baseUrl === "https://api.deepseek.com");
+  const hasVolcenginePreset = providers.some((provider) => provider.name === "火山引擎 Coding Plan" && provider.baseUrl === "https://ark.cn-beijing.volces.com/api/coding/v3");
 
   const refreshSettings = async () => {
     await Promise.all([
@@ -279,14 +281,6 @@ export function ModelSettingsPage() {
           <h1>模型与费用设置</h1>
           <p>管理 OpenAI 兼容 Provider、系统凭据、模型参数和角色路由。</p>
         </div>
-        <div className="settings-preset-actions">
-          <button className="settings-secondary" onClick={() => deepseekMutation.mutate()} disabled={deepseekMutation.isPending}>
-            <Plus size={17} /> DeepSeek 官方
-          </button>
-          <button className="settings-primary" onClick={() => volcenginePresetMutation.mutate()} disabled={volcenginePresetMutation.isPending}>
-            <Plus size={17} /> 火山 Coding Plan
-          </button>
-        </div>
       </header>
 
       <div className="settings-grid">
@@ -302,7 +296,17 @@ export function ModelSettingsPage() {
             ))}
             {!providers.length && <div className="settings-empty">尚未配置 Provider。可创建 DeepSeek 预设或自定义中转地址。</div>}
           </div>
+          <div className="provider-presets">
+            <div><strong>快速添加 Provider</strong><span>添加后会出现在上方列表，可选择和编辑。</span></div>
+            <button onClick={() => deepseekMutation.mutate()} disabled={hasDeepSeekPreset || deepseekMutation.isPending}>
+              {hasDeepSeekPreset ? <CheckCircle size={15} /> : <Plus size={15} />}{hasDeepSeekPreset ? "DeepSeek 已添加" : "DeepSeek 官方"}
+            </button>
+            <button onClick={() => volcenginePresetMutation.mutate()} disabled={hasVolcenginePreset || volcenginePresetMutation.isPending}>
+              {hasVolcenginePreset ? <CheckCircle size={15} /> : <Plus size={15} />}{hasVolcenginePreset ? "火山已添加" : "火山 Coding Plan"}
+            </button>
+          </div>
           <form className="settings-form" onSubmit={submitProvider}>
+            <div className="settings-form-title"><strong>自定义 Provider</strong><span>新增后同样显示在上方列表</span></div>
             <label><span>名称</span><input aria-label="新增 Provider 名称" value={providerForm.name} onChange={(event) => setProviderForm({ ...providerForm, name: event.target.value })} /></label>
             <label><span>Base URL</span><input aria-label="新增 Provider Base URL" value={providerForm.baseUrl} onChange={(event) => setProviderForm({ ...providerForm, baseUrl: event.target.value })} /></label>
             <div className="settings-form-row">

@@ -198,6 +198,16 @@ describe("Story Agent shell", () => {
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
   });
 
+  it("opens safety and system management from the top bar without creating a backup", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/planning"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    await user.click(await screen.findByRole("button", { name: "打开安全与系统管理" }));
+    expect(await screen.findByRole("heading", { name: "备份恢复与调用诊断" })).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).includes("/backups") && init?.method === "POST")).toBe(false);
+  });
+
   it("opens the real chapter writing and quality workspaces", async () => {
     const user = userEvent.setup();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

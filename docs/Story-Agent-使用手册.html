@@ -361,7 +361,7 @@
       <p class="section-intro">模型配置决定每个工作角色用哪个模型；安全审计负责备份、恢复、调用记录和错误诊断。</p>
       <div class="shot-wrap"><img src="assets/user-guide/09-settings.png" alt="模型设置页面截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span></div>
       <div class="callouts">
-        <div class="callout"><b>1</b><div><strong>Provider</strong><p>DeepSeek 官方地址或 OpenAI 兼容中转地址。API Key 保存后不会回显。</p></div></div>
+        <div class="callout"><b>1</b><div><strong>Provider</strong><p>左侧列表用于选择已有 Provider；快速预设和自定义表单都在列表下方，添加后统一进入列表。API Key 保存后不会回显。</p></div></div>
         <div class="callout"><b>2</b><div><strong>测试连接</strong><p>确认地址、密钥和模型列表可用。只有保存过的 Provider 才能测试。</p></div></div>
         <div class="callout"><b>3</b><div><strong>模型参数</strong><p>模型 ID、显示名、输入/输出价格、温度、最大输出和推理能力标记。</p></div></div>
         <div class="callout"><b>4</b><div><strong>角色绑定</strong><p>把写作、事实抽取、连续性、故事编辑、文风、修订、架构和分析角色分配给模型。</p></div></div>
@@ -372,6 +372,7 @@
         <li><strong>新增模型。</strong><p>模型 ID 必须与服务端实际可用名称一致。设置价格后才能正确执行每日费用上限。</p></li>
         <li><strong>完成角色绑定。</strong><p>双模型推荐分工中，Kimi K2.6 负责正文、修订和创意；DeepSeek V4 Pro 负责规划、事实和独立审校。选择两项模型后点“套用双模型分工”；Embedding 保持单独配置。缺少任何试写必需角色，自动托管就绪检查会显示阻断。</p></li>
       </ol>
+      <div class="notice"><strong>右上角齿轮：</strong>用于打开“安全审计 / 系统管理”，不会直接创建备份。创建备份、恢复、审计时间线和模型调用诊断都在安全审计分栏中明确操作。</div>
       <h3>安全审计分栏</h3>
       <table><thead><tr><th>功能</th><th>说明</th></tr></thead><tbody>
         <tr><td><strong>创建备份</strong></td><td>生成带 SHA-256 清单的项目 ZIP；不包含 API Key。</td></tr>

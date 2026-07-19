@@ -98,6 +98,26 @@ test("safety audit workspace exposes backup and diagnostics without covering Age
   await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
 });
 
+test("provider presets stay with the Provider list and the top gear opens system management", async ({ page }) => {
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "模型与费用设置" })).toBeVisible();
+  await expect(page.locator(".settings-heading button")).toHaveCount(0);
+  const presets = page.locator(".provider-presets");
+  await expect(presets.getByText("快速添加 Provider")).toBeVisible();
+  await expect(presets.getByRole("button", { name: /DeepSeek/ })).toBeVisible();
+  await expect(presets.getByRole("button", { name: /火山/ })).toBeVisible();
+
+  const projects = await (await page.request.get("/api/v1/projects")).json() as Array<{ id: string }>;
+  const before = await (await page.request.get(`/api/v1/projects/${projects[0].id}/backups`)).json() as unknown[];
+  await page.getByRole("button", { name: "打开安全与系统管理" }).click();
+  await expect(page).toHaveURL(/\/settings\?tab=safety$/);
+  await expect(page.getByRole("heading", { name: "备份恢复与调用诊断" })).toBeVisible();
+  const after = await (await page.request.get(`/api/v1/projects/${projects[0].id}/backups`)).json() as unknown[];
+  expect(after).toHaveLength(before.length);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
+});
+
 test("chapter workbench persists a locked contract and queued job", async ({ page }, testInfo) => {
   const project = await createProject(page, testInfo, "writing");
   const canon = await (await page.request.get(`/api/v1/projects/${project.id}/canon`)).json();

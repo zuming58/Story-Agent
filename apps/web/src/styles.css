@@ -401,6 +401,7 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .settings-heading h1 { margin: 9px 0 6px; color: #eee8dd; font: 600 30px/1.25 "Noto Serif SC", serif; letter-spacing: .04em; }
 .settings-heading p { margin: 0; color: #7f8d99; font-size: 12px; }
 .settings-primary { height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #a57a43; background: #2b241a; color: #e0b875; border-radius: 4px; padding: 0 12px; cursor: pointer; font-size: 11px; white-space: nowrap; }
+.settings-preset-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }.settings-secondary { height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #31485a; background: #0b1a28; color: #b7c4ce; border-radius: 4px; padding: 0 12px; cursor: pointer; font-size: 11px; white-space: nowrap; }
 .settings-grid { display: grid; grid-template-columns: minmax(240px, .85fr) minmax(300px, 1.2fr) minmax(260px, .95fr); gap: 12px; padding-top: 14px; align-items: start; }
 .settings-panel { min-width: 0; border: 1px solid #26394a; border-radius: 5px; background: #0a1725; overflow: hidden; }
 .settings-panel > header { height: 37px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #243646; }
@@ -437,6 +438,14 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .role-list { gap: 8px; }
 .role-row { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 8px; color: #9ba8b3; font-size: 10px; }
 .role-row > span { color: #c4a874; }
+.model-strategy { display: grid; gap: 8px; padding: 11px 10px; border-bottom: 1px solid #2b3f50; background: linear-gradient(135deg, rgba(43,37,29,.76), rgba(9,23,36,.9)); }
+.model-strategy-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.model-strategy-heading strong { color: #e1c17f; font-size: 12px; }.model-strategy-heading span { color: #778795; font-size: 9px; }
+.model-strategy > p, .model-strategy > small { margin: 0; color: #93a1ac; font-size: 10px; line-height: 1.55; }.model-strategy > small { color: #718190; }
+.model-strategy label { display: grid; gap: 5px; color: #c8ae7d; font-size: 10px; }.model-strategy select { width: 100%; min-width: 0; height: 31px; border: 1px solid #3c5061; border-radius: 4px; background: #081522; color: #cbd2d8; padding: 0 8px; font-size: 11px; }
+.model-strategy .settings-primary { justify-self: start; }.model-strategy-warning { color: #e5a83d !important; }
+.role-group { display: grid; gap: 8px; padding-top: 2px; }.role-group + .role-group { margin-top: 5px; padding-top: 10px; border-top: 1px solid #1e3040; }
+.role-group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }.role-group-heading strong { color: #d4dce2; font-size: 11px; }.role-group-heading span { color: #70808e; font-size: 9px; text-align: right; }
 .settings-diagnostic { margin: 4px 10px 12px; padding: 10px; border-left: 2px solid #596ce0; background: rgba(108, 124, 255, .07); }
 .settings-diagnostic strong { color: #cfd5ff; font-size: 11px; }
 .settings-diagnostic p { margin: 6px 0 0; color: #7e8b99; font-size: 9px; line-height: 1.6; }

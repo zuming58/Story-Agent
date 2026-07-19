@@ -367,10 +367,10 @@
         <div class="callout"><b>4</b><div><strong>角色绑定</strong><p>把写作、事实抽取、连续性、故事编辑、文风、修订、架构和分析角色分配给模型。</p></div></div>
       </div>
       <ol class="steps">
-        <li><strong>创建或选择 Provider。</strong><p>DeepSeek 可用官方预设；中转服务则填写自己的 Base URL。</p></li>
+        <li><strong>创建或选择 Provider。</strong><p>DeepSeek 可用官方预设；使用火山引擎 Coding Plan 时，点同名预设，系统会填入 OpenAI 兼容地址和两项推荐模型。</p></li>
         <li><strong>保存 API Key 与配置，再点“测试连接”。</strong><p>成功状态会记录测试时间；完整密钥不会进入 SQLite、日志或备份。</p></li>
         <li><strong>新增模型。</strong><p>模型 ID 必须与服务端实际可用名称一致。设置价格后才能正确执行每日费用上限。</p></li>
-        <li><strong>完成角色绑定。</strong><p>缺少任何试写必需角色，自动托管就绪检查会显示阻断。</p></li>
+        <li><strong>完成角色绑定。</strong><p>双模型推荐分工中，Kimi K2.6 负责正文、修订和创意；DeepSeek V4 Pro 负责规划、事实和独立审校。选择两项模型后点“套用双模型分工”；Embedding 保持单独配置。缺少任何试写必需角色，自动托管就绪检查会显示阻断。</p></li>
       </ol>
       <h3>安全审计分栏</h3>
       <table><thead><tr><th>功能</th><th>说明</th></tr></thead><tbody>

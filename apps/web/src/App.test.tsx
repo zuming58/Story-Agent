@@ -120,6 +120,7 @@ describe("Story Agent shell", () => {
 
     expect(await screen.findByRole("heading", { name: "模型与费用设置" })).toBeInTheDocument();
     expect(screen.getByText("市场调研规划")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "火山 Coding Plan" })).toBeInTheDocument();
     const keyInput = screen.getByLabelText("新增 Provider API Key");
     await user.clear(screen.getByLabelText("新增 Provider 名称"));
     await user.type(screen.getByLabelText("新增 Provider 名称"), "测试 Provider");
@@ -130,6 +131,45 @@ describe("Story Agent shell", () => {
     expect(await screen.findByText("Provider 已保存，密钥输入已清空。")).toBeInTheDocument();
     expect(keyInput).toHaveValue("");
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+  });
+
+  it("applies the two-model role allocation across configured Providers", async () => {
+    const writerModel = { id: "model-writer", providerId: "provider-kimi", providerName: "Kimi", modelId: "kimi-writing", displayName: "Kimi 正文", temperature: 0.8, maxOutputTokens: 4096, supportsReasoning: false, isEnabled: true, inputPricePerMillion: 1, outputPricePerMillion: 2, createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" };
+    const reviewerModel = { id: "model-reviewer", providerId: "provider-deepseek", providerName: "DeepSeek", modelId: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", temperature: 0.3, maxOutputTokens: 4096, supportsReasoning: true, isEnabled: true, inputPricePerMillion: 1, outputPricePerMillion: 2, createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" };
+    const defaultFetch = vi.mocked(fetch).getMockImplementation();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/model-providers")) return json([
+        { id: "provider-kimi", name: "Kimi", providerType: "openai-compatible", baseUrl: "https://api.moonshot.test", timeoutSeconds: 30, maxRetries: 1, isEnabled: true, hasApiKey: true, apiKeyPreview: "1234", createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" },
+        { id: "provider-deepseek", name: "DeepSeek", providerType: "openai-compatible", baseUrl: "https://api.deepseek.test", timeoutSeconds: 30, maxRetries: 1, isEnabled: true, hasApiKey: true, apiKeyPreview: "5678", createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" },
+      ]);
+      if (url.endsWith("/model-providers/provider-kimi/models")) return json([writerModel]);
+      if (url.endsWith("/model-providers/provider-deepseek/models")) return json([reviewerModel]);
+      if (url.endsWith("/model-role-bindings/bulk") && init?.method === "PUT") return json([]);
+      if (url.endsWith("/model-role-bindings")) return json([
+        { role: "chinese_writer", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-19T00:00:00Z" },
+        { role: "planner", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-19T00:00:00Z" },
+        { role: "embedding", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-19T00:00:00Z" },
+      ]);
+      return defaultFetch?.(input, init) ?? json({ status: "ok" });
+    });
+
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    expect(await screen.findByText("双模型分工")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("正文与修订模型"), "model-writer");
+    await user.selectOptions(screen.getByLabelText("结构与审校模型"), "model-reviewer");
+    await user.click(screen.getByRole("button", { name: "套用双模型分工" }));
+    expect(await screen.findByText(/双模型分工已套用/)).toBeInTheDocument();
+
+    const bulkCall = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith("/model-role-bindings/bulk") && init?.method === "PUT");
+    expect(bulkCall).toBeDefined();
+    const payload = JSON.parse(String(bulkCall?.[1]?.body)) as { modelIds: Record<string, string> };
+    expect(payload.modelIds.chinese_writer).toBe("model-writer");
+    expect(payload.modelIds.planner).toBe("model-reviewer");
+    expect(payload.modelIds.embedding).toBeUndefined();
   });
 
   it("streams Agent replies with model run status", async () => {

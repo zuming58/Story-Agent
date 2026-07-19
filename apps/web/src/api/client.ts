@@ -22,6 +22,7 @@ import type {
   ModelConfig,
   ModelRun,
   ModelProvider,
+  ModelRole,
   ModelRoleBinding,
   PlanNode,
   ProjectCreateRequest,
@@ -206,6 +207,7 @@ export const api = {
     apiKey?: string;
   }) => request<ModelProvider>("/model-providers", { method: "POST", body: JSON.stringify(payload) }),
   createDeepSeekPreset: () => request<ModelProvider>("/model-providers/deepseek-preset", { method: "POST" }),
+  createVolcengineCodingPlanPreset: () => request<ModelProvider>("/model-providers/volcengine-coding-plan-preset", { method: "POST" }),
   updateModelProvider: (providerId: string, payload: Partial<{
     name: string;
     providerType: "openai-compatible";
@@ -243,6 +245,8 @@ export const api = {
   roleBindings: () => request<ModelRoleBinding[]>("/model-role-bindings"),
   updateRoleBinding: (role: string, payload: { modelId: string | null; dailyCostLimit?: number | null }) =>
     request<ModelRoleBinding>(`/model-role-bindings/${role}`, { method: "PUT", body: JSON.stringify(payload) }),
+  updateRoleBindings: (modelIds: Partial<Record<ModelRole, string | null>>) =>
+    request<ModelRoleBinding[]>("/model-role-bindings/bulk", { method: "PUT", body: JSON.stringify({ modelIds }) }),
   canon: (projectId: string) => request<CanonWorkspace>(`/projects/${projectId}/canon`),
   updateCanonDraft: (projectId: string, payload: {
     documents?: Array<Record<string, unknown>>;

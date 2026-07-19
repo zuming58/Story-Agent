@@ -339,6 +339,10 @@ class ModelRoleBindingUpdate(ApiModel):
     daily_cost_limit: float | None = Field(default=None, ge=0)
 
 
+class ModelRoleBindingBulkUpdate(ApiModel):
+    model_ids: dict[str, str | None] = Field(min_length=1, max_length=20)
+
+
 class ProviderConnectionTestOut(ApiModel):
     ok: bool
     status: Literal["success", "missing_api_key", "auth_failed", "timeout", "network_error", "invalid_response", "credential_unavailable"]

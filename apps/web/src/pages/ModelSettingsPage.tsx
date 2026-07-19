@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle,
   Flask,
@@ -30,6 +30,26 @@ const roleLabels: Record<ModelRole, string> = {
   reader_simulator: "目标读者模拟",
   opening_editor: "开篇编辑评审",
 };
+
+const writingRoles: ModelRole[] = ["chinese_writer", "reviser", "story_incubator"];
+const reviewRoles: ModelRole[] = [
+  "architect",
+  "planner",
+  "fact_extractor",
+  "logic_reviewer",
+  "continuity_reviewer",
+  "story_editor",
+  "style_reviewer",
+  "research_planner",
+  "research_analyst",
+  "reader_simulator",
+  "opening_editor",
+];
+const roleGroups: Array<{ title: string; detail: string; roles: ModelRole[] }> = [
+  { title: "正文与创意", detail: "写作、修订和创意共创", roles: writingRoles },
+  { title: "结构与审校", detail: "规划、事实、连续性、编辑和读者评审", roles: reviewRoles },
+  { title: "专用检索", detail: "Embedding 需要独立向量模型", roles: ["embedding"] },
+];
 
 function statusText(status?: ProviderConnectionTest["status"]) {
   switch (status) {
@@ -77,6 +97,8 @@ export function ModelSettingsPage() {
   });
   const [testResult, setTestResult] = useState<ProviderConnectionTest | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [writingModelId, setWritingModelId] = useState("");
+  const [reviewModelId, setReviewModelId] = useState("");
 
   const providersQuery = useQuery({ queryKey: ["model-providers"], queryFn: api.modelProviders, retry: 1 });
   const providers = providersQuery.data ?? [];
@@ -89,6 +111,13 @@ export function ModelSettingsPage() {
   const bindingsQuery = useQuery({ queryKey: ["role-bindings"], queryFn: api.roleBindings, retry: 1 });
   const models = modelsQuery.data ?? [];
   const bindings = bindingsQuery.data ?? [];
+  const providerModelsQueries = useQueries({
+    queries: providers.map((provider) => ({
+      queryKey: ["provider-models", provider.id],
+      queryFn: () => api.providerModels(provider.id),
+      enabled: Boolean(provider.id),
+    })),
+  });
 
   useEffect(() => {
     if (!selectedProviderId && providers.length) setSelectedProviderId(providers[0].id);
@@ -113,10 +142,10 @@ export function ModelSettingsPage() {
 
   const allModels = useMemo(() => {
     const byId = new Map<string, ModelConfig>();
-    for (const model of models) byId.set(model.id, model);
+    for (const query of providerModelsQueries) for (const model of query.data ?? []) byId.set(model.id, model);
     for (const binding of bindings) if (binding.model) byId.set(binding.model.id, binding.model);
     return [...byId.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, "zh-CN"));
-  }, [models, bindings]);
+  }, [providerModelsQueries, bindings]);
 
   const refreshSettings = async () => {
     await Promise.all([
@@ -196,6 +225,26 @@ export function ModelSettingsPage() {
     },
     onError: (error) => setNotice(errorMessage(error)),
   });
+  const volcenginePresetMutation = useMutation({
+    mutationFn: api.createVolcengineCodingPlanPreset,
+    onSuccess: async (provider) => {
+      await refreshSettings();
+      setSelectedProviderId(provider.id);
+      setNotice("已创建火山引擎 Coding Plan 预设。请填写密钥、确认账单价格后测试连接。");
+    },
+    onError: (error) => setNotice(errorMessage(error)),
+  });
+  const applyDualModelMutation = useMutation({
+    mutationFn: ({ writingId, reviewId }: { writingId: string; reviewId: string }) => api.updateRoleBindings({
+      ...Object.fromEntries(writingRoles.map((role) => [role, writingId])),
+      ...Object.fromEntries(reviewRoles.map((role) => [role, reviewId])),
+    }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["role-bindings"] });
+      setNotice("双模型分工已套用：正文与修订使用正文模型，规划、事实和审校使用结构审校模型。Embedding 未修改。");
+    },
+    onError: (error) => setNotice(errorMessage(error)),
+  });
   const deleteProviderMutation = useMutation({
     mutationFn: api.deleteModelProvider,
     onSuccess: async () => {
@@ -230,9 +279,14 @@ export function ModelSettingsPage() {
           <h1>模型与费用设置</h1>
           <p>管理 OpenAI 兼容 Provider、系统凭据、模型参数和角色路由。</p>
         </div>
-        <button className="settings-primary" onClick={() => deepseekMutation.mutate()} disabled={deepseekMutation.isPending}>
-          <Plus size={17} /> DeepSeek 预设
-        </button>
+        <div className="settings-preset-actions">
+          <button className="settings-secondary" onClick={() => deepseekMutation.mutate()} disabled={deepseekMutation.isPending}>
+            <Plus size={17} /> DeepSeek 官方
+          </button>
+          <button className="settings-primary" onClick={() => volcenginePresetMutation.mutate()} disabled={volcenginePresetMutation.isPending}>
+            <Plus size={17} /> 火山 Coding Plan
+          </button>
+        </div>
       </header>
 
       <div className="settings-grid">
@@ -314,16 +368,43 @@ export function ModelSettingsPage() {
 
         <section className="settings-panel role-panel" aria-label="角色绑定">
           <header><strong>角色绑定</strong><span>{bindings.filter((item) => item.modelId).length}/{bindings.length}</span></header>
+          <div className="model-strategy" aria-label="双模型分工">
+            <div className="model-strategy-heading">
+              <strong>双模型分工</strong>
+              <span>正文模型 + 独立审校模型</span>
+            </div>
+            <p>建议正文与修订使用 Kimi；结构、事实和审校使用 DeepSeek V4 Pro。请以 Provider 控制台实际可用模型 ID 为准。</p>
+            <label><span>正文与修订模型</span><select aria-label="正文与修订模型" value={writingModelId} onChange={(event) => setWritingModelId(event.target.value)}>
+              <option value="">请选择已配置模型</option>
+              {allModels.map((model) => <option value={model.id} key={model.id}>{model.providerName} / {model.displayName}</option>)}
+            </select></label>
+            <label><span>结构与审校模型</span><select aria-label="结构与审校模型" value={reviewModelId} onChange={(event) => setReviewModelId(event.target.value)}>
+              <option value="">请选择已配置模型</option>
+              {allModels.map((model) => <option value={model.id} key={model.id}>{model.providerName} / {model.displayName}</option>)}
+            </select></label>
+            <button className="settings-primary" onClick={() => applyDualModelMutation.mutate({ writingId: writingModelId, reviewId: reviewModelId })} disabled={!writingModelId || !reviewModelId || writingModelId === reviewModelId || applyDualModelMutation.isPending}>
+              {applyDualModelMutation.isPending ? "正在套用…" : "套用双模型分工"}
+            </button>
+            {writingModelId === reviewModelId && writingModelId && <small className="model-strategy-warning">请选择两个不同模型，避免正文模型审查自身输出。</small>}
+            <small>Embedding 不属于文本模型分工，保持单独配置或暂不绑定。</small>
+          </div>
           <div className="role-list">
-            {bindings.map((binding) => (
-              <label className="role-row" key={binding.role}>
-                <span>{roleLabels[binding.role]}</span>
-                <select value={binding.modelId ?? ""} onChange={(event) => bindMutation.mutate({ role: binding.role, modelId: event.target.value || null })}>
-                  <option value="">未绑定</option>
-                  {allModels.map((model) => <option value={model.id} key={model.id}>{model.providerName} / {model.displayName}</option>)}
-                </select>
-              </label>
-            ))}
+            {roleGroups.map((group) => {
+              const groupBindings = bindings.filter((binding) => group.roles.includes(binding.role));
+              if (!groupBindings.length) return null;
+              return <div className="role-group" key={group.title}>
+                <div className="role-group-heading"><strong>{group.title}</strong><span>{group.detail}</span></div>
+                {groupBindings.map((binding) => (
+                  <label className="role-row" key={binding.role}>
+                    <span>{roleLabels[binding.role]}</span>
+                    <select value={binding.modelId ?? ""} onChange={(event) => bindMutation.mutate({ role: binding.role, modelId: event.target.value || null })}>
+                      <option value="">未绑定</option>
+                      {allModels.map((model) => <option value={model.id} key={model.id}>{model.providerName} / {model.displayName}</option>)}
+                    </select>
+                  </label>
+                ))}
+              </div>;
+            })}
           </div>
           <div className="settings-diagnostic">
             <strong>错误诊断</strong>

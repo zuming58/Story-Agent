@@ -95,6 +95,7 @@ from .schemas import (
     ModelProviderUpdate,
     ModelRunOut,
     ModelRoleBindingOut,
+    ModelRoleBindingBulkUpdate,
     ModelRoleBindingUpdate,
     PlanNodeCreate,
     PlanNodeOut,
@@ -219,6 +220,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def create_deepseek_preset() -> object:
         return service.create_deepseek_preset()
 
+    @app.post("/api/v1/model-providers/volcengine-coding-plan-preset", response_model=ModelProviderOut, status_code=201)
+    def create_volcengine_coding_plan_preset() -> object:
+        return service.create_volcengine_coding_plan_preset()
+
     @app.get("/api/v1/model-providers/{provider_id}", response_model=ModelProviderOut)
     def get_model_provider(provider_id: str) -> object:
         return service.get_model_provider(provider_id)
@@ -254,6 +259,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/model-role-bindings", response_model=list[ModelRoleBindingOut])
     def list_model_role_bindings() -> object:
         return service.list_model_role_bindings()
+
+    @app.put("/api/v1/model-role-bindings/bulk", response_model=list[ModelRoleBindingOut])
+    def update_model_role_bindings(payload: ModelRoleBindingBulkUpdate) -> object:
+        return service.update_model_role_bindings(payload.model_ids)
 
     @app.put("/api/v1/model-role-bindings/{role}", response_model=ModelRoleBindingOut)
     def update_model_role_binding(role: str, payload: ModelRoleBindingUpdate) -> object:

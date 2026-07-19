@@ -527,6 +527,51 @@ class StoryService:
         ))
         return self.get_model_provider(provider["id"])
 
+    def create_volcengine_coding_plan_preset(self) -> dict[str, Any]:
+        provider_name = "火山引擎 Coding Plan"
+        base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
+        model_presets = [
+            ModelConfigCreate(
+                model_id="Kimi-K2.6",
+                display_name="Kimi K2.6（正文）",
+                temperature=0.8,
+                max_output_tokens=4096,
+                supports_reasoning=True,
+                is_enabled=True,
+            ),
+            ModelConfigCreate(
+                model_id="DeepSeek-V4-Pro",
+                display_name="DeepSeek V4 Pro（结构审校）",
+                temperature=0.3,
+                max_output_tokens=4096,
+                supports_reasoning=True,
+                is_enabled=True,
+            ),
+        ]
+        with self.db.catalog() as session:
+            provider = session.scalar(select(ModelProvider).where(
+                ModelProvider.name == provider_name,
+                ModelProvider.base_url == base_url,
+            ))
+            provider_id = provider.id if provider else None
+        if not provider_id:
+            provider = self.create_model_provider(ModelProviderCreate(
+                name=provider_name,
+                base_url=base_url,
+                timeout_seconds=60,
+                max_retries=1,
+            ))
+            provider_id = provider["id"]
+
+        with self.db.catalog() as session:
+            existing_model_ids = set(session.scalars(
+                select(ModelConfig.model_id).where(ModelConfig.provider_id == provider_id)
+            ).all())
+        for preset in model_presets:
+            if preset.model_id not in existing_model_ids:
+                self.create_model_config(provider_id, preset)
+        return self.get_model_provider(provider_id)
+
     def list_model_configs(self, provider_id: str) -> list[dict[str, Any]]:
         with self.db.catalog() as session:
             provider = session.get(ModelProvider, provider_id)
@@ -610,6 +655,37 @@ class StoryService:
             binding = session.scalar(select(ModelRoleBinding).where(ModelRoleBinding.role == role).options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider)))
             assert binding
             return self._role_binding_dict(binding)
+
+    def update_model_role_bindings(self, model_ids: dict[str, str | None]) -> list[dict[str, Any]]:
+        self._ensure_model_role_bindings()
+        unknown_roles = sorted(set(model_ids) - set(MODEL_ROLES))
+        if unknown_roles:
+            raise StoryError(404, "MODEL_ROLE_NOT_FOUND", "模型角色不存在。", {"roles": unknown_roles})
+
+        requested_model_ids = {model_id for model_id in model_ids.values() if model_id}
+        with self.db.catalog() as session:
+            models = {
+                item.id: item
+                for item in session.scalars(select(ModelConfig).where(ModelConfig.id.in_(requested_model_ids))).all()
+            } if requested_model_ids else {}
+            missing_model_ids = sorted(requested_model_ids - set(models))
+            if missing_model_ids:
+                raise StoryError(404, "MODEL_CONFIG_NOT_FOUND", "模型配置不存在。", {"modelIds": missing_model_ids})
+
+            now = utc_now()
+            for role, model_id in model_ids.items():
+                binding = session.get(ModelRoleBinding, role)
+                assert binding
+                binding.model_id = model_id
+                binding.updated_at = now
+            session.commit()
+            rows = session.scalars(
+                select(ModelRoleBinding)
+                .where(ModelRoleBinding.role.in_(model_ids))
+                .options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider))
+                .order_by(ModelRoleBinding.role)
+            ).all()
+            return [self._role_binding_dict(item) for item in rows]
 
     def test_model_provider(self, provider_id: str) -> dict[str, Any]:
         with self.db.catalog() as session:

@@ -1,3 +1,48 @@
+# 2026-07-19 真实用户测试小修：火山 Coding Plan 双模型配置
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已实现、已完成本地回归，等待用户填写火山引擎 Coding Plan 密钥并做一次最小连接测试。未调用真实 Kimi、DeepSeek 或火山引擎。**
+
+## 本轮完成项
+
+- 模型设置页新增“火山 Coding Plan”内置 Provider 预设，Base URL 固定为用户提供的 OpenAI 兼容地址：`https://ark.cn-beijing.volces.com/api/coding/v3`。
+- 预设创建两项可单独绑定的模型记录：`Kimi-K2.6`（正文）与 `DeepSeek-V4-Pro`（结构审校）；预设幂等，重复点击只复用 Provider 和补齐缺失模型，不保存或回显 API Key。
+- 设置页新增“正文与修订模型 / 结构与审校模型”双模型分工：Kimi 绑定 `chinese_writer`、`reviser`、`story_incubator`；DeepSeek 绑定 `architect`、`planner`、`fact_extractor`、`logic_reviewer`、`continuity_reviewer`、`story_editor`、`style_reviewer`、研究、读者和开篇评审角色。
+- “套用双模型分工”走新的原子批量绑定接口，先验证所有角色与模型，再在一个 catalog SQLite 事务中更新；`Embedding` 不会被错误绑定到文本模型，保留给独立向量模型。
+- 角色下拉框现在加载全部 Provider 的模型，不再只能选择当前 Provider 或已绑定模型；Kimi 与 DeepSeek 可以来自同一个火山 Provider。
+- 用户手册已同步 Coding Plan、Kimi K2.6 与 DeepSeek V4 Pro 的配置流程。
+
+## 接口变化
+
+- `POST /api/v1/model-providers/volcengine-coding-plan-preset`：创建或补齐火山 Coding Plan Provider 与两项模型记录。
+- `PUT /api/v1/model-role-bindings/bulk`：请求体 `{ "modelIds": { "role": "model-id" } }`，原子更新指定角色绑定并保留各角色已有费用上限。
+
+## 用户下一步
+
+1. 打开“模型与费用设置”，点击“火山 Coding Plan”。
+2. 在 Provider 中填写火山 API Key，点击“测试连接”。密钥只写入 `SecretStore`，不会进入 SQLite、API 响应、日志或 Git。
+3. 选择 `Kimi K2.6（正文）` 与 `DeepSeek V4 Pro（结构审校）`，点击“套用双模型分工”。
+4. 按 Coding Plan 实际抵扣/账单填写两项模型价格，再启用自动托管；价格未知时系统应继续阻断自动托管，避免费用台账伪造为零。
+5. 先用一部新测试作品进行连接测试、一个开篇与一章手动试写；不得用《夜巡人》消耗真实额度。
+
+## 验证结果
+
+- API：16 个测试文件拆分全量回归，`172 passed`；`test_model_provider.py + test_model_config.py` 为 `11 passed`，覆盖 Coding Plan 预设、幂等、无密钥回显和双模型原子绑定。
+- Web 单测：`3 files / 13 passed`，覆盖跨 Provider 选择两项模型与批量角色映射。
+- Build：通过；仅现有 Vite chunk-size warning。
+- Playwright：`desktop-1440` 9 passed，`desktop-1280` 9 passed，共 18 passed。
+- `npm run test` 与未拆分 `npm run test:e2e` 均因桌面 124 秒命令上限中断；上述拆分运行完整覆盖同一套 API/Web/E2E 测试。
+- `git diff --check`：通过，仅有既有 Windows LF/CRLF 提示。
+
+## 已知限制
+
+- 尚未使用用户的火山 API Key 对真实 `/models` 或对话请求做连接测试；模型 ID 与 Base URL 使用用户提供的 Coding Plan 页面信息，必须以“测试连接”实际响应为准。
+- Coding Plan 抵扣无法从 OpenAI 兼容响应推导精确每百万 Token 单价，因此预设不擅自填写 `0`；自动托管前由用户补充实际价格/等效预算。
+- 本轮只增加 Provider 和角色分工，不改变 Canon、章节候选隔离、revision、事务或自动审批规则。
+
+---
+
 # 2026-07-19 第十四阶段最终审计与创意孵化 UI 交付
 
 当前分支：`agent/model-backed-story-incubator`

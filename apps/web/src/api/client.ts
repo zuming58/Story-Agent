@@ -38,6 +38,7 @@ import type {
   TrialRunSize,
   MarketResearchBrief,
   ResearchJob,
+  ResearchQuery,
   ResearchEvidence,
   CompetitorProfile,
   ResearchFinding,
@@ -175,6 +176,11 @@ export const api = {
   }) => request<ResearchJob>(`/projects/${projectId}/research/jobs`, { method: "POST", body: JSON.stringify(payload) }),
   researchJobAction: (jobId: string, action: "run" | "resume" | "cancel" | "accept" | "reject", expectedRevision: number) =>
     request<ResearchJob>(`/research/jobs/${jobId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  researchQueries: (jobId: string) => request<ResearchQuery[]>(`/research/jobs/${jobId}/queries`),
+  addManualResearchMaterial: (jobId: string, payload: { expectedRevision: number; perspective: string; title: string; content: string; sourceUrl?: string }) =>
+    request<ResearchJob>(`/research/jobs/${jobId}/manual-materials`, { method: "POST", body: JSON.stringify(payload) }),
+  analyzeManualResearchMaterials: (jobId: string, expectedRevision: number) =>
+    request<ResearchJob>(`/research/jobs/${jobId}/analyze-manual-materials`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
   researchEvidence: (jobId: string) => request<ResearchEvidence[]>(`/research/jobs/${jobId}/evidence`),
   researchCompetitors: (jobId: string) => request<CompetitorProfile[]>(`/research/jobs/${jobId}/competitors`),
   researchFindings: (jobId: string) => request<ResearchFinding[]>(`/research/jobs/${jobId}/findings`),

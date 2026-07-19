@@ -144,6 +144,8 @@ from .schemas import (
     ResearchJobAction,
     ResearchJobCreate,
     ResearchJobOut,
+    ResearchQueryOut,
+    ManualResearchMaterialCreate,
     ResearchSourceOut,
     StoryBriefProposalAction,
     StoryBriefProposalCreate,
@@ -696,6 +698,18 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/research/jobs/{job_id}/sources", response_model=list[ResearchSourceOut])
     def list_research_sources(job_id: str) -> object:
         return service.phase13.list_sources(job_id)
+
+    @app.get("/api/v1/research/jobs/{job_id}/queries", response_model=list[ResearchQueryOut])
+    def list_research_queries(job_id: str) -> object:
+        return service.phase13.list_queries(job_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/manual-materials", response_model=ResearchJobOut)
+    def add_manual_research_material(job_id: str, payload: ManualResearchMaterialCreate, request: Request) -> object:
+        return service.phase13.add_manual_material(job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/analyze-manual-materials", response_model=ResearchJobOut)
+    def analyze_manual_research_materials(job_id: str, payload: ResearchJobAction, request: Request) -> object:
+        return service.phase13.analyze_manual_materials(job_id, payload, request.state.request_id)
 
     @app.get("/api/v1/research/jobs/{job_id}/evidence", response_model=list[ResearchEvidenceOut])
     def list_research_evidence(job_id: str) -> object:

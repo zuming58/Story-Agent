@@ -211,8 +211,14 @@ class TavilySearchProvider:
         except httpx.TimeoutException as exc:
             raise ResearchProviderError("SEARCH_TIMEOUT", "The search provider timed out.", retryable=True) from exc
         except httpx.HTTPStatusError as exc:
-            code = "SEARCH_RATE_LIMITED" if exc.response.status_code == 429 else "SEARCH_PROVIDER_FAILED"
-            raise ResearchProviderError(code, "The search provider rejected the request.", retryable=exc.response.status_code in {429, 500, 502, 503, 504}) from exc
+            status = exc.response.status_code
+            if status in {401, 403}:
+                code, message = "SEARCH_AUTH_FAILED", "The search provider rejected the API key."
+            elif status == 429:
+                code, message = "SEARCH_RATE_LIMITED", "The search provider rate limited the request."
+            else:
+                code, message = "SEARCH_PROVIDER_FAILED", f"The search provider returned HTTP {status}."
+            raise ResearchProviderError(code, message, retryable=status in {429, 500, 502, 503, 504}) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise ResearchProviderError("SEARCH_PROVIDER_FAILED", "The search provider returned an invalid response.", retryable=True) from exc
         results: list[SearchResult] = []

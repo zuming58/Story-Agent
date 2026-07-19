@@ -41,6 +41,7 @@ from .research_providers import (
     DeterministicSearchProvider,
     FirecrawlContentFetchProvider,
     ResearchProviderError,
+    ResearchSourcePolicy,
     SearchProvider,
     TavilySearchProvider,
 )
@@ -405,6 +406,10 @@ class Phase13Service:
                 search_provider, _ = self._providers_for(job)
                 response = search_provider.search(query_text, snapshot["includedDomains"], snapshot["researchDateRange"], int(limits.get("maxPages", 30)))
             except ResearchProviderError as exc:
+                with self.service.db.project_write(project.id, project.folder_path) as session:
+                    query = session.scalar(select(ResearchQuery).where(ResearchQuery.job_id == job_id, ResearchQuery.fingerprint == fingerprint))
+                    if query:
+                        query.status, query.error_code, query.error_message, query.completed_at = "failed", exc.code, exc.message, _now()
                 return self._fail_job(project, job_id, exc.code, exc.message, request_id)
             except StoryError as exc:
                 return self._fail_job(project, job_id, exc.code, exc.message, request_id)
@@ -605,10 +610,27 @@ class Phase13Service:
             evidence_sources = {row.source_id for row in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()}
             evidence_query_ids = {source.query_id for source in sources.values() if source.id in evidence_sources and source.query_id}
             evidence_perspectives = sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.id.in_(evidence_query_ids))).all()}) if evidence_query_ids else []
-            coverage = {"sourceTypes": source_types, "sourceTypeCount": len(source_types), "evidenceCount": len(evidence_ids), "minimumSourceTypes": int(limits.get("minimumSourceTypes", 3)), "coveredPerspectives": sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.status == "succeeded")).all()}), "evidencePerspectives": evidence_perspectives}
+            query_rows = list(session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id)).all())
+            source_counts = {query_id: count for query_id, count in session.execute(select(ResearchSource.query_id, func.count(ResearchSource.id)).where(ResearchSource.job_id == job.id).group_by(ResearchSource.query_id)).all()}
+            coverage = {
+                "sourceTypes": source_types,
+                "sourceTypeCount": len(source_types),
+                "evidenceCount": len(evidence_ids),
+                "minimumSourceTypes": int(limits.get("minimumSourceTypes", 3)),
+                "coveredPerspectives": sorted({query.perspective for query in query_rows if query.status == "succeeded"}),
+                "evidencePerspectives": evidence_perspectives,
+                "searchResultCount": sum(query.result_count for query in query_rows),
+                "discoveredSourceCount": sum(source_counts.get(query.id, 0) for query in query_rows),
+                "failedQueryCount": sum(1 for query in query_rows if query.status == "failed"),
+                "failedFetchCount": sum(1 for source in sources.values() if source.status == "failed"),
+                "manualSourceCount": sum(1 for source in sources.values() if source.status == "fetched" and source.source_type == "manual" and not source.excluded),
+            }
+            standard_coverage = len(source_types) >= coverage["minimumSourceTypes"] and set(evidence_perspectives) == set(PERSPECTIVES)
+            manual_coverage = coverage["manualSourceCount"] >= len(PERSPECTIVES) and set(evidence_perspectives) == set(PERSPECTIVES)
+            coverage["manualCoverageMet"] = manual_coverage
             job.coverage_json, job.report_revision = dumps(coverage), report_revision
             job.report_checksum = stable_digest({"job": job.id, "reportRevision": report_revision, "coverage": coverage, "evidence": sorted(evidence_ids)})
-            enough = len(source_types) >= coverage["minimumSourceTypes"] and set(evidence_perspectives) == set(PERSPECTIVES)
+            enough = standard_coverage or manual_coverage
             job.status, job.completed_at, job.updated_at, job.revision = ("awaiting_review" if enough else "insufficient_evidence"), _now(), _now(), job.revision + 1
             session.add(self.service._audit("research_job.awaiting_review" if enough else "research_job.insufficient_evidence", "research_job", job.id, coverage, request_id))
             return self._job_dict(job)
@@ -710,6 +732,83 @@ class Phase13Service:
             for version in versions:
                 by_source.setdefault(version.source_id, []).append(version)
             return [self._source_dict(source, by_source.get(source.id, [])) for source in session.scalars(select(ResearchSource).where(ResearchSource.job_id == job_id).order_by(ResearchSource.created_at)).all()]
+
+    def list_queries(self, job_id: str) -> list[dict[str, Any]]:
+        project, _ = self._project_for_job(job_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            return [self._query_dict(item) for item in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job_id).order_by(ResearchQuery.sequence_number, ResearchQuery.created_at)).all()]
+
+    def add_manual_material(self, job_id: str, payload: Any, request_id: str) -> dict[str, Any]:
+        """Store user-supplied research as a versioned, auditable source.
+
+        Manual material is intentionally never fetched.  It is only eligible
+        for the same extraction and approval pipeline used by public sources.
+        """
+        project, _ = self._project_for_job(job_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status not in {"failed", "cancelled", "insufficient_evidence", "awaiting_review"}:
+                raise StoryError(409, "RESEARCH_MANUAL_MATERIAL_NOT_ALLOWED", "Manual material can only be added to a stopped research job.")
+            if not self._brief_matches_job(session, job):
+                raise StoryError(409, "RESEARCH_BRIEF_DRIFT", "The research brief changed and this job can no longer accept material.")
+            limits = safe_json_loads(job.limits_json, {})
+            content = str(payload.content).strip()[:int(limits.get("maxCharsPerPage", 20_000))]
+            now = _now()
+            source_id = str(uuid4())
+            source_url = str(payload.source_url or "").strip()
+            canonical = ResearchSourcePolicy().validate_url(source_url) if source_url else f"manual://research/{source_id}"
+            if session.scalar(select(ResearchSource.id).where(ResearchSource.job_id == job.id, ResearchSource.canonical_url == canonical)):
+                raise StoryError(409, "RESEARCH_MANUAL_SOURCE_DUPLICATE", "This source is already attached to the research job.")
+            domain = urlsplit(canonical).hostname or "manual-entry"
+            query = ResearchQuery(
+                id=str(uuid4()), project_id=project.id, job_id=job.id, attempt=job.attempt,
+                perspective=payload.perspective, query_text=f"Manual research: {payload.title}"[:1000],
+                sequence_number=(session.scalar(select(func.max(ResearchQuery.sequence_number)).where(ResearchQuery.job_id == job.id)) or 0) + 1,
+                fingerprint=stable_digest({"manual": True, "perspective": payload.perspective, "title": payload.title, "content": content}),
+                status="succeeded", result_count=1, created_at=now, completed_at=now,
+                provider_metadata_json=dumps({"origin": "manual"}),
+            )
+            source = ResearchSource(
+                id=source_id, project_id=project.id, job_id=job.id, query_id=query.id,
+                canonical_url=canonical, title=str(payload.title).strip(), domain=domain,
+                source_type="manual", provider_metadata_json=dumps({"origin": "manual", "sourceUrlProvided": bool(source_url)}),
+                status="fetched", created_at=now, updated_at=now,
+            )
+            version = ResearchSourceVersion(
+                id=str(uuid4()), project_id=project.id, job_id=job.id, source_id=source.id, version_number=1,
+                final_url=canonical, content_checksum=stable_digest({"url": canonical, "content": content}),
+                bounded_content=content, summary="User-supplied research material.", char_count=len(content), truncated=len(content) < len(str(payload.content).strip()),
+                fetch_metadata_json=dumps({"origin": "manual"}), fetched_at=now,
+            )
+            session.add_all([query, source, version])
+            job.query_count += 1
+            job.page_count += 1
+            job.fetched_chars += len(content)
+            job.status, job.error_code, job.error_message = "insufficient_evidence", None, None
+            job.revision, job.updated_at = job.revision + 1, now
+            session.add(self.service._audit("research_manual_material.added", "research_job", job.id, {"sourceId": source.id, "perspective": payload.perspective, "hasSourceUrl": bool(source_url)}, request_id))
+            return self._job_dict(job)
+
+    def analyze_manual_materials(self, job_id: str, payload: Any, request_id: str) -> dict[str, Any]:
+        project, _ = self._project_for_job(job_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status not in {"failed", "cancelled", "insufficient_evidence", "awaiting_review"}:
+                raise StoryError(409, "RESEARCH_MANUAL_ANALYSIS_NOT_ALLOWED", "Manual material can only be analyzed after the research job has stopped.")
+            count = session.scalar(select(func.count(ResearchSourceVersion.id)).where(ResearchSourceVersion.job_id == job.id, ResearchSourceVersion.bounded_content != "")) or 0
+            if not count:
+                raise StoryError(409, "RESEARCH_MANUAL_MATERIAL_REQUIRED", "Add research material before requesting analysis.")
+            job.status, job.error_code, job.error_message = "analyzing", None, None
+            job.revision, job.updated_at, job.started_at = job.revision + 1, _now(), _now()
+            session.add(self.service._audit("research_manual_material.analysis_started", "research_job", job.id, {"sourceVersionCount": count}, request_id))
+        try:
+            return self._analyze_job(project, job_id, request_id)
+        except StoryError as exc:
+            return self._fail_job(project, job_id, exc.code, exc.message, request_id)
 
     def list_evidence(self, job_id: str) -> list[dict[str, Any]]:
         project, _ = self._project_for_job(job_id)
@@ -1986,6 +2085,10 @@ class Phase13Service:
             "fetchSecretConfigured": bool(config.get("fetchSecretRef")),
         }
         return {"id": row.id, "projectId": row.project_id, "briefId": row.brief_id, "briefRevision": row.brief_revision, "briefChecksum": row.brief_checksum, "attempt": row.attempt, "status": row.status, "idempotencyKey": row.idempotency_key, "providerConfig": public_config, "limits": safe_json_loads(row.limits_json, {}), "coverage": safe_json_loads(row.coverage_json, {}), "reportChecksum": row.report_checksum, "reportRevision": row.report_revision, "queryCount": row.query_count, "pageCount": row.page_count, "fetchedChars": row.fetched_chars, "requestUnits": row.request_units, "estimatedCost": row.estimated_cost, "errorCode": row.error_code, "errorMessage": row.error_message, "diagnostic": None, "revision": row.revision, "createdAt": row.created_at, "startedAt": row.started_at, "completedAt": row.completed_at, "updatedAt": row.updated_at}
+
+    @staticmethod
+    def _query_dict(row: ResearchQuery) -> dict[str, Any]:
+        return {"id": row.id, "jobId": row.job_id, "perspective": row.perspective, "query": row.query_text, "sequenceNumber": row.sequence_number, "status": row.status, "resultCount": row.result_count, "errorCode": row.error_code, "errorMessage": row.error_message, "createdAt": row.created_at, "completedAt": row.completed_at}
 
     @staticmethod
     def _source_dict(row: ResearchSource, versions: list[ResearchSourceVersion]) -> dict[str, Any]:

@@ -1713,6 +1713,14 @@ class ResearchJobAction(ApiModel):
     expected_revision: int = Field(ge=1)
 
 
+class ManualResearchMaterialCreate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    perspective: Literal["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
+    title: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=80, max_length=20_000)
+    source_url: str | None = Field(default=None, max_length=2000)
+
+
 class ResearchJobOut(ApiModel):
     id: str
     project_id: str
@@ -1740,6 +1748,20 @@ class ResearchJobOut(ApiModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     updated_at: datetime
+
+
+class ResearchQueryOut(ApiModel):
+    id: str
+    job_id: str
+    perspective: str
+    query: str
+    sequence_number: int
+    status: str
+    result_count: int
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 class ResearchSourceVersionOut(ApiModel):

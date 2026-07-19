@@ -620,6 +620,11 @@ export interface ResearchJob {
   errorCode: string | null; errorMessage: string | null; revision: number; createdAt: string; startedAt: string | null; completedAt: string | null; updatedAt: string;
 }
 
+export interface ResearchQuery {
+  id: string; jobId: string; perspective: string; query: string; sequenceNumber: number; status: string; resultCount: number;
+  errorCode: string | null; errorMessage: string | null; createdAt: string; completedAt: string | null;
+}
+
 export interface ResearchEvidence {
   id: string; projectId: string; jobId: string; sourceId: string; sourceVersionId: string; claimType: "fact" | "opinion" | "inference";
   claim: string; excerpt: string; locator: Record<string, unknown>; confidence: number; findingRefs: string[]; checksum: string; createdAt: string;

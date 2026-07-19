@@ -39,6 +39,10 @@ const researchErrorMessages: Record<string, string> = {
   FETCH_API_KEY_MISSING: "Firecrawl 密钥尚未配置，请更新凭据后恢复任务。",
 };
 
+const researchStages: Record<string, string> = { planning: "规划查询", searching: "搜索公开网页", fetching: "提取网页", analyzing: "抽取证据与分析", awaiting_review: "等待人工确认", accepted: "研究已接受", insufficient_evidence: "证据不足", failed: "任务失败", cancelled: "已取消" };
+const perspectiveLabels: Record<string, string> = { platform_trends: "平台趋势", genre_leaders: "同题材作品", reader_praise: "读者喜欢", reader_dropoff: "读者弃书", opening_strategy: "开篇策略", serial_engine: "连载机制" };
+const researchFailureHelp: Record<string, string> = { SEARCH_AUTH_FAILED: "Tavily 拒绝了当前密钥，请更新 Tavily API Key 后恢复任务。", SEARCH_RATE_LIMITED: "Tavily 当前限流，请稍后恢复任务，无需重输密钥。", SEARCH_PROVIDER_FAILED: "Tavily 搜索没有得到可用响应；请查看下方运行轨迹中的具体查询。" };
+
 function lines(value: string) { return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean); }
 function createBriefForm(targetChapters = "") {
   return {
@@ -64,6 +68,7 @@ export function StoryIncubatorPage() {
   const [stage, setStage] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [researchKeys, setResearchKeys] = useState({ tavily: "", firecrawl: "" });
+  const [manualMaterial, setManualMaterial] = useState({ perspective: "platform_trends", title: "", sourceUrl: "", content: "" });
   const [message, setMessage] = useState("");
   const [briefForm, setBriefForm] = useState(() => createBriefForm());
   const initializedDraftProjectId = useRef<string | null>(null);
@@ -96,6 +101,10 @@ export function StoryIncubatorPage() {
   const evidenceQuery = useQuery({ queryKey: ["incubator-evidence", currentJob?.id], queryFn: () => api.researchEvidence(currentJob!.id), enabled: Boolean(currentJob) });
   const competitorsQuery = useQuery({ queryKey: ["incubator-competitors", currentJob?.id], queryFn: () => api.researchCompetitors(currentJob!.id), enabled: Boolean(currentJob) });
   const findingsQuery = useQuery({ queryKey: ["incubator-findings", currentJob?.id], queryFn: () => api.researchFindings(currentJob!.id), enabled: Boolean(currentJob) });
+  const researchQueriesQuery = useQuery({
+    queryKey: ["incubator-research-queries", currentJob?.id], queryFn: () => api.researchQueries(currentJob!.id), enabled: Boolean(currentJob),
+    refetchInterval: currentJob && ["planning", "searching", "fetching", "analyzing"].includes(currentJob.status) ? 2500 : false,
+  });
 
   const completed = useMemo(() => [
     Boolean(currentBrief), currentJob?.status === "accepted", Boolean(acceptedOpportunity), Boolean(activeSession?.messages.length),
@@ -153,6 +162,8 @@ export function StoryIncubatorPage() {
       client.invalidateQueries({ queryKey: ["incubator-brief-proposals", project.id] }), client.invalidateQueries({ queryKey: ["incubator-brief-versions", project.id] }),
       client.invalidateQueries({ queryKey: ["canon", project.id] }), client.invalidateQueries({ queryKey: ["canon-generation-proposals", project.id] }),
       client.invalidateQueries({ queryKey: ["incubator-openings", project.id] }), client.invalidateQueries({ queryKey: ["incubator-readiness", project.id] }),
+      client.invalidateQueries({ queryKey: ["incubator-research-queries"] }), client.invalidateQueries({ queryKey: ["incubator-evidence"] }),
+      client.invalidateQueries({ queryKey: ["incubator-competitors"] }), client.invalidateQueries({ queryKey: ["incubator-findings"] }),
     ]);
   };
   const mutation = useMutation({ mutationFn: async ({ action }: { action: () => Promise<unknown> }) => action(), onSuccess: async () => { setError(null); await refresh(); }, onError: (cause) => setError(errorText(cause)) });
@@ -177,6 +188,10 @@ export function StoryIncubatorPage() {
     }));
   };
   const actOnJob = (action: "run" | "resume" | "cancel" | "accept" | "reject") => currentJob && void run(`研究任务已${action === "accept" ? "接受" : action === "reject" ? "拒绝" : "更新"}`, () => api.researchJobAction(currentJob.id, action, currentJob.revision));
+  const addManualMaterial = () => currentJob && void run("人工调研材料已加入证据队列", () => api.addManualResearchMaterial(currentJob.id, {
+    expectedRevision: currentJob.revision, perspective: manualMaterial.perspective, title: manualMaterial.title.trim(), content: manualMaterial.content.trim(), sourceUrl: manualMaterial.sourceUrl.trim() || undefined,
+  })).then(() => setManualMaterial({ perspective: "platform_trends", title: "", sourceUrl: "", content: "" }));
+  const analyzeManualMaterials = () => currentJob && void run("正在分析人工调研材料", () => api.analyzeManualResearchMaterials(currentJob.id, currentJob.revision));
   const generateOpportunities = () => currentJob && void run("已生成故事机会", () => api.createStoryOpportunities(currentJob.id, currentJob.revision));
   const decideOpportunity = (id: string, revision: number, action: "accept" | "reject") => void run(action === "accept" ? "已选定故事方向" : "已排除故事方向", () => api.decideStoryOpportunity(id, action, revision));
   const ensureSession = async () => {
@@ -223,6 +238,12 @@ export function StoryIncubatorPage() {
         {researchNeedsRecovery && <div className="provider-key-grid provider-key-recovery"><label><span>更新 Tavily API Key（可选）</span><input type="password" value={researchKeys.tavily} onChange={(e) => setResearchKeys({ ...researchKeys, tavily: e.target.value })} placeholder="留空则继续使用凭据管理器中的值" /></label><label><span>更新 Firecrawl API Key（可选）</span><input type="password" value={researchKeys.firecrawl} onChange={(e) => setResearchKeys({ ...researchKeys, firecrawl: e.target.value })} placeholder="完整密钥不会回显" /></label><button onClick={startResearch} disabled={mutation.isPending || (!researchKeys.tavily && !researchKeys.firecrawl)}>更新凭据</button></div>}
         {currentJob.errorCode && <div className="research-job-error"><WarningCircle /><div><strong>{currentJob.errorCode}</strong><span>{researchErrorMessages[currentJob.errorCode] ?? currentJob.errorMessage ?? "研究任务需要处理后才能恢复。"}</span></div></div>}
         <div className="research-metrics"><article><span>查询</span><strong>{currentJob.queryCount}</strong></article><article><span>来源页面</span><strong>{currentJob.pageCount}</strong></article><article><span>证据片段</span><strong>{evidenceQuery.data?.length ?? 0}</strong></article><article><span>预计费用</span><strong>¥ / ${currentJob.estimatedCost.toFixed(4)}</strong></article></div>
+        <section className="research-run-trace" aria-label="调研运行轨迹">
+          <header><span>当前阶段</span><strong>{researchStages[currentJob.status] ?? currentJob.status}</strong><small>搜索结果 {Number(currentJob.coverage.searchResultCount ?? 0)} · 发现来源 {Number(currentJob.coverage.discoveredSourceCount ?? 0)} · 抓取失败 {Number(currentJob.coverage.failedFetchCount ?? 0)}</small></header>
+          {currentJob.errorCode && <p>{researchFailureHelp[currentJob.errorCode] ?? currentJob.errorMessage}</p>}
+          <ol>{researchQueriesQuery.data?.map((item) => <li key={item.id} className={`is-${item.status}`}><span>{perspectiveLabels[item.perspective] ?? item.perspective}</span><strong>{item.status === "failed" ? item.errorCode ?? "失败" : item.status === "succeeded" ? `${item.resultCount} 条结果` : item.status}</strong><small>{item.query}</small></li>)}</ol>
+        </section>
+        <details className="manual-research-entry"><summary>人工录入调研材料</summary><p>材料不会触发搜索或抓取；每份材料都进入来源版本、证据抽取和人工确认链。要完成调研，六个视角都需要有可追溯材料。</p><div><label>调研视角<select value={manualMaterial.perspective} onChange={(event) => setManualMaterial({ ...manualMaterial, perspective: event.target.value })}>{Object.entries(perspectiveLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>材料标题<input value={manualMaterial.title} onChange={(event) => setManualMaterial({ ...manualMaterial, title: event.target.value })} /></label><label>公开来源链接（可选）<input value={manualMaterial.sourceUrl} onChange={(event) => setManualMaterial({ ...manualMaterial, sourceUrl: event.target.value })} placeholder="https://..." /></label><label>调研原文或摘要<textarea value={manualMaterial.content} onChange={(event) => setManualMaterial({ ...manualMaterial, content: event.target.value })} /></label></div><footer><button onClick={addManualMaterial} disabled={mutation.isPending || manualMaterial.title.trim().length < 1 || manualMaterial.content.trim().length < 80}>加入材料</button><button className="accept" onClick={analyzeManualMaterials} disabled={mutation.isPending || (currentJob.pageCount === 0)}>分析已加入材料</button></footer></details>
         <div className="research-actions">{["failed", "cancelled", "insufficient_evidence"].includes(currentJob.status) && <button onClick={() => actOnJob("resume")}>恢复任务</button>}{["planning", "searching", "fetching", "analyzing"].includes(currentJob.status) && <button onClick={() => actOnJob("cancel")}>取消</button>}{currentJob.status === "awaiting_review" && <><button className="accept" onClick={() => actOnJob("accept")}><Check />接受研究报告</button><button onClick={() => actOnJob("reject")}><X />拒绝</button></>}</div>
         <div className="research-columns"><section><h3>竞品机制 <b>{competitorsQuery.data?.length ?? 0}</b></h3>{competitorsQuery.data?.slice(0, 6).map((item) => <article key={item.id}><strong>{item.name}</strong><span>{Math.round(item.confidence * 100)}% 可信度 · {item.evidenceIds.length} 条证据</span></article>)}</section><section><h3>研究发现 <b>{findingsQuery.data?.length ?? 0}</b></h3>{findingsQuery.data?.slice(0, 8).map((item) => <article key={item.id}><strong>{item.statement}</strong><span>{item.claimType} · {item.evidenceIds.length} 条引用</span></article>)}</section></div>
       </>}</main><aside className="incubator-panel evidence-drawer"><header><div><Books /><span><strong>证据抽屉</strong><small>可追溯到冻结来源版本</small></span></div></header>{evidenceQuery.data?.slice(0, 12).map((item) => <article key={item.id}><span className={`claim-${item.claimType}`}>{item.claimType}</span><p>{item.claim}</p><blockquote>{item.excerpt}</blockquote></article>)}</aside></div>}

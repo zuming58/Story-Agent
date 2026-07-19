@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
+import httpx
 
 from story_agent_api.research_providers import (
     DeterministicContentFetchProvider,
@@ -13,6 +14,7 @@ from story_agent_api.research_providers import (
     FetchResponse,
     SearchResponse,
     SearchResult,
+    TavilySearchProvider,
 )
 from story_agent_api.services import StoryError
 
@@ -127,6 +129,10 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     sources = client.get(f"/api/v1/research/jobs/{job['id']}/sources")
     assert sources.status_code == 200
     assert len(sources.json()) == 6
+    queries = client.get(f"/api/v1/research/jobs/{job['id']}/queries")
+    assert queries.status_code == 200
+    assert len(queries.json()) == 6
+    assert all(item["status"] == "succeeded" and item["resultCount"] == 1 for item in queries.json())
     evidence = client.get(f"/api/v1/research/jobs/{job['id']}/evidence").json()
     assert len(evidence) >= 6
     research_accepted = client.post(f"/api/v1/research/jobs/{job['id']}/accept", json={"expectedRevision": job["revision"]})
@@ -239,6 +245,50 @@ def test_query_plan_still_fails_when_schema_repair_is_incomplete(client, monkeyp
         phase13._model_queries(SimpleNamespace(id="project-test"), {"genre": "mixed genre"}, "request-test", "job-test")
 
     assert error.value.code == "RESEARCH_QUERY_PLAN_INCOMPLETE"
+
+
+@pytest.mark.parametrize(("status", "code"), [(401, "SEARCH_AUTH_FAILED"), (403, "SEARCH_AUTH_FAILED"), (429, "SEARCH_RATE_LIMITED"), (500, "SEARCH_PROVIDER_FAILED")])
+def test_tavily_http_failures_are_safe_and_actionable(monkeypatch, status, code):
+    def post(*_args, **_kwargs):
+        return httpx.Response(status, request=httpx.Request("POST", "https://api.tavily.com/search"))
+
+    monkeypatch.setattr("story_agent_api.research_providers.httpx.post", post)
+    provider = TavilySearchProvider("not-a-real-key")
+    with pytest.raises(Exception) as error:
+        provider.search("test query", [], None, 1)
+    assert getattr(error.value, "code", None) == code
+    assert "not-a-real-key" not in str(error.value)
+
+
+def test_manual_research_materials_remain_versioned_and_require_full_coverage(client):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    })
+    assert created.status_code == 201
+    stopped = client.post(f"/api/v1/research/jobs/{created.json()['id']}/cancel", json={"expectedRevision": created.json()["revision"]})
+    assert stopped.status_code == 200
+    job = stopped.json()
+    perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
+    for perspective in perspectives:
+        material = client.post(f"/api/v1/research/jobs/{job['id']}/manual-materials", json={
+            "expectedRevision": job["revision"], "perspective": perspective, "title": f"Manual {perspective}",
+            "content": (f"User supplied research for {perspective}. " * 8),
+        })
+        assert material.status_code == 200, material.text
+        job = material.json()
+    queries = client.get(f"/api/v1/research/jobs/{job['id']}/queries").json()
+    assert {item["perspective"] for item in queries} == set(perspectives)
+    assert all(item["resultCount"] == 1 for item in queries)
+    analyzed = client.post(f"/api/v1/research/jobs/{job['id']}/analyze-manual-materials", json={"expectedRevision": job["revision"]})
+    assert analyzed.status_code == 200, analyzed.text
+    assert analyzed.json()["status"] == "awaiting_review"
+    assert analyzed.json()["coverage"]["manualCoverageMet"] is True
+    sources = client.get(f"/api/v1/research/jobs/{job['id']}/sources").json()
+    assert len(sources) == 6
+    assert all(item["sourceType"] == "manual" and item["providerMetadata"]["origin"] == "manual" for item in sources)
 
 
 def test_phase14_deterministic_canon_and_opening_gates(client):

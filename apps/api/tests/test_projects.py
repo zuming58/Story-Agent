@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from story_agent_api.config import Settings
@@ -26,6 +27,31 @@ def test_projects_are_isolated_and_survive_restart(client: TestClient, demo_proj
     with TestClient(restart_app) as restarted:
         ids = {project["id"] for project in restarted.get("/api/v1/projects").json()}
         assert {demo_project["id"], second["id"]}.issubset(ids)
+
+
+def test_failed_project_initialization_is_not_published_to_catalog(
+    client: TestClient,
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = client.app.state.story_service
+    before_ids = {project.id for project in service.list_projects()}
+    before_folders = {item.name for item in (data_dir / "projects").iterdir() if item.is_dir()}
+
+    def fail_seed(*_args, **_kwargs) -> None:
+        raise RuntimeError("simulated initialization interruption")
+
+    monkeypatch.setattr(service, "_seed_project_database", fail_seed)
+    with pytest.raises(RuntimeError, match="simulated initialization interruption"):
+        client.post("/api/v1/projects", json={"title": "不会暴露的半成品", "mode": "long-form", "totalChapters": 100})
+
+    assert {project.id for project in service.list_projects()} == before_ids
+    created_folders = [
+        item for item in (data_dir / "projects").iterdir()
+        if item.is_dir() and item.name not in before_folders
+    ]
+    assert len(created_folders) == 1
+    assert (created_folders[0] / ".failed-create").read_text(encoding="utf-8").startswith("Project creation failed")
 
 
 def test_plan_revision_conflict(client: TestClient, demo_project: dict) -> None:

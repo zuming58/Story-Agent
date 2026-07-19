@@ -32,6 +32,34 @@ async function seedProposal(page: Page, projectId: string) {
   await page.reload();
 }
 
+test("an untitled project is created once and can be renamed later", async ({ page }, testInfo) => {
+  await page.goto("/overview");
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  const before = await (await page.request.get("/api/v1/projects")).json() as Array<{ id: string }>;
+  await page.route("**/api/v1/projects", async (route) => {
+    if (route.request().method() === "POST") await new Promise((resolve) => setTimeout(resolve, 500));
+    await route.continue();
+  });
+
+  await page.getByRole("button", { name: "新建作品" }).click();
+  const submit = page.getByRole("button", { name: "创建并开始构思" });
+  await submit.dblclick();
+  await expect(page.getByRole("button", { name: /正在创建/ })).toBeDisabled();
+  await expect(page).toHaveURL(/\/incubator$/, { timeout: 45_000 });
+
+  const after = await (await page.request.get("/api/v1/projects")).json() as Array<{ id: string; title: string }>;
+  expect(after).toHaveLength(before.length + 1);
+  const created = after.find((item) => !before.some((previous) => previous.id === item.id));
+  expect(created?.title).toMatch(/^未命名作品 /);
+
+  await page.goto("/overview");
+  await page.getByRole("button", { name: `修改《${created!.title}》书名` }).click();
+  await page.getByLabel("新的作品名称").fill(`重新命名-${testInfo.project.name}`);
+  await page.getByRole("button", { name: "保存新名称" }).click();
+  await expect(page.getByRole("button", { name: `修改《重新命名-${testInfo.project.name}》书名` })).toBeVisible();
+});
+
 test("review, accept and undo an AI planning change", async ({ page }, testInfo) => {
   const project = await createProject(page, testInfo, "proposal");
   await seedProposal(page, project.id);

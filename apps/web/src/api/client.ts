@@ -25,6 +25,7 @@ import type {
   ModelRoleBinding,
   PlanNode,
   ProjectCreateRequest,
+  ProjectUpdateRequest,
   ProjectSummary,
   ProviderConnectionTest,
   QualityFinding,
@@ -74,6 +75,8 @@ export const api = {
   health: () => request<{ status: string; storage: string }>("/health"),
   projects: () => request<ProjectSummary[]>("/projects"),
   createProject: (payload: ProjectCreateRequest) => request<ProjectSummary>("/projects", { method: "POST", body: JSON.stringify(payload) }),
+  updateProject: (projectId: string, payload: ProjectUpdateRequest) =>
+    request<ProjectSummary>(`/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   plan: (projectId: string) => request<StoryPlan>(`/projects/${projectId}/plan`),
   updateNode: (projectId: string, nodeId: string, payload: Partial<PlanNode> & { expectedRevision: number }) =>
     request<PlanNode>(`/projects/${projectId}/plan/nodes/${nodeId}`, { method: "PATCH", body: JSON.stringify(payload) }),

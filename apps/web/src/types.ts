@@ -334,6 +334,11 @@ export interface ProjectCreateRequest {
   totalChapters: number;
 }
 
+export interface ProjectUpdateRequest {
+  title?: string;
+  totalChapters?: number;
+}
+
 export interface ChapterContract {
   id: string;
   projectId: string;

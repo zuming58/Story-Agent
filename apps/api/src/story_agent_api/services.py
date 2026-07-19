@@ -698,13 +698,18 @@ class StoryService:
             last_opened_at=now,
         )
         try:
-            with self.db.catalog() as session:
-                session.add(catalog)
-                session.commit()
+            # Publish the catalog row last. SQLite DDL is not fully
+            # transactional, so a process interruption during Alembic must
+            # not expose a half-migrated project to the next application
+            # startup. An interrupted folder is left with .failed-create for
+            # diagnosis, while the healthy project library remains usable.
             self.db.ensure_project_database(project_id, folder)
             self._seed_project_database(catalog, seed_demo=seed_demo)
             self.phase4.ensure_project_defaults(catalog.id, catalog.folder_path, catalog.title)
             self._write_project_files(catalog)
+            with self.db.catalog() as session:
+                session.add(catalog)
+                session.commit()
         except Exception:
             with self.db.catalog() as session:
                 existing = session.get(CatalogProject, project_id)

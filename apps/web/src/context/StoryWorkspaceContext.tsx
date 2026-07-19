@@ -12,6 +12,7 @@ import type {
   PlanNode,
   ProjectCreateRequest,
   ProjectSummary,
+  ProjectUpdateRequest,
   StoryPlan,
 } from "../types";
 
@@ -32,6 +33,7 @@ interface StoryWorkspaceValue {
   errorMessage: string | null;
   selectProject: (id: string) => void;
   createProject: (payload: ProjectCreateRequest) => Promise<ProjectSummary>;
+  updateProject: (id: string, payload: ProjectUpdateRequest) => Promise<ProjectSummary>;
   createMilestone: (payload: Omit<PlanNode, "id" | "revision">) => Promise<PlanNode>;
   updateMilestone: (id: string, changes: Partial<PlanNode>) => Promise<void>;
   sendMessage: (content: string, action?: string, selectedNodeId?: string | null) => Promise<void>;
@@ -102,6 +104,9 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
   };
 
   const createMutation = useMutation({ mutationFn: api.createProject });
+  const updateProjectMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: ProjectUpdateRequest }) => api.updateProject(id, payload),
+  });
   const createNodeMutation = useMutation({
     mutationFn: (payload: Omit<PlanNode, "id" | "revision">) => {
       if (!project) throw new Error("作品尚未加载");
@@ -188,10 +193,23 @@ export function StoryWorkspaceProvider({ children }: { children: ReactNode }) {
     createProject: async (payload) => {
       try {
         const created = await createMutation.mutateAsync(payload);
-        await client.invalidateQueries({ queryKey: ["projects"] });
+        client.setQueryData<ProjectSummary[]>(["projects"], (current = []) => [
+          created,
+          ...current.filter((item) => item.id !== created.id),
+        ]);
         setActiveProjectId(created.id);
         setNotice(`已创建作品“${created.title}”。`);
+        void client.invalidateQueries({ queryKey: ["projects"] });
         return created;
+      } catch (error) { handleError(error); throw error; }
+    },
+    updateProject: async (id, payload) => {
+      try {
+        const updated = await updateProjectMutation.mutateAsync({ id, payload });
+        client.setQueryData<ProjectSummary[]>(["projects"], (current = []) => current.map((item) => item.id === id ? updated : item));
+        setNotice(`作品名称已更新为“${updated.title}”。`);
+        void client.invalidateQueries({ queryKey: ["projects"] });
+        return updated;
       } catch (error) { handleError(error); throw error; }
     },
     createMilestone: async (payload) => {

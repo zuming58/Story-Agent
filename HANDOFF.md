@@ -6,6 +6,14 @@
 
 状态：**第十四阶段后端深度审计、修复、创意孵化 UI、双分辨率回归和浏览器验收均已完成。代码已达到用户真实 Provider 冒烟测试条件；在用户完成一次真实市场调研与开篇选择前暂不合并 `main`。**
 
+## 最终接力入口（2026-07-19）
+
+- 面向下一台电脑/Codex 的最终交付快照：`FINAL-HANDOFF.md`。
+- UI 颜色、字体、三栏外壳、组件状态、响应式、Agent 和视觉验收规范：`docs/ui/UI-DESIGN-SYSTEM.md`。
+- 面向普通用户的图文操作手册：`docs/Story-Agent-使用手册.html`。
+- 后续以真实用户测试、小修、调试、易用性和回归测试为主；另一台电脑现在可以修改 UI，但必须遵守正式 UI 规范。
+- 当前完整分支仍是 `agent/model-backed-story-incubator`；`main` 只合并到第七阶段，接力不得从 `main` 开始。
+
 ## 面向用户的完整操作手册（2026-07-19）
 
 - 新增 `docs/Story-Agent-使用手册.html`，这是可直接双击浏览的非 Markdown 手册；配套 9 张当前真实页面截图位于 `docs/assets/user-guide/`。

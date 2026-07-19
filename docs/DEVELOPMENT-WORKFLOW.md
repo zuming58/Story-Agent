@@ -6,7 +6,7 @@
 - 稳定分支：`main`
 - 当前开发分支以根目录 `HANDOFF.md` 为准，不在长期工作流中写死。
 - 当前阶段的范围、状态和恢复点以仓库根目录 `HANDOFF.md` 为准。
-- 产品边界以 `docs/prd/PRD-001.md` 为准，视觉边界以 `docs/ui/UI-DESIGN-BASELINE.md` 为准。
+- 最终交付快照以 `FINAL-HANDOFF.md` 为准，产品边界以 `docs/prd/PRD-001.md` 为准，视觉边界以 `docs/ui/UI-DESIGN-SYSTEM.md` 为准。
 
 ## 第一台电脑结束工作
 
@@ -35,8 +35,8 @@ git push
 ```powershell
 git clone https://github.com/zuming58/Story-Agent.git
 cd Story-Agent
-git checkout agent/local-data-foundation
-git pull
+git checkout agent/model-backed-story-incubator
+git pull --ff-only
 npm install
 npm --prefix apps/web install
 uv sync --project apps/api --dev
@@ -46,17 +46,19 @@ npm run dev
 让接力 Agent 依次完整阅读：
 
 1. `HANDOFF.md`
-2. `docs/prd/PRD-001.md`
-3. `docs/ui/UI-DESIGN-BASELINE.md`
-4. `design-qa.md`
+2. `FINAL-HANDOFF.md`
+3. `docs/Story-Agent-使用手册.html`
+4. `docs/ui/UI-DESIGN-SYSTEM.md`
+5. `docs/prd/PRD-001.md`
+6. `design-qa.md`
 
 接力 Agent 在同一功能分支提交并推送，草稿 PR 会自动更新。禁止直接合并 `main`，禁止改动 `Story agent/` 和 `openclaw skill/` 参考目录。
 
 ## 回到第一台电脑审核
 
 ```powershell
-git checkout agent/local-data-foundation
-git pull
+git checkout agent/model-backed-story-incubator
+git pull --ff-only
 npm install
 npm --prefix apps/web install
 uv sync --project apps/api --dev

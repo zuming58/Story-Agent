@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Story Agent 完整操作手册</title>
+  <style>
+    :root {
+      --bg: #07131f;
+      --panel: #0c1c2b;
+      --panel-2: #102437;
+      --line: #263c4f;
+      --text: #e9edf1;
+      --muted: #91a6b7;
+      --gold: #d9a441;
+      --gold-soft: #2d2619;
+      --green: #4bd39a;
+      --red: #ff6b6b;
+      --blue: #79a9ff;
+      --warning: #f2bd5a;
+      --shadow: 0 24px 70px rgba(0, 0, 0, .34);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 84% 3%, rgba(71, 103, 153, .16), transparent 30rem),
+        linear-gradient(140deg, #06111b 0%, #07131f 50%, #091724 100%);
+      font: 15px/1.75 "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    a { color: inherit; }
+    button { font: inherit; }
+    .layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 100vh; }
+    .sidebar {
+      position: sticky; top: 0; height: 100vh; overflow: auto;
+      padding: 26px 20px; border-right: 1px solid var(--line);
+      background: rgba(5, 15, 25, .94); backdrop-filter: blur(18px);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+    .brand-mark {
+      display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%;
+      border: 1px solid #725a2c; color: var(--gold); background: #151a1d; font: 700 22px Georgia, serif;
+    }
+    .brand strong { display: block; font: 700 19px Georgia, "Microsoft YaHei", serif; color: #f4dfb6; }
+    .brand small { color: var(--muted); }
+    .search { width: 100%; padding: 10px 12px; margin: 2px 0 18px; color: var(--text); background: #0b1b29; border: 1px solid var(--line); border-radius: 8px; outline: none; }
+    .search:focus { border-color: var(--gold); }
+    .toc-title { margin: 15px 8px 8px; color: #6f879a; font-size: 11px; letter-spacing: .18em; }
+    .toc a { display: block; padding: 8px 10px; margin: 2px 0; color: #a9b9c6; text-decoration: none; border-radius: 7px; }
+    .toc a:hover, .toc a.active { color: #f6dfb1; background: #152230; }
+    .side-actions { display: grid; gap: 8px; margin-top: 20px; }
+    .side-actions button, .side-actions a { padding: 9px 12px; border: 1px solid #5b4828; border-radius: 7px; background: #201c15; color: #e7c277; text-decoration: none; text-align: center; cursor: pointer; }
+    main { min-width: 0; padding: 0 44px 80px; }
+    .hero { max-width: 1320px; margin: 0 auto; padding: 72px 0 40px; }
+    .eyebrow { color: var(--gold); font-size: 12px; letter-spacing: .22em; text-transform: uppercase; }
+    h1, h2, h3 { font-family: Georgia, "Microsoft YaHei", serif; }
+    h1 { max-width: 900px; margin: 12px 0 16px; font-size: clamp(38px, 5vw, 70px); line-height: 1.08; color: #f3ddb4; }
+    h2 { margin: 0 0 18px; font-size: 30px; color: #ecc46f; }
+    h3 { margin: 0 0 10px; font-size: 20px; color: #f1dfbc; }
+    .lead { max-width: 880px; color: #b4c2cd; font-size: 18px; }
+    .version { display: flex; flex-wrap: wrap; gap: 10px; margin: 25px 0 0; }
+    .chip { padding: 5px 10px; color: #b9cad7; border: 1px solid var(--line); background: #0b1a27; border-radius: 999px; font-size: 13px; }
+    .chip.ok { color: var(--green); border-color: #245d49; }
+    .chip.warn { color: var(--warning); border-color: #68522e; }
+    .section { max-width: 1320px; margin: 0 auto 42px; padding: 30px; border: 1px solid var(--line); border-radius: 14px; background: rgba(11, 28, 42, .88); box-shadow: var(--shadow); scroll-margin-top: 20px; }
+    .section-intro { max-width: 950px; color: var(--muted); margin-bottom: 20px; }
+    .notice { padding: 14px 16px; margin: 16px 0; border-left: 3px solid var(--blue); background: #0d2235; color: #b8cee0; }
+    .notice.gold { border-color: var(--gold); background: var(--gold-soft); color: #e7d1a4; }
+    .notice.red { border-color: var(--red); background: #28191d; color: #efb4b4; }
+    .notice.green { border-color: var(--green); background: #102720; color: #b9e5d2; }
+    .route { display: grid; grid-template-columns: repeat(8, minmax(105px, 1fr)); gap: 8px; margin: 22px 0; }
+    .route > div { position: relative; min-height: 95px; padding: 14px 12px; border: 1px solid #3b4a55; background: #0c1a26; border-radius: 9px; }
+    .route > div:not(:last-child)::after { content: "›"; position: absolute; right: -8px; top: 31px; z-index: 2; color: var(--gold); font-size: 26px; }
+    .route b { display: grid; place-items: center; width: 25px; height: 25px; margin-bottom: 7px; color: #17130c; background: var(--gold); border-radius: 50%; }
+    .route strong { display: block; color: #e7d4ad; }
+    .route span { color: var(--muted); font-size: 12px; }
+    .shot-wrap { position: relative; margin: 22px 0 16px; border: 1px solid #365069; border-radius: 10px; overflow: hidden; background: #04101a; }
+    .shot-wrap img { display: block; width: 100%; height: auto; }
+    .pin { position: absolute; display: grid; place-items: center; width: 34px; height: 34px; color: #10100d; background: var(--gold); border: 3px solid #fff0c6; border-radius: 50%; font-weight: 800; box-shadow: 0 4px 16px #000; }
+    .pin::after { content: ""; position: absolute; width: 34px; height: 2px; left: 29px; background: #fff0c6; transform: rotate(var(--angle, 0deg)); transform-origin: left center; }
+    .p1 { left: 8%; top: 18%; --angle: 24deg; } .p2 { left: 35%; top: 14%; --angle: 135deg; }
+    .p3 { left: 55%; top: 42%; --angle: -26deg; } .p4 { right: 7%; top: 20%; --angle: 155deg; }
+    .p5 { right: 12%; bottom: 10%; --angle: 205deg; }
+    .callouts { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .callout { display: grid; grid-template-columns: 30px 1fr; gap: 10px; padding: 13px; border: 1px solid #2b4152; background: #0b1a27; border-radius: 8px; }
+    .callout b { display: grid; place-items: center; width: 26px; height: 26px; color: #14110a; background: var(--gold); border-radius: 50%; }
+    .callout strong { color: #e9d7b5; }
+    .callout p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { padding: 12px 13px; border-bottom: 1px solid #294052; text-align: left; vertical-align: top; }
+    th { color: #dfbe79; background: #102131; }
+    td { color: #b8c6d0; }
+    td strong { color: #edf0f2; }
+    tr:last-child td { border-bottom: 0; }
+    .status { display: inline-block; min-width: 60px; padding: 2px 8px; border-radius: 999px; text-align: center; font-size: 12px; }
+    .status.ready { color: var(--green); background: #113527; }
+    .status.partial { color: var(--warning); background: #392c18; }
+    .status.todo { color: #9aabba; background: #172531; }
+    .steps { counter-reset: step; display: grid; gap: 11px; padding: 0; list-style: none; }
+    .steps li { position: relative; padding: 15px 16px 15px 56px; border: 1px solid #2a4051; border-radius: 8px; background: #0a1926; }
+    .steps li::before { counter-increment: step; content: counter(step); position: absolute; left: 15px; top: 14px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: #17130a; background: var(--gold); font-weight: 800; }
+    .steps strong { color: #ebd8b3; }
+    .steps p { margin: 3px 0 0; color: var(--muted); }
+    .term-grid, .error-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+    .term, .error-card { padding: 15px; border: 1px solid #2c4253; border-radius: 8px; background: #0a1926; }
+    .term strong, .error-card strong { color: #efd7a8; }
+    .term p, .error-card p { margin: 4px 0 0; color: var(--muted); }
+    .flow-card { padding: 18px; border: 1px solid #594725; background: linear-gradient(135deg, #211b12, #121d25); border-radius: 10px; }
+    .flow-card code { color: #f4c968; font-family: Consolas, monospace; }
+    details { border: 1px solid #2b4051; border-radius: 8px; margin: 9px 0; background: #0a1926; }
+    summary { padding: 13px 15px; cursor: pointer; color: #e7d1a5; }
+    details > div { padding: 0 15px 15px; color: var(--muted); }
+    .hidden-by-search { display: none !important; }
+    footer.page-footer { max-width: 1320px; margin: 0 auto; padding: 20px 0 60px; color: #71899a; text-align: center; }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: relative; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .toc { display: grid; grid-template-columns: repeat(3, 1fr); }
+      main { padding: 0 20px 60px; }
+      .route { grid-template-columns: repeat(4, 1fr); }
+    }
+    @media (max-width: 700px) {
+      .section { padding: 20px 15px; }
+      .route, .callouts, .term-grid, .error-grid, .toc { grid-template-columns: 1fr; }
+      .route > div::after { display: none; }
+      .pin { transform: scale(.75); }
+      table { display: block; overflow-x: auto; }
+    }
+    @media print {
+      body { background: white; color: #111; }
+      .sidebar { display: none; }
+      .layout { display: block; }
+      main { padding: 0; }
+      .section { break-inside: avoid; box-shadow: none; background: white; color: #111; border-color: #bbb; }
+      .section-intro, td, .callout p, .steps p, .term p, .error-card p { color: #444; }
+      h1, h2, h3, .callout strong, td strong { color: #111; }
+    }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">夜</div><div><strong>Story Agent</strong><small>完整操作手册</small></div></div>
+    <input id="search" class="search" type="search" placeholder="搜索：锁定、阻断、托管……" />
+    <div class="toc-title">先从这里开始</div>
+    <nav class="toc">
+      <a href="#start">第一次使用</a><a href="#status">开发状态</a><a href="#overview">作品总览</a><a href="#incubator">创意孵化</a><a href="#canon">Canon 设定库</a><a href="#planning">故事规划</a><a href="#writing">章节写作</a><a href="#quality">质量中心</a><a href="#automation">自动托管</a><a href="#settings">模型与安全</a><a href="#agent">右侧故事 Agent</a><a href="#errors">常见问题</a><a href="#nightwatch">夜巡人下一步</a>
+    </nav>
+    <div class="side-actions">
+      <a href="http://127.0.0.1:5173/overview">打开 Story Agent</a>
+      <button onclick="window.print()">打印 / 另存 PDF</button>
+      <button onclick="scrollTo({top:0,behavior:'smooth'})">回到顶部</button>
+    </div>
+  </aside>
+
+  <main>
+    <header class="hero">
+      <div class="eyebrow">STORY AGENT · USER GUIDE</div>
+      <h1>从一个模糊想法，到一部长篇小说</h1>
+      <p class="lead">这不是技术文档。它只回答三个问题：<strong>现在该点哪里、这个按钮会做什么、出现红色阻断后怎么办。</strong>建议第一次先读“第一次使用”，实际操作时再按左侧目录查具体页面。</p>
+      <div class="version"><span class="chip ok">适用当前本地版本</span><span class="chip">2026-07-19</span><span class="chip">长篇 / 短篇小说主链路</span><span class="chip warn">短剧模块暂未开发</span></div>
+    </header>
+
+    <section class="section searchable" id="start">
+      <h2>第一次使用：只按这 8 步走</h2>
+      <p class="section-intro">如果你什么都没想好，不要直接去 Canon，也不要直接点章节写作。正确入口是“创意孵化”。作品名可以先填“未命名作品”，之后在作品总览用铅笔按钮修改。</p>
+      <div class="route">
+        <div><b>1</b><strong>模型设置</strong><span>配置并测试 DeepSeek</span></div>
+        <div><b>2</b><strong>新建作品</strong><span>暂定名也可以</span></div>
+        <div><b>3</b><strong>创意孵化</strong><span>调研、讨论、选方向</span></div>
+        <div><b>4</b><strong>确认 Canon</strong><span>固化人物和规则</span></div>
+        <div><b>5</b><strong>故事规划</strong><span>分卷、弧线、章节预算</span></div>
+        <div><b>6</b><strong>单章试写</strong><span>先生成 1 章</span></div>
+        <div><b>7</b><strong>质量复核</strong><span>修订或正式提交</span></div>
+        <div><b>8</b><strong>连续试写</strong><span>再扩大到 3、5 章</span></div>
+      </div>
+      <div class="notice gold"><strong>最重要的边界：</strong>创意孵化决定“这个故事值不值得写”；Canon 决定“故事里什么不能随便变”；规划决定“什么时候发生”；章节工作台才负责“把这一章写出来”。</div>
+      <ol class="steps">
+        <li><strong>先去“模型设置”完成连接测试和角色绑定。</strong><p>没有可用模型，后面所有 AI 按钮都会阻断或停在队列里。</p></li>
+        <li><strong>在“作品总览”点新建作品。</strong><p>名字没有想好就使用临时名；长篇建议先填预计总章数，后续仍可调整名称。</p></li>
+        <li><strong>进入“创意孵化”，不要跳步。</strong><p>先填题材和读者，做真实竞品调研，选故事机会，至少与 AI 讨论两轮，再确认 StoryBrief。</p></li>
+        <li><strong>比较三个开篇后，再把 Canon 锁定。</strong><p>Canon 一旦锁定就成为正式设定边界，后面修改要走变更申请。</p></li>
+        <li><strong>在故事规划中检查分卷和最近 5 章节拍。</strong><p>没有当前章 ChapterBeat，系统应禁止生成，防止 AI 随意推进剧情。</p></li>
+        <li><strong>自动托管先选“1 章冒烟测试”。</strong><p>成功并读过正文后，再选 3 章；不要第一次就开每日定时托管。</p></li>
+        <li><strong>到质量中心处理 blocker/error。</strong><p>严重问题不能忽略；warning 可在填写理由后接受风险。</p></li>
+        <li><strong>质量通过并正式提交后，才算写完这一章。</strong><p>候选正文只是草稿，不会自动污染正式故事状态。</p></li>
+      </ol>
+    </section>
+
+    <section class="section searchable" id="status">
+      <h2>当前哪些模块能用</h2>
+      <table>
+        <thead><tr><th>模块</th><th>状态</th><th>现在能做什么</th></tr></thead>
+        <tbody>
+          <tr><td><strong>作品总览</strong></td><td><span class="status ready">可用</span></td><td>创建、打开、改名和管理多部本地作品；每部作品独立数据库。</td></tr>
+          <tr><td><strong>创意孵化</strong></td><td><span class="status ready">可用</span></td><td>竞品调研、故事机会、人机共创、StoryBrief、Canon 候选和前三章开篇实验。</td></tr>
+          <tr><td><strong>Canon</strong></td><td><span class="status ready">可用</span></td><td>故事核心、人物/物品/组织、规则、关系、锁定和变更申请。</td></tr>
+          <tr><td><strong>故事规划</strong></td><td><span class="status ready">可用</span></td><td>全书/卷/故事弧/章节窗口、里程碑、节奏和章节预算。</td></tr>
+          <tr><td><strong>章节写作</strong></td><td><span class="status ready">可用</span></td><td>章节契约、候选正文、版本、任务恢复和正式提交。</td></tr>
+          <tr><td><strong>质量中心</strong></td><td><span class="status ready">可用</span></td><td>硬规则、连续性、故事编辑和文风复核；自动修订与人工批准。</td></tr>
+          <tr><td><strong>自动托管</strong></td><td><span class="status ready">可用</span></td><td>手动 1/3/5 章试写、运行队列、费用、恢复和每日托管策略。</td></tr>
+          <tr><td><strong>模型设置 / 安全审计</strong></td><td><span class="status ready">可用</span></td><td>Provider、模型、角色路由、备份恢复、审计和调用诊断。</td></tr>
+          <tr><td><strong>故事状态</strong></td><td><span class="status todo">占位</span></td><td>页面入口存在，但独立的可视化状态台账尚未完成。</td></tr>
+          <tr><td><strong>短剧制作</strong></td><td><span class="status todo">暂缓</span></td><td>当前不开发；先把长篇和短篇小说链路做稳定。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section searchable" id="overview">
+      <h2>作品总览：管理你的小说库</h2>
+      <p class="section-intro">这里相当于“书架”。一本小说对应一个独立目录和 SQLite 数据库，人物、Canon、正文和任务不会与其他小说混在一起。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/01-overview.png" alt="作品总览截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>左侧模块导航</strong><p>进入创意孵化、Canon、规划、写作、质量和自动托管。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>当前作品与进度</strong><p>顶部会显示当前打开的作品、创作模式和正式提交到第几章。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>作品卡片</strong><p>点击卡片打开作品；卡片上的铅笔按钮用于修改作品名，不需要一开始就想好书名。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>试写引导</strong><p>按模型、孵化、Canon、规划、第一章、质量、连续试写的顺序显示当前缺口。</p></div></div>
+      </div>
+      <div class="shot-wrap"><img src="assets/user-guide/02-create-project.png" alt="创建作品对话框" /></div>
+      <table><thead><tr><th>字段 / 按钮</th><th>作用</th><th>建议</th></tr></thead><tbody>
+        <tr><td><strong>作品名称</strong></td><td>创建本地作品的显示名称。</td><td>可先填“未命名悬疑项目”；之后在书架用铅笔改名。</td></tr>
+        <tr><td><strong>创作模式</strong></td><td>选择长篇网文或短篇小说等策略。</td><td>想长期连载选长篇；一次性完整故事选短篇。</td></tr>
+        <tr><td><strong>计划章节</strong></td><td>用于进度、规划边界和预算，不代表立刻生成这么多章。</td><td>长篇可填 300/500/1000；短篇按实际结构设置。</td></tr>
+        <tr><td><strong>创建并开始构思</strong></td><td>建立独立数据库和 Canon 文件，然后跳到创意孵化。</td><td>点击后请等待按钮显示处理中；不要连续重复点击。</td></tr>
+      </tbody></table>
+    </section>
+
+    <section class="section searchable" id="incubator">
+      <h2>创意孵化：决定故事值不值得写</h2>
+      <p class="section-intro">这是新作品真正的起点。它不是让 AI 直接瞎编世界观，而是先理解目标读者和市场，再由你确认故事方向。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/03-incubator.png" alt="创意孵化截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span><span class="pin p5">5</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>六阶段进度条</strong><p>研究目标 → 市场调研 → 故事机会 → 人机共创 → StoryBrief → Canon 与开篇。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>研究目标表单</strong><p>填写题材、平台、读者、情绪承诺、商业目标、参考作品和禁写内容。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>真实市场调研</strong><p>Tavily 用于搜索，Firecrawl 用于读取页面，DeepSeek 负责归纳；密钥保存在 Windows 凭据管理器。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>右侧故事 Agent</strong><p>在共创阶段与它讨论取舍。你的决定、模型建议和研究证据会分开保存。</p></div></div>
+        <div class="callout"><b>5</b><div><strong>孵化就绪状态</strong><p>只有研究、方向、讨论、StoryBrief、Canon 和开篇都满足条件，才会显示可以向下游推进。</p></div></div>
+      </div>
+      <table><thead><tr><th>阶段</th><th>你要做什么</th><th>完成标志</th></tr></thead><tbody>
+        <tr><td><strong>1. 研究目标</strong></td><td>说清写给谁看、想让读者获得什么感受，以及哪些内容不能写。</td><td>点击“保存并进入调研”。修改目标会让旧研究失效，这是正常保护。</td></tr>
+        <tr><td><strong>2. 市场调研</strong></td><td>首次填写搜索/抓取密钥，点击“开始真实调研”；失败可恢复，运行中可取消。</td><td>阅读报告后点“接受研究报告”；拒绝不会进入故事方向。</td></tr>
+        <tr><td><strong>3. 故事机会</strong></td><td>生成 3—5 个方向，比较核心卖点、人物欲望、冲突和连载发动机。</td><td>排除不喜欢的，点击“选这个方向”。</td></tr>
+        <tr><td><strong>4. 人机共创</strong></td><td>至少进行两轮真实讨论，明确想要和不要什么。</td><td>决策台账中能区分“已确认 / 待确认 / 已否决”。</td></tr>
+        <tr><td><strong>5. StoryBrief</strong></td><td>生成提案并审阅。它是后续 Canon 的上游合同。</td><td>点击“确认成为当前 StoryBrief”；不满意就拒绝后继续讨论。</td></tr>
+        <tr><td><strong>6. Canon 与开篇</strong></td><td>生成 Canon 候选，通过 Analyzer 后应用到草稿；再生成三个不同策略的开头。</td><td>选一个开篇，扩写第 2—3 章，并逐章人工批准。</td></tr>
+      </tbody></table>
+      <div class="notice red"><strong>不要跳过这一页：</strong>如果故事本身没有吸引力，后面的连续性和自动写作做得再稳定也没有意义。孵化没有完成时，不建议直接开启自动托管。</div>
+    </section>
+
+    <section class="section searchable" id="canon">
+      <h2>Canon 设定库：故事世界的正式法律</h2>
+      <p class="section-intro"><strong>Canon 读作“卡农”</strong>，在这里就是“正式设定库 / 故事圣经”。它保存人物、物品、组织、能力等级、代价、规则和关系，防止 AI 写着写着把设定改掉。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/04-canon.png" alt="Canon 页面截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>正式状态</strong><p>“草稿可编辑”时可直接改；“正式 Canon 已锁定”后只能走变更申请。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>五个分栏</strong><p>故事核心、实体、规则、关系和变更申请。实体包括人物、物品、地点、组织与能力等。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>Markdown 故事核心</strong><p>保存世界观、故事内核、文风、主线和禁区；“AI 分析并结构化”会提取成可校验对象。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>就绪与诊断</strong><p>右侧显示缺失模型、实体、关系或硬规则；阻断项处理完才能安全试写。</p></div></div>
+      </div>
+      <table><thead><tr><th>按钮</th><th>实际作用</th><th>什么时候用</th></tr></thead><tbody>
+        <tr><td><strong>保存草稿</strong></td><td>只更新 Canon 草稿，不锁定。</td><td>你仍在调整世界观时。</td></tr>
+        <tr><td><strong>AI 分析并结构化</strong></td><td>把自然语言拆成人物、物品、规则和关系，并报告缺口。</td><td>故事核心文字基本完整后。</td></tr>
+        <tr><td><strong>锁定 Canon</strong></td><td>二次确认后把设定变成章节生成的权威边界。</td><td>实体、等级、物品、规则、关系都检查过以后。</td></tr>
+        <tr><td><strong>提交变更申请</strong></td><td>锁定后生成 before/after 差异，不直接覆盖正式设定。</td><td>小说写到中途确实需要修改设定时。</td></tr>
+        <tr><td><strong>接受并应用 / 拒绝</strong></td><td>确认后更新 Canon 并重建索引；拒绝则正式设定不变。</td><td>在“变更申请”分栏审阅时。</td></tr>
+      </tbody></table>
+      <div class="notice">新作品应先从<strong>创意孵化</strong>生成 StoryBrief 和通用 Canon 候选。Canon 页里的“故事架构器”可用于补充或旧项目迁移，但不是新作品推荐的第一入口。</div>
+    </section>
+
+    <section class="section searchable" id="planning">
+      <h2>故事规划：控制 100 章不会 20 章写完</h2>
+      <p class="section-intro">规划不是正文大纲的长段文字，而是可检查的剧情预算：某件事最早何时能发生、目标何时发生、最晚何时必须发生，以及需要哪些前置条件。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/05-planning.png" alt="故事规划页面截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span><span class="pin p5">5</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>层级与时间轴</strong><p>全书 → 卷 → 故事弧 → 章节窗口。时间轴显示里程碑、钩子、伏笔和状态。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>生成分层规划</strong><p>生成全书卷界、故事弧和最近精确节拍；校验通过后才可应用。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>里程碑编辑</strong><p>目标章节、允许范围、前置条件、完成条件和关联伏笔都可以编辑。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>风险颜色</strong><p>偏快、偏慢、越界和依赖缺失会被标出；先修复红色越界与缺失依赖。</p></div></div>
+        <div class="callout"><b>5</b><div><strong>AI 规划提案</strong><p>右侧可重排节奏、检查逻辑、补全依赖；必须接受选中项才会写入。</p></div></div>
+      </div>
+      <div class="flow-card"><strong>为什么能防止剧情提前写完：</strong>每个里程碑都有 <code>最早章节 → 目标章节 → 最晚章节</code>，章节契约只能消耗当前 ChapterBeat 的预算，不能把后续故事弧直接完成。</div>
+      <table><thead><tr><th>按钮</th><th>说明</th></tr></thead><tbody>
+        <tr><td><strong>直接编辑</strong></td><td>编辑当前里程碑字段；保存前会做范围和依赖校验。</td></tr>
+        <tr><td><strong>新增规划窗口</strong></td><td>创建新的章节范围、目标章和目标说明。</td></tr>
+        <tr><td><strong>生成 1000 章分层规划</strong></td><td>按当前 Canon 生成全书层、卷层、故事弧层和最近章节节拍；数字随作品总章数变化。</td></tr>
+        <tr><td><strong>应用正式规划</strong></td><td>只有范围与节拍校验通过才可点。应用后成为章节契约来源。</td></tr>
+        <tr><td><strong>重新分析节奏</strong></td><td>重新检查推进速度、章节窗口和依赖，不等于自动改正文。</td></tr>
+        <tr><td><strong>保存规划</strong></td><td>把人工编辑写入数据库并更新 revision。</td></tr>
+      </tbody></table>
+    </section>
+
+    <section class="section searchable" id="writing">
+      <h2>章节写作：候选稿不等于正式正文</h2>
+      <p class="section-intro">每章都经过“契约 → 上下文 → 正文 → 事实抽取 → 规则 → 多角色复核 → 人工确认 → 正式提交”。中途失败可以恢复，旧版本始终保留。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/06-writing.png" alt="章节写作工作台截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span><span class="pin p5">5</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>章节状态轨道</strong><p>绿色已提交；黄色表示当前章待复核；灰色未规划。点击数字切换章节。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>章节契约</strong><p>规定本章能推进什么、不能提前完成什么、人物、伏笔、字数和节奏。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>候选正文与版本</strong><p>v1/v2/v3 都保留；人工修改或 AI 精修会创建新版本，而不是覆盖旧稿。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>生成流水线</strong><p>右侧 8 步显示任务当前停在哪里、修订几轮和错误代码。</p></div></div>
+        <div class="callout"><b>5</b><div><strong>作者补充</strong><p>只影响本次生成，不修改 Canon。适合临时强调氛围、视角或某个细节。</p></div></div>
+      </div>
+      <table><thead><tr><th>状态 / 按钮</th><th>你应该怎么做</th></tr></thead><tbody>
+        <tr><td><strong>未规划</strong></td><td>先去故事规划生成该章 ChapterBeat；没有本章节拍不应生成。</td></tr>
+        <tr><td><strong>生成章节契约</strong></td><td>根据当前章节拍和正式 Canon 推导本章边界。</td></tr>
+        <tr><td><strong>保存草稿 / 校验并锁定</strong></td><td>先检查目标和“禁止提前完成”，确认后锁定。锁定后才能创建任务。</td></tr>
+        <tr><td><strong>创建写作任务 / 运行流水线</strong></td><td>先建立可恢复任务，再实际调用模型。模型调用期间不会长期占用 SQLite 写事务。</td></tr>
+        <tr><td><strong>保存为新版本</strong></td><td>人工编辑后填写修改原因；只在“待人工复核”状态可保存。</td></tr>
+        <tr><td><strong>停止任务 / 恢复任务</strong></td><td>停止是安全请求；失败、中断或取消后按最新 revision 恢复，不覆盖已有正式正文。</td></tr>
+        <tr><td><strong>已提交</strong></td><td>正文、事实、伏笔和状态已原子写入正式故事；质量中心不会再显示提交按钮。</td></tr>
+      </tbody></table>
+    </section>
+
+    <section class="section searchable" id="quality">
+      <h2>质量中心：红色阻断到底怎么办</h2>
+      <p class="section-intro">这里集中展示确定性规则、连续性、故事编辑和文风四类检查。你看见“已正式提交”，就说明这一章已经完成，不需要再找提交按钮。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/07-quality.png" alt="章节质量中心截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>综合质量门</strong><p>显示等待、阻断、可批准或已正式提交。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>四类检查</strong><p>确定性规则最硬；连续性、故事编辑和文风由各角色独立复核。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>问题与证据</strong><p>点击问题查看原文位置、证据、规则代码和修复建议。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>底部操作区</strong><p>按问题自动修订、人工批准、质量通过并提交；只有状态允许时才可点。</p></div></div>
+      </div>
+      <table><thead><tr><th>级别 / 状态</th><th>含义</th><th>处理</th></tr></thead><tbody>
+        <tr><td><strong>blocker / error</strong></td><td>严重边界、连续性或硬规则问题。</td><td>不能“接受风险”绕过；点击自动修订或回写作页人工改稿。</td></tr>
+        <tr><td><strong>warning</strong></td><td>可能影响质量，但不是硬冲突。</td><td>可以修订；也可填写判断依据后“记录并接受”。</td></tr>
+        <tr><td><strong>superseded</strong></td><td>旧版本曾经的问题，已被新版本取代。</td><td>作为历史审计保留，不再阻断当前正文。</td></tr>
+        <tr><td><strong>按问题自动修订</strong></td><td>模型按当前问题创建新候选稿。</td><td>最多两轮；仍失败则交给人工判断。</td></tr>
+        <tr><td><strong>人工批准</strong></td><td>你明确承担判断后批准当前候选。</td><td>会写入审计，适合模型无法正确判断但你确认合理的情况。</td></tr>
+        <tr><td><strong>质量通过并提交</strong></td><td>把正文与状态原子提交为正式章节。</td><td>仅在待人工复核、无 blocker/error、revision 未漂移时可点。</td></tr>
+      </tbody></table>
+      <div class="notice green"><strong>为什么找不到“质量通过并提交”：</strong>最常见原因是该章已经自动或人工正式提交。顶部显示“已正式提交”、写作页章节轨道为绿色时，就不需要再提交一次。</div>
+    </section>
+
+    <section class="section searchable" id="automation">
+      <h2>自动托管：先 1 章，再 3 章，再 5 章</h2>
+      <p class="section-intro">手动试写和每日托管是两件事。上面的 1/3/5 章按钮只创建一次批次，不会擅自打开每日定时开关。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/08-automation.png" alt="自动托管页面截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span><span class="pin p5">5</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>1 / 3 / 5 章选择</strong><p>1 章冒烟测试界面和模型；3 章观察跨章状态；5 章验证节奏与恢复。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>开始第 X—Y 章</strong><p>例如“第 10—10 章”就是只写第 10 章；“第 10—12 章”是连续写三章。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>每日托管策略</strong><p>开关、时间、时区、每批章节、字数、修订上限、费用上限和停止策略。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>运行队列</strong><p>显示批次状态、章节进度、Token、费用和错误；按 availableActions 显示停止、恢复或补跑。</p></div></div>
+        <div class="callout"><b>5</b><div><strong>试写就绪检查</strong><p>模型、Canon、规划、活动任务和费用逐项检查。红项未处理，开始按钮会变灰。</p></div></div>
+      </div>
+      <table><thead><tr><th>界面文字</th><th>实际意思</th></tr></thead><tbody>
+        <tr><td><strong>冒烟测试 · 1 章</strong></td><td>只验证下一章完整流水线；不是章节标题。</td></tr>
+        <tr><td><strong>短链路 · 3 章</strong></td><td>连续写下一批三章，用于观察事实、人物和伏笔是否跨章更新。</td></tr>
+        <tr><td><strong>连续验证 · 5 章</strong></td><td>更高成本的连续性和恢复测试，前面稳定后再用。</td></tr>
+        <tr><td><strong>开始第 6—6 章</strong></td><td>当前正式进度为第 5 章，选择了 1 章，所以本批次只写第 6 章。</td></tr>
+        <tr><td><strong>试写范围存在未收口任务</strong></td><td>同一章节已有失败、取消或待复核任务；先在队列点恢复，或到章节工作台处理。</td></tr>
+        <tr><td><strong>AUTOMATION_REVISION_LIMIT_REACHED</strong></td><td>自动修订已达到两轮上限；系统为防止无限烧钱而停止，需要人工看稿。</td></tr>
+      </tbody></table>
+      <div class="notice red"><strong>不要在有红色阻断时反复点击开始：</strong>先查看就绪检查的红项和运行队列的可用按钮。重复创建不会解决旧任务，反而容易让你误以为系统没反应。</div>
+    </section>
+
+    <section class="section searchable" id="settings">
+      <h2>模型设置与安全审计</h2>
+      <p class="section-intro">模型配置决定每个工作角色用哪个模型；安全审计负责备份、恢复、调用记录和错误诊断。</p>
+      <div class="shot-wrap"><img src="assets/user-guide/09-settings.png" alt="模型设置页面截图" /><span class="pin p1">1</span><span class="pin p2">2</span><span class="pin p3">3</span><span class="pin p4">4</span></div>
+      <div class="callouts">
+        <div class="callout"><b>1</b><div><strong>Provider</strong><p>DeepSeek 官方地址或 OpenAI 兼容中转地址。API Key 保存后不会回显。</p></div></div>
+        <div class="callout"><b>2</b><div><strong>测试连接</strong><p>确认地址、密钥和模型列表可用。只有保存过的 Provider 才能测试。</p></div></div>
+        <div class="callout"><b>3</b><div><strong>模型参数</strong><p>模型 ID、显示名、输入/输出价格、温度、最大输出和推理能力标记。</p></div></div>
+        <div class="callout"><b>4</b><div><strong>角色绑定</strong><p>把写作、事实抽取、连续性、故事编辑、文风、修订、架构和分析角色分配给模型。</p></div></div>
+      </div>
+      <ol class="steps">
+        <li><strong>创建或选择 Provider。</strong><p>DeepSeek 可用官方预设；中转服务则填写自己的 Base URL。</p></li>
+        <li><strong>保存 API Key 与配置，再点“测试连接”。</strong><p>成功状态会记录测试时间；完整密钥不会进入 SQLite、日志或备份。</p></li>
+        <li><strong>新增模型。</strong><p>模型 ID 必须与服务端实际可用名称一致。设置价格后才能正确执行每日费用上限。</p></li>
+        <li><strong>完成角色绑定。</strong><p>缺少任何试写必需角色，自动托管就绪检查会显示阻断。</p></li>
+      </ol>
+      <h3>安全审计分栏</h3>
+      <table><thead><tr><th>功能</th><th>说明</th></tr></thead><tbody>
+        <tr><td><strong>创建备份</strong></td><td>生成带 SHA-256 清单的项目 ZIP；不包含 API Key。</td></tr>
+        <tr><td><strong>恢复上传</strong></td><td>校验 ZIP 后创建一部新作品，不覆盖原项目。</td></tr>
+        <tr><td><strong>审计时间线</strong></td><td>查看提案、Canon、规划、章节和自动托管的重要写入事件。</td></tr>
+        <tr><td><strong>模型调用记录</strong></td><td>查看角色、模型、Token、耗时和状态，不保存完整敏感正文。</td></tr>
+        <tr><td><strong>错误诊断</strong></td><td>按请求 ID 和错误代码定位断线、超时、预算、JSON 或 revision 冲突。</td></tr>
+      </tbody></table>
+    </section>
+
+    <section class="section searchable" id="agent">
+      <h2>右侧“故事 Agent”怎么用</h2>
+      <p class="section-intro">它会自动知道你当前在哪部作品、哪个页面、哪一章、哪个契约或选区。普通聊天只给建议；需要改正式数据时，必须形成候选版本或差异提案并由你确认。</p>
+      <div class="term-grid">
+        <div class="term"><strong>检查逻辑 / 检查设定</strong><p>只分析因果、人物动机、连续性或 Canon 冲突，不直接修改。</p></div>
+        <div class="term"><strong>精修选区</strong><p>在章节正文中先选中文字，再让 AI 输出替换建议；点击应用后仍是候选版本。</p></div>
+        <div class="term"><strong>重排节奏</strong><p>规划页生成字段级 before/after 提案，可以逐项接受或整体拒绝。</p></div>
+        <div class="term"><strong>补全依赖</strong><p>检查里程碑缺少的前置条件、人物或伏笔，显示下游影响。</p></div>
+        <div class="term"><strong>解释失败 / 恢复建议</strong><p>自动托管页根据当前批次说明错误和不重复付费的恢复方法。</p></div>
+        <div class="term"><strong>撤销</strong><p>只有最近操作存在可逆审计事件时可用；不能撤销已经产生外部副作用的模型费用。</p></div>
+      </div>
+      <div class="notice gold">右上角双箭头可以折叠面板。页面变窄时优先折叠，不会遮住正文。对话、选区和提案作用域会随页面切换。</div>
+    </section>
+
+    <section class="section searchable" id="errors">
+      <h2>常见问题与最快处理方式</h2>
+      <div class="error-grid">
+        <div class="error-card"><strong>点击按钮“没有反应”</strong><p>先看按钮是否灰色、右侧是否有 blocker、顶部是否断线。创建作品时按钮会进入处理中；若出现重复作品，刷新后只打开一个，不要继续连点。</p></div>
+        <div class="error-card"><strong>章节显示 6—6，看不懂</strong><p>这是范围，不是写错。你选择了 1 章，下一章是第 6 章，所以起止都是 6。</p></div>
+        <div class="error-card"><strong>质量中心还有旧红项，但已提交</strong><p>检查问题状态是否 superseded，以及顶部是否“已正式提交”。旧问题保留用于审计，不代表当前版本失败。</p></div>
+        <div class="error-card"><strong>开始试写按钮变灰</strong><p>查看右侧“试写就绪检查”。模型、Canon、规划、费用或旧任务任一阻断都会禁用按钮。</p></div>
+        <div class="error-card"><strong>模型修订两轮仍不通过</strong><p>这是安全停止，不是死机。到写作页读候选稿，人工修改成新版本，或人工判断问题是否真成立。</p></div>
+        <div class="error-card"><strong>HTTP 409 / revision 冲突</strong><p>页面数据已经过期。刷新后重新打开当前对象再操作，不要用旧窗口反复提交。</p></div>
+        <div class="error-card"><strong>服务重启后任务还在</strong><p>这是设计目标。任务、候选稿和运行记录从 SQLite 恢复；按界面给出的“恢复”操作继续。</p></div>
+        <div class="error-card"><strong>我改了正文，会不会污染 Canon</strong><p>不会。人工修改产生新候选稿；只有正式提交时，经过验证的事实和状态才原子写入正式台账。</p></div>
+      </div>
+      <details><summary>什么时候算一章真正写完？</summary><div>章节轨道显示“已提交”，质量中心顶部显示“已正式提交”，并且作品顶部当前章节进度已经前进。只看到候选正文并不算完成。</div></details>
+      <details><summary>什么时候适合开启每日自动托管？</summary><div>先人工读完至少 3—5 章，确认人物、节奏、文风和伏笔没有明显漂移；再进行 20—30 章中程测试。没有达到这个稳定度时，只用手动试写。</div></details>
+      <details><summary>可以同时写几部小说吗？</summary><div>可以。每部作品拥有独立目录和 story.db。通过作品总览切换；不要用 Git 同步 .data，跨电脑迁移请使用项目备份 ZIP。</div></details>
+    </section>
+
+    <section class="section searchable" id="nightwatch">
+      <h2>“夜巡人”目前怎么继续测试</h2>
+      <p class="section-intro">现有“夜巡人·正式试写”已经提交到第 9 章，可用来验证技术连续性。但前 1—5 章是在创意孵化链路完善前生成的，不能代表最终的商业故事质量。</p>
+      <ol class="steps">
+        <li><strong>技术测试：</strong><p>在自动托管选择 1 章，按钮若显示“开始第 10—10 章”，就是只生成第 10 章。</p></li>
+        <li><strong>生成后读第 10 章：</strong><p>重点看它是否正确继承第 9 章人物知识、能力、物品状态和伏笔，不只看文笔。</p></li>
+        <li><strong>到质量中心确认状态：</strong><p>若已正式提交就不再点按钮；若阻断，先判断是真问题、抽取误判还是规划缺口。</p></li>
+        <li><strong>真正测试故事吸引力：</strong><p>建议另建一部新作品，从创意孵化开始完成竞品调研、共创和三开篇实验，再决定是否投入长篇。</p></li>
+      </ol>
+      <div class="notice red"><strong>不要把“系统能连续生成”误当成“小说值得读”。</strong>技术连续性与故事吸引力是两道独立验收门；新创意必须先过孵化和前三章人工阅读。</div>
+    </section>
+
+    <footer class="page-footer">Story Agent 本地操作手册 · 所有截图来自当前本地应用 · 文档中不包含任何 API Key</footer>
+  </main>
+</div>
+<script>
+  const sections = [...document.querySelectorAll('.searchable')];
+  const links = [...document.querySelectorAll('.toc a')];
+  const search = document.getElementById('search');
+  search.addEventListener('input', () => {
+    const query = search.value.trim().toLowerCase();
+    sections.forEach(section => section.classList.toggle('hidden-by-search', query && !section.textContent.toLowerCase().includes(query)));
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        links.forEach(link => link.classList.toggle('active', link.getAttribute('href') === '#' + entry.target.id));
+      }
+    });
+  }, { rootMargin: '-15% 0px -70% 0px' });
+  sections.forEach(section => observer.observe(section));
+</script>
+</body>
+</html>

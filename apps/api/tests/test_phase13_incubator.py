@@ -318,6 +318,40 @@ def test_single_integrated_manual_report_can_reach_human_research_review(client)
     assert accepted.status_code == 200, accepted.text
 
 
+def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    }).json()
+    stopped = client.post(f"/api/v1/research/jobs/{created['id']}/cancel", json={"expectedRevision": created["revision"]}).json()
+    report = client.post(f"/api/v1/research/jobs/{stopped['id']}/manual-materials", json={
+        "expectedRevision": stopped["revision"], "title": "Compact opportunity report",
+        "content": "Readers respond to proactive choices, a concrete opening crisis, and escalating stakes. " * 20,
+    }).json()
+    analyzed = client.post(f"/api/v1/research/jobs/{stopped['id']}/analyze-manual-materials", json={"expectedRevision": report["revision"]}).json()
+    accepted = client.post(f"/api/v1/research/jobs/{stopped['id']}/accept", json={"expectedRevision": analyzed["revision"]}).json()
+
+    phase13 = client.app.state.story_service.phase13
+    original = phase13._complete_model_json
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append({"role": args[2], "payload": args[5], "kwargs": kwargs})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(phase13, "_complete_model_json", capture)
+    response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"]})
+
+    assert response.status_code == 201, response.text
+    call = next(item for item in calls if item["role"] == "story_incubator:opportunities")
+    assert call["kwargs"] == {"max_output_tokens": 2800, "max_retries": 0}
+    evidence = call["payload"]["report"]["evidence"]
+    assert evidence and set(evidence[0]) == {"id", "claimType", "claim", "confidence"}
+    assert "excerpt" not in str(call["payload"])
+
+
 def test_phase14_deterministic_canon_and_opening_gates(client):
     phase13 = client.app.state.story_service.phase13
     incomplete = phase13._generic_canon_checks(

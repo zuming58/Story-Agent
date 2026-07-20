@@ -933,14 +933,42 @@ class Phase13Service:
                 if job.status != "accepted":
                     raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the evidence-complete research report before creating story opportunities.")
                 evidence = [self._evidence_dict(item) for item in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()]
-                report = {"jobId": job.id, "reportRevision": job.report_revision, "reportChecksum": job.report_checksum, "findings": [self._finding_dict(item) for item in session.scalars(select(ResearchFinding).where(ResearchFinding.job_id == job.id, ResearchFinding.report_revision == job.report_revision)).all()], "evidence": evidence}
+                # Story opportunity generation needs the audited evidence IDs
+                # and concise claims, not full source excerpts or project
+                # metadata. Keeping this snapshot small avoids needlessly
+                # slow model calls while preserving citation validation below.
+                report = {
+                    "jobId": job.id,
+                    "reportRevision": job.report_revision,
+                    "reportChecksum": job.report_checksum,
+                    "findings": [{
+                        "id": item.id,
+                        "category": item.category,
+                        "statement": item.statement[:600],
+                        "claimType": item.claim_type,
+                        "evidenceIds": safe_json_loads(item.evidence_ids_json, []),
+                        "confidence": item.confidence,
+                        "uncertainties": safe_json_loads(item.uncertainties_json, [])[:3],
+                    } for item in session.scalars(select(ResearchFinding).where(
+                        ResearchFinding.job_id == job.id,
+                        ResearchFinding.report_revision == job.report_revision,
+                    )).all()],
+                    "evidence": [{
+                        "id": item["id"],
+                        "claimType": item["claimType"],
+                        "claim": item["claim"][:600],
+                        "confidence": item["confidence"],
+                    } for item in evidence],
+                }
             output, _ = self._complete_model_json(
                 project,
                 "story_incubator",
                 "story_incubator:opportunities",
                 request_id,
-                "Generate three to five differentiated story opportunities grounded only in the supplied evidence IDs. Score components are integers within their documented caps and may total less than 100. Never imitate an author or copy source text.",
+                "Generate exactly three differentiated story opportunities grounded only in the supplied evidence IDs. Keep every highConcept under 90 characters and every other text field under 160 characters. Score components are integers within their documented caps and may total less than 100. Never imitate an author or copy source text.",
                 {"phase14Step": "opportunities", "report": report, "scoreLimits": SCORE_LIMITS},
+                max_output_tokens=2800,
+                max_retries=0,
             )
             generated = output.get("opportunities") if isinstance(output.get("opportunities"), list) else None
             if not generated:

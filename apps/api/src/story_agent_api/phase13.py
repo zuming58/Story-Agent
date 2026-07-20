@@ -49,10 +49,7 @@ from .research_providers import (
 from .schemas import (
     CompetitorExclude,
     ExternalCreativeDirection,
-    IdeationKickoffBoundaryDraft,
-    IdeationKickoffCharacterDraft,
     IdeationKickoffDraft,
-    IdeationKickoffWorldDraft,
     IdeationMessageCreate,
     IdeationSessionCreate,
     IncubationCanonProposalCreate,
@@ -1316,25 +1313,41 @@ class Phase13Service:
             "researchReportChecksum": job.report_checksum,
             "existingState": state,
         }
-        world, world_run_id = self._complete_ideation_kickoff_section(
-            project, request_id, "world", "世界观与连载承诺", IdeationKickoffWorldDraft,
-            "Return only a compact discussion draft for the selected direction. Do not write prose, a full plot, characters, rules, boundaries, or commentary. Return exactly {title,premise,worldView,firstThreeChapterPromise,serialEngine}. Every value is provisional, not Canon.",
-            {"phase14Step": "ideation_kickoff_world", **base_payload},
+        world_text, world_run_id = self._complete_ideation_kickoff_text(
+            project, request_id, "world", "世界观与连载承诺",
+            "为选定方向写一份不超过600字的中文讨论材料，只谈故事定位、核心前提、暂定世界观、前三章阅读承诺和长线连载发动机。不要写完整剧情、人物小传、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+            {"phase14Step": "ideation_kickoff_world_text", **base_payload},
         )
-        characters, character_run_id = self._complete_ideation_kickoff_section(
-            project, request_id, "characters", "人物与规则", IdeationKickoffCharacterDraft,
-            "Return only compact candidates for the selected direction. Do not write prose, a full plot, worldView, boundaries, or commentary. Return exactly {characterCandidates,relationshipCandidates,rulesAndResources,coreConflicts}. characterCandidates must state role, age-or-life-stage, and motivation. rulesAndResources must say notApplicable if this genre has no power, artifact, or resource system. Every value is provisional, not Canon.",
-            {"phase14Step": "ideation_kickoff_characters", **base_payload},
+        character_text, character_run_id = self._complete_ideation_kickoff_text(
+            project, request_id, "characters", "人物与规则",
+            "为选定方向写一份不超过700字的中文讨论材料，只提出1至6名人物候选、关键关系、核心冲突，以及能力/职业/法宝/资源/成长规则。每个人物写明身份、年龄或人生阶段、欲望和作用；题材没有超自然体系时明确写不适用。不要写完整剧情、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+            {"phase14Step": "ideation_kickoff_characters_text", **base_payload},
         )
-        boundaries, boundary_run_id = self._complete_ideation_kickoff_section(
-            project, request_id, "boundaries", "边界与待确认问题", IdeationKickoffBoundaryDraft,
-            "Return only compact discussion constraints for the selected direction. Do not write prose, worldView, characters, rules, plot, or commentary. Return exactly {writingBoundaries,openQuestions}. Include two to eight questions the human author must decide. Every value is provisional, not Canon.",
-            {"phase14Step": "ideation_kickoff_boundaries", **base_payload},
+        boundary_text, boundary_run_id = self._complete_ideation_kickoff_text(
+            project, request_id, "boundaries", "边界与待确认问题",
+            "为选定方向写一份不超过400字的中文讨论材料，只列出建议的写作边界和2至8个必须由作者拍板的问题。不要补写剧情、人物、世界观、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+            {"phase14Step": "ideation_kickoff_boundaries_text", **base_payload},
+        )
+        normalized, normalize_run_id = self._complete_model_json(
+            project,
+            "research_analyst",
+            "research_analyst:ideation-kickoff-normalize",
+            request_id,
+            "Convert the three creative notes into one compact structured co-creation draft. Preserve their meaning, do not invent market facts, and do not add details absent from the notes. Return exactly {title,premise,worldView,characterCandidates,relationshipCandidates,rulesAndResources,coreConflicts,firstThreeChapterPromise,serialEngine,writingBoundaries,openQuestions}. Use one to six characterCandidates, one to five coreConflicts, one to eight writingBoundaries, and two to eight openQuestions. Use notApplicable when the notes say a system does not apply.",
+            {
+                "phase14Step": "ideation_kickoff_normalize",
+                "worldNote": world_text,
+                "characterNote": character_text,
+                "boundaryNote": boundary_text,
+            },
+            max_output_tokens=4096,
+            max_retries=0,
+            stream_response=True,
         )
         try:
-            draft = IdeationKickoffDraft.model_validate({**world, **characters, **boundaries}).model_dump(mode="json", by_alias=True)
+            draft = IdeationKickoffDraft.model_validate(normalized.get("draft", normalized)).model_dump(mode="json", by_alias=True)
         except ValidationError as exc:
-            raise StoryError(422, "IDEATION_KICKOFF_MODEL_INVALID", "The story incubator returned an incomplete co-creation kickoff draft.") from exc
+            raise StoryError(422, "IDEATION_KICKOFF_NORMALIZE_INVALID", "结构审校模型没有返回完整的共创底稿；未保存任何半成品。") from exc
         content = self._format_ideation_kickoff(draft)
         with self.service.db.project_write(project.id, project.folder_path) as session:
             row = session.get(IdeationSession, session_row.id)
@@ -1357,7 +1370,7 @@ class Phase13Service:
             seq = (session.scalar(select(func.max(IdeationMessage.sequence_number)).where(IdeationMessage.session_id == row.id)) or 0) + 1
             assistant = IdeationMessage(
                 id=str(uuid4()), project_id=project.id, session_id=row.id, sequence_number=seq, role="assistant",
-                content=content, structured_state_json=dumps({"kind": "co_creation_kickoff", "status": "unconfirmed", "draft": draft, "modelRunIds": [world_run_id, character_run_id, boundary_run_id]}),
+                content=content, structured_state_json=dumps({"kind": "co_creation_kickoff", "status": "unconfirmed", "draft": draft, "modelRunIds": [world_run_id, character_run_id, boundary_run_id, normalize_run_id]}),
                 evidence_ids_json=dumps(next_state["evidenceIds"]), model_run_id=world_run_id, created_at=_now(),
             )
             session.add(assistant)
@@ -2270,27 +2283,26 @@ class Phase13Service:
             "你可以逐条说“保留、删除、改成……”。这些内容不会自动写入 StoryBrief、Canon、规划或正文。",
         ))
 
-    def _complete_ideation_kickoff_section(
+    def _complete_ideation_kickoff_text(
         self,
         project: Any,
         request_id: str,
         section: str,
         label: str,
-        schema: Any,
         instruction: str,
         payload: dict[str, Any],
-    ) -> tuple[dict[str, Any], str]:
+    ) -> tuple[str, str]:
         try:
-            output, run_id = self._complete_model_json(
+            text, run_id = self.service.phase8._complete_role(
                 project,
                 "story_incubator",
-                f"story_incubator:ideation-kickoff:{section}",
+                [
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": dumps(payload)},
+                ],
                 request_id,
-                instruction,
-                payload,
-                # Kimi K2.6 is configured for 4096. Do not undercut its
-                # reasoning budget here; previous 2000-token calls truncated
-                # before emitting any JSON content.
+                response_json=False,
+                run_role=f"story_incubator:ideation-kickoff:{section}-text",
                 max_output_tokens=4096,
                 max_retries=0,
                 stream_response=True,
@@ -2299,10 +2311,12 @@ class Phase13Service:
             if exc.code == "MODEL_CONTENT_TRUNCATED":
                 raise StoryError(502, f"IDEATION_KICKOFF_{section.upper()}_TRUNCATED", f"{label}生成被模型截断；该部分尚未保存。") from exc
             raise
-        try:
-            return schema.model_validate(output.get("draft", output)).model_dump(mode="json", by_alias=True), run_id
-        except ValidationError as exc:
-            raise StoryError(422, f"IDEATION_KICKOFF_{section.upper()}_INVALID", f"{label}没有返回完整结构，未保存任何底稿。") from exc
+        bounded = text.strip()
+        if not bounded:
+            raise StoryError(422, f"IDEATION_KICKOFF_{section.upper()}_EMPTY", f"{label}没有返回内容；未保存任何底稿。")
+        if len(bounded) > 6000:
+            raise StoryError(422, f"IDEATION_KICKOFF_{section.upper()}_TOO_LONG", f"{label}返回内容超过安全上限；未截断、也未保存半成品。")
+        return bounded, run_id
 
     @staticmethod
     def _validate_brief(brief: dict[str, Any]) -> None:

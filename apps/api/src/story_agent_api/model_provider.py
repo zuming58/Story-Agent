@@ -82,6 +82,19 @@ class OpenAICompatibleModelProvider:
             raise last_error
         raise ModelProviderError("internal_error", "模型调用没有返回结果。", retryable=False)
 
+    async def complete_chat_streaming(self, payload: dict[str, Any]) -> ModelStreamResult:
+        """Consume an SSE completion while keeping the same final-result contract.
+
+        Reasoning-capable providers can emit internal-progress events long before
+        the final JSON object. Reading that stream avoids treating a healthy,
+        active response as an idle non-streaming request timeout.
+        """
+        async for _ in self.stream_chat(payload):
+            pass
+        if not self._last_result.text:
+            raise ModelProviderError("invalid_response", "模型服务没有返回文本内容。", retryable=False)
+        return self._last_result
+
     async def _stream_once(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         request_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}

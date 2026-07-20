@@ -119,6 +119,7 @@ class Phase13Service:
         budget_job_id: str | None = None,
         max_output_tokens: int | None = None,
         max_retries: int | None = None,
+        stream_response: bool = False,
     ) -> tuple[dict[str, Any], str]:
         """Run one bounded JSON call plus one explicit repair attempt.
 
@@ -134,7 +135,7 @@ class Phase13Service:
             self._assert_research_model_budget(project, budget_job_id)
         text, run_id = self.service.phase8._complete_role(
             project, role, messages, request_id, response_json=True, run_role=run_role,
-            max_output_tokens=max_output_tokens, max_retries=max_retries,
+            max_output_tokens=max_output_tokens, max_retries=max_retries, stream_response=stream_response,
         )
         if budget_job_id:
             self._charge_research_model_run(project, budget_job_id, run_id)
@@ -158,6 +159,7 @@ class Phase13Service:
             run_role=f"{run_role}:repair",
             max_output_tokens=max_output_tokens,
             max_retries=max_retries,
+            stream_response=stream_response,
         )
         if budget_job_id:
             self._charge_research_model_run(project, budget_job_id, repair_run_id)
@@ -977,6 +979,7 @@ class Phase13Service:
                     },
                     max_output_tokens=4096,
                     max_retries=0,
+                    stream_response=True,
                 )
                 candidates = output.get("opportunities") if isinstance(output.get("opportunities"), list) else None
                 if not candidates or len(candidates) != 1 or not isinstance(candidates[0], dict):

@@ -24,3 +24,19 @@ async def test_stream_retry_does_not_duplicate_an_emitted_prefix(monkeypatch: py
 
     assert attempts == 1
     assert received == ["prefix"]
+
+
+@pytest.mark.anyio
+async def test_streaming_completion_returns_the_final_aggregate(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = OpenAICompatibleModelProvider("https://example.test", "secret", 5, max_retries=0)
+
+    async def complete_from_sse(_payload: dict):
+        provider._last_result.text = '{"ok":true}'
+        provider._last_result.total_tokens = 3
+        yield provider._last_result.text
+
+    monkeypatch.setattr(provider, "_stream_once", complete_from_sse)
+    result = await provider.complete_chat_streaming({"model": "fake"})
+
+    assert result.text == '{"ok":true}'
+    assert result.total_tokens == 3

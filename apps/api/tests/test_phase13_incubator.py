@@ -53,6 +53,15 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
             key = data.get("strategy", {}).get("key", "opening")
             seeds = {"strong-event":"A public alarm forces Ming to rescue a stranger while losing the only safe exit. ", "strong-character":"Ming rejects an easy lie and pays for the decision in front of someone important. ", "strong-mystery":"A sealed message answers a question Ming has never asked and demands a choice before sunrise. "}
             value = {"chapter": {"title": key, "content": seeds.get(key, seeds["strong-event"]) * 14}}
+        if payload.get("stream"):
+            events = [
+                {"model": "fake-incubator", "choices": [{"delta": {"reasoning_content": "planning"}, "finish_reason": None}]},
+                {"model": "fake-incubator", "choices": [{"delta": {"content": json.dumps(value)}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            response = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+            encoded = response.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Content-Length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
+            return
         response = json.dumps({"model":"fake-incubator", "choices":[{"message":{"content":json.dumps(value)},"finish_reason":"stop"}], "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
     def log_message(self, *_args): return
@@ -350,7 +359,7 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     opportunity_calls = [item for item in calls if item["role"].startswith("story_incubator:opportunities")]
     assert len(opportunity_calls) == 3
     assert [item["payload"]["candidateIndex"] for item in opportunity_calls] == [1, 2, 3]
-    assert all(item["kwargs"] == {"max_output_tokens": 4096, "max_retries": 0} for item in opportunity_calls)
+    assert all(item["kwargs"] == {"max_output_tokens": 4096, "max_retries": 0, "stream_response": True} for item in opportunity_calls)
     assert opportunity_calls[0]["payload"]["previousDirections"] == []
     assert opportunity_calls[2]["payload"]["previousDirections"] == ["Direction 1", "Direction 2"]
     evidence = opportunity_calls[0]["payload"]["report"]["evidence"]

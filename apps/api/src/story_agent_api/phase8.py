@@ -216,6 +216,7 @@ class Phase8Service:
         run_role: str | None = None,
         max_output_tokens: int | None = None,
         max_retries: int | None = None,
+        stream_response: bool = False,
     ) -> tuple[str, str]:
         resolved = self.service._resolve_role_model(role)
         if not resolved:
@@ -261,7 +262,7 @@ class Phase8Service:
         if response_json:
             payload["response_format"] = {"type": "json_object"}
         try:
-            result = asyncio.run(client.complete_chat(payload))
+            result = asyncio.run(client.complete_chat_streaming(payload) if stream_response else client.complete_chat(payload))
         except ModelProviderError as exc:
             partial = client.last_result
             with self.service.db.project_write(project.id, project.folder_path) as session:

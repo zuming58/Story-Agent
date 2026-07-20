@@ -929,6 +929,8 @@ class Phase13Service:
     def create_opportunities(self, job_id: str, payload: StoryOpportunityCreate, request_id: str) -> list[dict[str, Any]]:
         project, _ = self._project_for_job(job_id)
         generated: list[dict[str, Any]] | None = None
+        creative_input = (payload.creative_input or "").strip()
+        creative_input_checksum = stable_digest({"creativeInput": creative_input}) if creative_input else None
         if payload.opportunities is None:
             with self.service.db.project(project.id, project.folder_path) as session:
                 job = session.get(ResearchJob, job_id)
@@ -971,12 +973,13 @@ class Phase13Service:
                     "story_incubator",
                     "story_incubator:opportunities" if candidate_index == 1 else f"story_incubator:opportunities:{candidate_index}",
                     request_id,
-                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Return JSON only, with exactly this shape: {\"opportunities\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\",\"protagonist\":\"...\",\"coreDesire\":\"...\",\"coreConflict\":\"...\",\"worldMechanism\":\"...\",\"firstThreeChapterPromise\":\"...\",\"serialEngine\":\"...\",\"differentiation\":[\"...\"],\"risks\":[\"...\"],\"scoreComponents\":{\"platformFit\":0,\"openingHook\":0,\"emotionalPayoff\":0,\"differentiation\":0,\"serialEngine\":0,\"characterStickiness\":0,\"worldEngine\":0,\"readability\":0},\"evidenceIds\":[\"evidence-id\"],\"evidenceCoverage\":0.0,\"confidence\":0.0,\"uncertainties\":[\"...\"]}]}. All listed scalar fields and all eight scoreComponents keys are required. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
+                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. External creative input is a user preference, not market evidence: use it to guide the direction, but never present it as a researched fact or cite it as evidence. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Return JSON only, with exactly this shape: {\"opportunities\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\",\"protagonist\":\"...\",\"coreDesire\":\"...\",\"coreConflict\":\"...\",\"worldMechanism\":\"...\",\"firstThreeChapterPromise\":\"...\",\"serialEngine\":\"...\",\"differentiation\":[\"...\"],\"risks\":[\"...\"],\"scoreComponents\":{\"platformFit\":0,\"openingHook\":0,\"emotionalPayoff\":0,\"differentiation\":0,\"serialEngine\":0,\"characterStickiness\":0,\"worldEngine\":0,\"readability\":0},\"evidenceIds\":[\"evidence-id\"],\"evidenceCoverage\":0.0,\"confidence\":0.0,\"uncertainties\":[\"...\"]}]}. All listed scalar fields and all eight scoreComponents keys are required. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
                     {
                         "phase14Step": "opportunities",
                         "candidateIndex": candidate_index,
                         "previousDirections": [item.get("highConcept") for item in generated],
                         "report": report,
+                        "externalCreativeInput": creative_input or None,
                         "scoreLimits": SCORE_LIMITS,
                     },
                     max_output_tokens=4096,
@@ -1044,12 +1047,14 @@ class Phase13Service:
                 title = str(draft.get("title") or draft["highConcept"]).strip()[:80]
                 summary = str(draft.get("summary") or draft["highConcept"]).strip()[:600]
                 story = {key: draft.get(key) for key in ("protagonist", "coreDesire", "coreConflict", "worldMechanism", "firstThreeChapterPromise", "serialEngine", "differentiation", "risks", "evidenceByComponent")}
+                if creative_input_checksum:
+                    story["externalCreativeInputChecksum"] = creative_input_checksum
                 story.update({"title": title, "summary": summary})
                 checksum = stable_digest({"highConcept": draft["highConcept"], "story": story, "scores": scores, "evidence": sorted(refs), "report": job.report_checksum})
                 row = StoryOpportunity(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision, report_checksum=job.report_checksum, high_concept=draft["highConcept"], story_json=dumps(story), score_components_json=dumps(scores), total_score=total, evidence_coverage=draft["evidenceCoverage"], confidence=draft["confidence"], uncertainties_json=dumps(draft.get("uncertainties", [])), evidence_ids_json=dumps(sorted(refs)), checksum=checksum, status="pending", is_current=False, revision=1, created_at=_now(), updated_at=_now())
                 session.add(row)
                 rows.append(row)
-            session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows)}, request_id))
+            session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows), "externalCreativeInputChecksum": creative_input_checksum, "externalCreativeInputChars": len(creative_input)}, request_id))
             session.flush()
             return [self._opportunity_dict(row) for row in rows]
 

@@ -365,11 +365,14 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(phase13, "_complete_model_json", capture)
-    response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"]})
+    external_input = "Keep the moral dilemma and the sibling relationship, but avoid a chosen-one destiny."
+    response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"], "creativeInput": external_input})
 
     assert response.status_code == 201, response.text
     assert response.json()[0]["story"]["title"] == "Direction 1"
     assert response.json()[0]["story"]["summary"] == "A concise overview for direction 1."
+    assert response.json()[0]["story"]["externalCreativeInputChecksum"]
+    assert external_input not in json.dumps(response.json())
     opportunity_calls = [item for item in calls if item["role"].startswith("story_incubator:opportunities")]
     assert len(opportunity_calls) == 3
     assert [item["payload"]["candidateIndex"] for item in opportunity_calls] == [1, 2, 3]
@@ -378,6 +381,7 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     assert opportunity_calls[2]["payload"]["previousDirections"] == ["Direction 1", "Direction 2"]
     evidence = opportunity_calls[0]["payload"]["report"]["evidence"]
     assert evidence and set(evidence[0]) == {"id", "claimType", "claim", "confidence"}
+    assert opportunity_calls[0]["payload"]["externalCreativeInput"] == external_input
     assert all("excerpt" not in str(item["payload"]) for item in opportunity_calls)
 
 

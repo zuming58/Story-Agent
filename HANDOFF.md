@@ -1,3 +1,32 @@
+# 2026-07-20 外部创意结果导入入口
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成并通过定向 API、Web、构建与桌面回归，待提交推送。**
+
+## 本轮完成
+
+- 在“故事机会候选”标题右侧新增“导入外部创意”入口。用户可粘贴和其他 Agent 打磨后的题材、人物、冲突、世界观取舍、保留项与禁写项，然后选择“从输入生成方向”。
+- 外部文本通过现有机会生成接口的 `creativeInput` 交给 `story_incubator`。模型仍必须从已接受研究的证据 ID 中生成三张候选；外部文本仅作为用户创作偏好，不能作为市场事实或证据引用。
+- 原文不写入 StoryOpportunity、Canon 或审计详情；结果仅保存外部输入 checksum，审计事件保存 checksum 与长度。输入失败时页面保留文本，便于修改后重试。
+- 保持三张候选、评分上限、证据归属、revision、事务、人工选择与后续 StoryBrief/Canon 确认门槛不变。
+
+## 接口变化
+
+- `POST /api/v1/research/jobs/{job_id}/opportunities` 新增可选 `creativeInput`，最大 `30000` 字符。
+
+## 验证
+
+- 定向 API：`5 passed`，验证外部输入到模型 payload、结果只保留 checksum、不回显原文，以及既有机会卡结构修复。
+- Web 单测：`15 passed`；`npm run build` 通过，仅有既有 Vite chunk-size warning。
+- Playwright：隔离 `desktop-1280 10 passed`；`compileall` 与 `git diff --check` 将在提交前再执行。
+
+## 已知限制
+
+- 点击“从输入生成方向”仍会调用已配置的真实 `story_incubator` 模型并消耗额度；本轮自动回归只使用 FakeModel。
+
+---
+
 # 2026-07-20 创意机会卡完整字段合同与单次语义修复
 
 当前分支：`agent/model-backed-story-incubator`

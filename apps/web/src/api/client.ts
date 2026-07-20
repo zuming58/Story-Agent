@@ -185,7 +185,7 @@ export const api = {
   researchCompetitors: (jobId: string) => request<CompetitorProfile[]>(`/research/jobs/${jobId}/competitors`),
   researchFindings: (jobId: string) => request<ResearchFinding[]>(`/research/jobs/${jobId}/findings`),
   storyOpportunities: (projectId: string, jobId?: string) => request<StoryOpportunity[]>(`/projects/${projectId}/story-opportunities${jobId ? `?jobId=${encodeURIComponent(jobId)}` : ""}`),
-  createStoryOpportunities: (jobId: string, expectedJobRevision: number) => request<StoryOpportunity[]>(`/research/jobs/${jobId}/opportunities`, { method: "POST", body: JSON.stringify({ expectedJobRevision }) }),
+  createStoryOpportunities: (jobId: string, expectedJobRevision: number, creativeInput?: string) => request<StoryOpportunity[]>(`/research/jobs/${jobId}/opportunities`, { method: "POST", body: JSON.stringify({ expectedJobRevision, creativeInput: creativeInput || undefined }) }),
   decideStoryOpportunity: (opportunityId: string, action: "accept" | "reject", expectedRevision: number) => request<StoryOpportunity>(`/story-opportunities/${opportunityId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
   ideationSessions: (projectId: string) => request<IdeationSession[]>(`/projects/${projectId}/ideation/sessions`),
   createIdeationSession: (projectId: string, opportunityId: string, expectedOpportunityRevision: number) => request<IdeationSession>(`/projects/${projectId}/ideation/sessions`, { method: "POST", body: JSON.stringify({ opportunityId, expectedOpportunityRevision }) }),

@@ -1901,6 +1901,7 @@ class StoryOpportunityDraft(ApiModel):
 class StoryOpportunityCreate(ApiModel):
     expected_job_revision: int = Field(ge=1)
     opportunities: list[StoryOpportunityDraft] | None = Field(default=None, min_length=3, max_length=5)
+    creative_input: str | None = Field(default=None, max_length=30000)
 
 
 class StoryOpportunityAction(ApiModel):

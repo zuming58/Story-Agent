@@ -49,6 +49,7 @@ from .research_providers import (
 from .schemas import (
     CompetitorExclude,
     ExternalCreativeDirection,
+    IdeationKickoffDraft,
     IdeationMessageCreate,
     IdeationSessionCreate,
     IncubationCanonProposalCreate,
@@ -1290,6 +1291,73 @@ class Phase13Service:
             session.add(self.service._audit("ideation_message.recorded", "ideation_session", row.id, {}, request_id))
             return self._message_dict(assistant)
 
+    def create_ideation_kickoff(self, session_id: str, payload: Any, request_id: str) -> dict[str, Any]:
+        """Generate a visible, explicitly unconfirmed starting point for co-creation."""
+        project, session_row = self._project_for_ideation_session(session_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            row = session.get(IdeationSession, session_row.id)
+            assert row
+            self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+            opportunity, job = self._assert_ideation_upstream(session, row)
+            state = safe_json_loads(row.state_json, {})
+            messages = self._session_messages(session, row.id)
+            if any(message.get("structuredState", {}).get("kind") == "co_creation_kickoff" for message in messages):
+                raise StoryError(409, "IDEATION_KICKOFF_ALREADY_CREATED", "A co-creation kickoff draft already exists for this session.")
+            frozen = {
+                "opportunityRevision": opportunity.revision,
+                "opportunityChecksum": opportunity.checksum,
+                "researchReportChecksum": job.report_checksum,
+            }
+        output, model_run_id = self._complete_model_json(
+            project,
+            "story_incubator",
+            "story_incubator:ideation-kickoff",
+            request_id,
+            "Generate a compact co-creation kickoff draft for the selected story direction. This is a discussion draft, not a StoryBrief or Canon: every proposed detail remains unconfirmed. Cover premise, worldView, one to six characterCandidates with role/age-or-life-stage/motivation, optional relationshipCandidates, rulesAndResources (use notApplicable where the genre has no power, artifact, or resource system), coreConflicts, firstThreeChapterPromise, serialEngine, writingBoundaries, and two to eight openQuestions. Do not write chapter prose, a full plot outline, market claims, or named-author imitation. Return JSON only: {title,premise,worldView,characterCandidates,relationshipCandidates,rulesAndResources,coreConflicts,firstThreeChapterPromise,serialEngine,writingBoundaries,openQuestions}.",
+            {
+                "phase14Step": "ideation_kickoff",
+                "opportunity": self._opportunity_dict(opportunity),
+                "researchReportChecksum": job.report_checksum,
+                "existingState": state,
+            },
+            max_output_tokens=2000,
+            max_retries=0,
+            stream_response=True,
+        )
+        try:
+            draft = IdeationKickoffDraft.model_validate(output.get("draft", output)).model_dump(mode="json", by_alias=True)
+        except ValidationError as exc:
+            raise StoryError(422, "IDEATION_KICKOFF_MODEL_INVALID", "The story incubator returned an incomplete co-creation kickoff draft.") from exc
+        content = self._format_ideation_kickoff(draft)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            row = session.get(IdeationSession, session_row.id)
+            assert row
+            self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+            opportunity, job = self._assert_ideation_upstream(session, row)
+            if opportunity.revision != frozen["opportunityRevision"] or opportunity.checksum != frozen["opportunityChecksum"] or job.report_checksum != frozen["researchReportChecksum"]:
+                raise StoryError(409, "IDEATION_UPSTREAM_DRIFT", "The selected direction or research report changed while the kickoff draft was generated.")
+            messages = self._session_messages(session, row.id)
+            if any(message.get("structuredState", {}).get("kind") == "co_creation_kickoff" for message in messages):
+                raise StoryError(409, "IDEATION_KICKOFF_ALREADY_CREATED", "A co-creation kickoff draft already exists for this session.")
+            current_state = safe_json_loads(row.state_json, {})
+            next_state = {
+                "confirmedDecisions": current_state.get("confirmedDecisions", []),
+                "openQuestions": draft["openQuestions"],
+                "aiSuggestions": [*current_state.get("aiSuggestions", []), "已生成一份待讨论的共创底稿；其中任何内容都尚未确认。"],
+                "conflicts": current_state.get("conflicts", []),
+                "evidenceIds": current_state.get("evidenceIds", []),
+            }
+            seq = (session.scalar(select(func.max(IdeationMessage.sequence_number)).where(IdeationMessage.session_id == row.id)) or 0) + 1
+            assistant = IdeationMessage(
+                id=str(uuid4()), project_id=project.id, session_id=row.id, sequence_number=seq, role="assistant",
+                content=content, structured_state_json=dumps({"kind": "co_creation_kickoff", "status": "unconfirmed", "draft": draft}),
+                evidence_ids_json=dumps(next_state["evidenceIds"]), model_run_id=model_run_id, created_at=_now(),
+            )
+            session.add(assistant)
+            row.state_json, row.revision, row.updated_at = dumps(next_state), row.revision + 1, _now()
+            session.add(self.service._audit("ideation_kickoff.generated", "ideation_session", row.id, {"status": "unconfirmed"}, request_id))
+            return self._message_dict(assistant)
+
     def create_story_brief_proposal(self, session_id: str, payload: StoryBriefProposalCreate, request_id: str) -> dict[str, Any]:
         project, session_row = self._project_for_ideation_session(session_id)
         generated: dict[str, Any] | None = None
@@ -2174,6 +2242,26 @@ class Phase13Service:
         if not opportunity or not job or opportunity.project_id != row.project_id or opportunity.checksum != row.opportunity_checksum or opportunity.revision != row.opportunity_revision or job.report_checksum != row.research_report_checksum:
             raise StoryError(409, "IDEATION_UPSTREAM_DRIFT", "The accepted opportunity or research report changed.")
         return opportunity, job
+
+    @staticmethod
+    def _format_ideation_kickoff(draft: dict[str, Any]) -> str:
+        def bullets(items: list[str]) -> str:
+            return "\n".join(f"- {item}" for item in items)
+
+        return "\n\n".join((
+            "【共创底稿 · 全部待你确认】",
+            f"一、故事定位\n{draft['title']}\n{draft['premise']}",
+            f"二、暂定世界观\n{draft['worldView']}",
+            f"三、人物候选\n{bullets(draft['characterCandidates'])}",
+            f"四、关系候选\n{bullets(draft['relationshipCandidates']) if draft['relationshipCandidates'] else '- 待你决定人物关系的主轴。'}",
+            f"五、规则、成长与资源\n{draft['rulesAndResources']}",
+            f"六、核心冲突\n{bullets(draft['coreConflicts'])}",
+            f"七、前三章承诺\n{draft['firstThreeChapterPromise']}",
+            f"八、长线发动机\n{draft['serialEngine']}",
+            f"九、暂定边界\n{bullets(draft['writingBoundaries'])}",
+            f"十、请你先拍板的问题\n{bullets(draft['openQuestions'])}",
+            "你可以逐条说“保留、删除、改成……”。这些内容不会自动写入 StoryBrief、Canon、规划或正文。",
+        ))
 
     @staticmethod
     def _validate_brief(brief: dict[str, Any]) -> None:

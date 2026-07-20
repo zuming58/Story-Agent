@@ -1,3 +1,35 @@
+# 2026-07-20 人机共创起始底稿
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与专项回归，待提交推送。**
+
+## 本轮完成
+
+- 修复“选中故事方向后，人机共创页面空白”的体验缺口：新增 `POST /api/v1/ideation/sessions/{session_id}/kickoff`。用户明确点击“生成共创底稿”后，才会调用 `story_incubator:ideation-kickoff`。
+- 底稿固定涵盖：故事定位、暂定世界观、人物和关系候选、规则/成长/资源体系、核心冲突、前三章承诺、长线发动机、写作边界与待拍板问题。没有等级、法宝或超自然机制的题材必须明确写 `notApplicable`，不得硬编。
+- 底稿为独立的 `IdeationMessage`，结构状态为 `co_creation_kickoff` / `unconfirmed`；不产生用户讨论轮次，不写入 `confirmedDecisions`，不会自动创建 StoryBrief、Canon、规划或正文。用户后续通过正常对话逐项确认后，才可生成 StoryBrief 提案。
+- 同一共创会话只允许一份起始底稿；调用期间没有 SQLite 写事务，写入前重新校验 session、机会和研究报告 revision/checksum。
+- 人机共创台账改用中文含义：已确认决定、待你拍板、Agent 建议、待解决冲突，避免将模型建议误解为已锁定设定。
+
+## Canon 范围
+
+- StoryBrief 被用户接受后，Canon 才以 proposal 形式生成与交叉分析。Canon 的结构化范围为实体（人物、地点、物品、能力/职业等）、关系、可执行规则、世界机制和代价、信息边界、秘密/揭示窗口、写作边界和文风约束。
+- Canon 草稿仍须经完整性检查、独立 Analyzer 交叉校验和用户应用；随后还要三种开篇实验、选中一版、扩写并人工批准前三章，才允许锁定。它不是共创底稿，也不会在本轮自动锁定。
+
+## 验证
+
+- `apps/api/tests/test_phase13_incubator.py`：`20 passed`，覆盖起始底稿的 ModelRun 角色、无确认状态、无用户轮次、StoryBrief 门禁及既有全链路。
+- `npm run build`：通过，仅既有 Vite chunk-size warning。
+- `python -m compileall -q apps/api/src apps/api/tests`、`git diff --check`：通过。
+
+## 下一步
+
+- 本地 API 已在 `127.0.0.1:8765` 重启并健康检查 `200`。用户刷新创意孵化页面后，点“生成共创底稿”，阅读并逐条反馈。
+- 自动测试未调用真实模型；真实调用由用户点击后发生。此前 `1ac71e6` 及本轮后续提交仍待 GitHub 网络恢复后推送。
+
+---
+
 # 2026-07-20 外部创意导入与研究评分卡解耦
 
 当前分支：`agent/model-backed-story-incubator`

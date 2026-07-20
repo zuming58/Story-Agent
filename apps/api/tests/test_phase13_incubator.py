@@ -28,7 +28,7 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(body or b"{}")
         joined = "\n".join(item.get("content", "") for item in payload.get("messages", []) if isinstance(item, dict))
-        step = next((name for name in ("query_plan", "evidence", "research_report", "opportunity_repair", "opportunities", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
+        step = next((name for name in ("query_plan", "evidence", "research_report", "external_directions", "opportunity_repair", "opportunities", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
         perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
         if step == "query_plan": value = {"queries": [{"perspective": item, "query": f"undecided urban mystery adult readers {item.replace('_', ' ')}".replace("genre leaders", "leading works").replace("reader praise", "reader praise").replace("reader dropoff", "reader dropoff reasons").replace("opening strategy", "opening hook strategy").replace("serial engine", "serial retention engine")} for item in perspectives]}
         elif step == "evidence":
@@ -40,6 +40,7 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
             ]}
         elif step == "research_report":
             data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); evidence = data["evidence"]; value = {"competitors": [{"name": "Comparable", "profile": {"readingPromise": "A bounded promise"}, "evidenceIds": [evidence[0]["id"]], "confidence": 0.6}], "findings": [{"category": "opening_strategy", "statement": "Evidence-backed finding.", "claimType": "inference", "evidenceIds": [evidence[0]["id"]], "confidence": 0.6, "uncertainties": ["sample"]}]}
+        elif step == "external_directions": value = {"directions": [{"title": "External one", "summary": "A focused imported direction.", "highConcept": "Imported direction one."}, {"title": "External two", "summary": "A second focused imported direction.", "highConcept": "Imported direction two."}]}
         elif step in {"opportunities", "opportunity_repair"}:
             data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]] if step == "opportunities" else data["allowedEvidenceIds"]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; n = int(data.get("candidateIndex", 1)); value = {"opportunities": [{"title": f"Direction {n}", "summary": f"A concise overview for direction {n}.", "highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notEstablished", "firstThreeChapterPromise": "A choice", "serialEngine": "notEstablished", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []}]}
         elif step == "ideation": value = {"reply": "A concrete constraint is recorded.", "confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": []}
@@ -369,28 +370,23 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"], "creativeInput": external_input})
 
     assert response.status_code == 201, response.text
-    assert response.json()[0]["story"]["title"] == "Direction 1"
-    assert response.json()[0]["story"]["summary"] == "A concise overview for direction 1."
+    assert len(response.json()) == 2
+    assert response.json()[0]["story"]["title"] == "External one"
+    assert response.json()[0]["story"]["inputOrigin"] == "externalCreativeInput"
     assert response.json()[0]["story"]["externalCreativeInputChecksum"]
     assert external_input not in json.dumps(response.json())
-    opportunity_calls = [item for item in calls if item["role"].startswith("research_analyst:external-opportunities")]
-    assert len(opportunity_calls) == 3
-    assert [item["payload"]["candidateIndex"] for item in opportunity_calls] == [1, 2, 3]
-    assert all(item["kwargs"] == {"max_output_tokens": 1600, "max_retries": 0, "stream_response": True} for item in opportunity_calls)
-    assert opportunity_calls[0]["payload"]["previousDirections"] == []
-    assert opportunity_calls[2]["payload"]["previousDirections"] == ["Direction 1", "Direction 2"]
-    evidence = opportunity_calls[0]["payload"]["report"]["evidence"]
-    assert evidence and set(evidence[0]) == {"id", "claimType", "claim", "confidence"}
-    assert opportunity_calls[0]["payload"]["externalCreativeInput"] == external_input
-    assert all("excerpt" not in str(item["payload"]) for item in opportunity_calls)
+    external_calls = [item for item in calls if item["role"] == "research_analyst:external-directions"]
+    assert len(external_calls) == 1
+    assert external_calls[0]["kwargs"] == {"max_output_tokens": 1200, "max_retries": 0, "stream_response": True}
+    assert external_calls[0]["payload"]["externalCreativeInput"] == external_input
 
     replacement = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={
         "expectedJobRevision": accepted["revision"], "creativeInput": "Keep the family conflict, but rebuild the central mystery around public records.",
     })
     assert replacement.status_code == 201, replacement.text
     all_opportunities = client.get(f"/api/v1/projects/{project['id']}/story-opportunities?jobId={stopped['id']}").json()
-    assert len([item for item in all_opportunities if item["status"] == "pending"]) == 3
-    assert len([item for item in all_opportunities if item["status"] == "superseded"]) == 3
+    assert len([item for item in all_opportunities if item["status"] == "pending"]) == 2
+    assert len([item for item in all_opportunities if item["status"] == "superseded"]) == 2
 
 
 def test_story_opportunity_response_accepts_one_card_equivalent_envelopes(client):

@@ -1898,6 +1898,12 @@ class StoryOpportunityDraft(ApiModel):
     uncertainties: list[str] = Field(default_factory=list)
 
 
+class ExternalCreativeDirection(ApiModel):
+    title: str = Field(min_length=1, max_length=80)
+    summary: str = Field(min_length=1, max_length=600)
+    high_concept: str = Field(min_length=1, max_length=4000)
+
+
 class StoryOpportunityCreate(ApiModel):
     expected_job_revision: int = Field(ge=1)
     opportunities: list[StoryOpportunityDraft] | None = Field(default=None, min_length=3, max_length=5)

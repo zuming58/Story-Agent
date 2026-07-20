@@ -48,6 +48,7 @@ from .research_providers import (
 )
 from .schemas import (
     CompetitorExclude,
+    ExternalCreativeDirection,
     IdeationMessageCreate,
     IdeationSessionCreate,
     IncubationCanonProposalCreate,
@@ -930,6 +931,8 @@ class Phase13Service:
         project, _ = self._project_for_job(job_id)
         generated: list[dict[str, Any]] | None = None
         creative_input = (payload.creative_input or "").strip()
+        if creative_input:
+            return self._create_external_creative_opportunities(project, job_id, payload, request_id, creative_input)
         creative_input_checksum = stable_digest({"creativeInput": creative_input}) if creative_input else None
         if payload.opportunities is None:
             with self.service.db.project(project.id, project.folder_path) as session:
@@ -1086,6 +1089,94 @@ class Phase13Service:
                 session.add(row)
                 rows.append(row)
             session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows), "replacedPendingCount": replaced_pending_count, "externalCreativeInputChecksum": creative_input_checksum, "externalCreativeInputChars": len(creative_input)}, request_id))
+            session.flush()
+            return [self._opportunity_dict(row) for row in rows]
+
+    def _create_external_creative_opportunities(
+        self,
+        project: Any,
+        job_id: str,
+        payload: StoryOpportunityCreate,
+        request_id: str,
+        creative_input: str,
+    ) -> list[dict[str, Any]]:
+        with self.service.db.project(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status != "accepted":
+                raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the research report before importing creative directions.")
+            if session.scalar(select(StoryOpportunity.id).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "accepted",
+                StoryOpportunity.is_current.is_(True),
+            )):
+                raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
+            frozen = {"reportChecksum": job.report_checksum, "reportRevision": job.report_revision}
+        output, model_run_id = self._complete_model_json(
+            project,
+            "research_analyst",
+            "research_analyst:external-directions",
+            request_id,
+            "Extract only the distinct story directions actually present in the user's external creative input. Return one to six compact directions. If the input contains one direction, return one; do not invent extra directions to reach any target count. Each direction needs only title, summary, and highConcept. Treat this as user creative preference, never as market research or factual evidence. Return JSON only: {\"directions\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\"}]}. No scores, evidence IDs, world bible, plot outline, or commentary.",
+            {"phase14Step": "external_directions", "externalCreativeInput": creative_input},
+            max_output_tokens=1200,
+            max_retries=0,
+            stream_response=True,
+        )
+        raw_directions = output.get("directions") if isinstance(output.get("directions"), list) else None
+        if not raw_directions or not 1 <= len(raw_directions) <= 6 or not all(isinstance(item, dict) for item in raw_directions):
+            self._record_opportunity_schema_failure(project, model_run_id, ValueError("The model did not return one to six external directions."))
+            raise StoryError(422, "EXTERNAL_CREATIVE_DIRECTIONS_INVALID", "The analysis model did not return one to six usable story directions.")
+        try:
+            directions = [ExternalCreativeDirection.model_validate(item).model_dump(mode="json", by_alias=True) for item in raw_directions]
+        except ValidationError as exc:
+            self._record_opportunity_schema_failure(project, model_run_id, exc)
+            raise StoryError(422, "EXTERNAL_CREATIVE_DIRECTIONS_INVALID", "The analysis model returned incomplete external story directions.") from exc
+        input_checksum = stable_digest({"creativeInput": creative_input})
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status != "accepted" or job.report_checksum != frozen["reportChecksum"] or job.report_revision != frozen["reportRevision"]:
+                raise StoryError(409, "RESEARCH_REPORT_DRIFT", "The research report changed while external directions were analyzed.")
+            if session.scalar(select(StoryOpportunity.id).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "accepted",
+                StoryOpportunity.is_current.is_(True),
+            )):
+                raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
+            now = _now()
+            replaced_pending_count = 0
+            for previous in session.scalars(select(StoryOpportunity).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "pending",
+            )).all():
+                previous.status, previous.revision, previous.updated_at = "superseded", previous.revision + 1, now
+                replaced_pending_count += 1
+            rows: list[StoryOpportunity] = []
+            zero_scores = {key: 0 for key in SCORE_LIMITS}
+            for direction in directions:
+                story = {
+                    "title": direction["title"], "summary": direction["summary"], "inputOrigin": "externalCreativeInput",
+                    "externalCreativeInputChecksum": input_checksum, "protagonist": "notEstablished", "coreDesire": "notEstablished",
+                    "coreConflict": "notEstablished", "worldMechanism": "notEstablished", "firstThreeChapterPromise": "notEstablished",
+                    "serialEngine": "notEstablished", "differentiation": [], "risks": [], "evidenceByComponent": {},
+                }
+                row = StoryOpportunity(
+                    id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision,
+                    report_checksum=job.report_checksum, high_concept=direction["highConcept"], story_json=dumps(story),
+                    score_components_json=dumps(zero_scores), total_score=0, evidence_coverage=0.0, confidence=0.0,
+                    uncertainties_json=dumps(["User-supplied external creative direction; not market evidence."]), evidence_ids_json="[]",
+                    checksum=stable_digest({"highConcept": direction["highConcept"], "story": story, "report": job.report_checksum}),
+                    status="pending", is_current=False, revision=1, created_at=now, updated_at=now,
+                )
+                session.add(row)
+                rows.append(row)
+            session.add(self.service._audit("story_opportunities.external_imported", "research_job", job.id, {
+                "count": len(rows), "replacedPendingCount": replaced_pending_count,
+                "externalCreativeInputChecksum": input_checksum, "externalCreativeInputChars": len(creative_input),
+            }, request_id))
             session.flush()
             return [self._opportunity_dict(row) for row in rows]
 

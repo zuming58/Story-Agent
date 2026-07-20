@@ -1113,6 +1113,7 @@ class Phase13Service:
             request_id,
             "Respond to one creative co-creation turn. Return reply, confirmedDecisions, openQuestions, aiSuggestions, conflicts, and evidenceIds. Keep unsupported assertions uncertain and never treat the response as an accepted StoryBrief.",
             {"phase14Step": "ideation", "userMessage": payload.content, "state": frozen_state, "messages": messages, "opportunity": self._opportunity_dict(opportunity), "researchReportChecksum": job.report_checksum},
+            stream_response=True,
         )
         reply = str(output.get("reply") or "").strip()
         if not reply:
@@ -1173,6 +1174,7 @@ class Phase13Service:
                 request_id,
                 "Generate a complete structured StoryBrief from the accepted opportunity and co-creation session. Do not imitate authors or claim unsupported research facts.",
                 {"phase14Step": "story_brief", "projectTitle": project.title, "opportunity": self._opportunity_dict(opportunity), "researchReportChecksum": job.report_checksum, "state": state, "messages": messages},
+                stream_response=True,
             )
             generated = output.get("brief") if isinstance(output.get("brief"), dict) else output
         with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -1266,6 +1268,7 @@ class Phase13Service:
             request_id,
             "Generate a generic story Canon proposal. Return markdown, structured (entities, relations, rules), and do not introduce named-author imitation, Night Watch residue, forced power systems, or chapter plans.",
             {"phase14Step": "canon", "storyBrief": brief_data, "instructions": payload.instructions},
+            stream_response=True,
         )
         markdown, generated_structured = str(output.get("markdown") or "").strip(), output.get("structured")
         if not markdown or not isinstance(generated_structured, dict):
@@ -1291,6 +1294,7 @@ class Phase13Service:
                 request_id,
                 "Repair only the listed Canon completeness failures. Return the complete markdown and structured entities, relations, and rules. Do not add unrelated systems or chapter plans.",
                 {"phase14Step": "canon_repair", "missingChecks": missing, "storyBrief": brief_data, "markdown": markdown, "structured": generated_structured},
+                stream_response=True,
             )
             repaired_markdown = str(repaired.get("markdown") or "").strip()
             repaired_structured = repaired.get("structured")
@@ -1358,7 +1362,7 @@ class Phase13Service:
             brief_data, canon_markdown = safe_json_loads(brief.brief_json, {}), doc.content_markdown
         generated: list[tuple[dict[str, Any], dict[str, Any], str, list[tuple[str, dict[str, Any], str]]]] = []
         for strategy in strategies:
-            output, run_id = self._complete_model_json(project, "story_incubator", f"story_incubator:opening:{strategy['key']}", request_id, "Write one distinct first chapter for the given opening strategy. Return chapter with title and content only. Respect the StoryBrief word range and Canon. Do not imitate authors or reuse source text.", {"phase14Step": "opening", "strategy": strategy, "storyBrief": brief_data, "canonMarkdown": canon_markdown[:8000]})
+            output, run_id = self._complete_model_json(project, "story_incubator", f"story_incubator:opening:{strategy['key']}", request_id, "Write one distinct first chapter for the given opening strategy. Return chapter with title and content only. Respect the StoryBrief word range and Canon. Do not imitate authors or reuse source text.", {"phase14Step": "opening", "strategy": strategy, "storyBrief": brief_data, "canonMarkdown": canon_markdown[:8000]}, stream_response=True)
             chapter = output.get("chapter") if isinstance(output.get("chapter"), dict) else output
             content = str(chapter.get("content") or "").strip() if isinstance(chapter, dict) else ""
             title = str(chapter.get("title") or strategy["label"]).strip() if isinstance(chapter, dict) else ""
@@ -1450,7 +1454,7 @@ class Phase13Service:
             brief = session.get(StoryBriefVersion, experiment.story_brief_version_id)
             frozen = {"experimentRevision": experiment.revision, "candidateRevision": candidate.revision, "candidateId": candidate.id}
             chapters = safe_json_loads(candidate.chapters_json, [])
-        output, _ = self._complete_model_json(project, "story_incubator", "story_incubator:opening-expand", request_id, "Write experimental chapters two and three for the selected opening. Return chapters with exactly chapterNumber 2 and 3, title, content. They remain experiments and must not be official manuscript text.", {"phase14Step": "opening_expand", "storyBrief": safe_json_loads(brief.brief_json, {}) if brief else {}, "selectedChapters": chapters})
+        output, _ = self._complete_model_json(project, "story_incubator", "story_incubator:opening-expand", request_id, "Write experimental chapters two and three for the selected opening. Return chapters with exactly chapterNumber 2 and 3, title, content. They remain experiments and must not be official manuscript text.", {"phase14Step": "opening_expand", "storyBrief": safe_json_loads(brief.brief_json, {}) if brief else {}, "selectedChapters": chapters}, stream_response=True)
         additions = output.get("chapters") if isinstance(output.get("chapters"), list) else []
         if {item.get("chapterNumber") for item in additions if isinstance(item, dict)} != {2, 3}:
             raise StoryError(422, "OPENING_EXPANSION_MODEL_INVALID", "The story incubator must return chapters two and three.")

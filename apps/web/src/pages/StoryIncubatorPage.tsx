@@ -216,7 +216,10 @@ export function StoryIncubatorPage() {
   })();
   const analyzeManualMaterials = () => currentJob && void run("正在分析人工调研材料", () => api.analyzeManualResearchMaterials(currentJob.id, currentJob.revision));
   const generateOpportunities = () => currentJob && void run("已生成故事机会", () => api.createStoryOpportunities(currentJob.id, currentJob.revision));
-  const decideOpportunity = (id: string, revision: number, action: "accept" | "reject") => void run(action === "accept" ? "已选定故事方向" : "已排除故事方向", () => api.decideStoryOpportunity(id, action, revision));
+  const decideOpportunity = async (id: string, revision: number, action: "accept" | "reject") => {
+    await run(action === "accept" ? "已选定故事方向，进入人机共创" : "已排除故事方向", () => api.decideStoryOpportunity(id, action, revision));
+    if (action === "accept") setStage(3);
+  };
   const ensureSession = async () => {
     if (!project || !acceptedOpportunity) return null;
     return activeSession ?? api.createIdeationSession(project.id, acceptedOpportunity.id, acceptedOpportunity.revision);

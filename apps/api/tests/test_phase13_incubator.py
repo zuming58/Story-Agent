@@ -121,9 +121,18 @@ def _brief(client, project_id, expected_revision=0, **overrides):
     return response.json()
 
 
-def test_research_to_opening_selection_is_isolated_and_deterministic(client):
+def test_research_to_opening_selection_is_isolated_and_deterministic(client, monkeypatch):
     project = _project(client)
     search, fetch = _configure_research(client)
+    phase13 = client.app.state.story_service.phase13
+    original_complete = phase13._complete_model_json
+    calls = []
+
+    def capture_complete(*args, **kwargs):
+        calls.append({"run_role": args[2], "kwargs": kwargs})
+        return original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(phase13, "_complete_model_json", capture_complete)
     brief = _brief(client, project["id"])
     job_response = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
         "expectedBriefRevision": brief["revision"],
@@ -219,6 +228,11 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
     roles = {item["role"] for item in runs}
     assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:story-brief", "story_incubator:canon", "research_analyst:canon-analyzer", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
+    incubator_calls = [item for item in calls if item["run_role"].startswith("story_incubator:")]
+    assert {"story_incubator:ideation", "story_incubator:story-brief", "story_incubator:canon", "story_incubator:opening-expand"}.issubset({item["run_role"] for item in incubator_calls})
+    assert any(item["run_role"].startswith("story_incubator:opportunities") for item in incubator_calls)
+    assert any(item["run_role"].startswith("story_incubator:opening:") for item in incubator_calls)
+    assert all(item["kwargs"].get("stream_response") is True for item in incubator_calls)
 
 
 def test_query_plan_repairs_valid_json_with_missing_queries(client, monkeypatch):

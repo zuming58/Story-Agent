@@ -1,3 +1,28 @@
+# 2026-07-20 创意孵化链路收敛：人机共创入口与流式模型完成
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成本轮修补并通过假模型全链路、Web、构建、双桌面 Playwright 回归；待提交推送。**
+
+## 本轮完成
+
+- “故事机会”选择成功后，界面自动进入第 4 步“人机共创”。这只改变当前页面阶段；不会自动创建共创会话、生成 StoryBrief 或越过任何人工确认。
+- 人机共创的实际对话入口是中央面板“和故事策划 Agent 讨论”：发送第一条意见时才创建会话。至少两次用户消息后，才允许生成 StoryBrief 提案；StoryBrief、Canon、开篇选择、三章人工批准和 Canon 锁定仍全部要求显式人工操作。
+- `story_incubator` 的机会、共创回复、StoryBrief、Canon、Canon 修复、三种开篇和开篇扩写均使用现有 SSE 聚合完成路径。模型调用期间仍不持有 SQLite 写事务，输出依旧通过 JSON、evidence、revision 和上游 checksum 校验后才写入。
+- 新增回归断言：完整“调研 -> 机会 -> 共创 -> StoryBrief -> Canon -> 三开篇”假模型链中，所有 `story_incubator:*` 调用必须显式使用流式完成；非创意角色的研究分析与双评审保持原有独立调用。
+
+## 验证
+
+- API：`uv run --project apps/api pytest apps/api/tests/test_phase13_incubator.py apps/api/tests/test_model_provider.py`，`20 passed`。
+- Web 单测：`15 passed`；`npm run build` 通过，只有既有 Vite chunk-size warning；`compileall` 通过。
+- Playwright：`desktop-1280 10 passed`、`desktop-1440 10 passed`，使用隔离端口和临时测试数据。未拆分的 `npm run test:e2e` 曾被桌面 124 秒命令上限中断，不能视为通过；两次拆分回归完整通过。
+
+## 已知限制
+
+- 流式协议避免了等待完整 JSON 才收到首个响应所导致的 60 秒静等，但不能保证上游模型或网络自身永不失败。尚未用用户真实 Kimi/DeepSeek 发起本轮完整创意链测试，以免擅自消耗额度；应由用户从“选这个方向”开始手动验证一次。
+
+---
+
 # 2026-07-20 笔记本可读性小修：创意孵化工作台
 
 当前分支：`agent/model-backed-story-incubator`

@@ -979,7 +979,7 @@ class Phase13Service:
                     "story_incubator",
                     "story_incubator:opportunities" if candidate_index == 1 else f"story_incubator:opportunities:{candidate_index}",
                     request_id,
-                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. External creative input is a user preference, not market evidence: use it to guide the direction, but never present it as a researched fact or cite it as evidence. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Return JSON only, with exactly this shape: {\"opportunities\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\",\"protagonist\":\"...\",\"coreDesire\":\"...\",\"coreConflict\":\"...\",\"worldMechanism\":\"...\",\"firstThreeChapterPromise\":\"...\",\"serialEngine\":\"...\",\"differentiation\":[\"...\"],\"risks\":[\"...\"],\"scoreComponents\":{\"platformFit\":0,\"openingHook\":0,\"emotionalPayoff\":0,\"differentiation\":0,\"serialEngine\":0,\"characterStickiness\":0,\"worldEngine\":0,\"readability\":0},\"evidenceIds\":[\"evidence-id\"],\"evidenceCoverage\":0.0,\"confidence\":0.0,\"uncertainties\":[\"...\"]}]}. All listed scalar fields and all eight scoreComponents keys are required. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
+                    "Generate exactly one compact story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: never write a complete world, character bible, plot outline, chapter plan, ending, rationale, or explanation. External creative input is a user preference, not market evidence: use it to guide the direction, but never present it as a researched fact or cite it as evidence. Keep title under 20 Chinese characters; summary under 90 Chinese characters; highConcept under 50 Chinese characters; each protagonist/desire/conflict/world/promise/serial field under 36 Chinese characters; differentiation, risks, and uncertainties at most two short items each. Return JSON only, under 1200 tokens, with exactly this shape: {\"opportunities\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\",\"protagonist\":\"...\",\"coreDesire\":\"...\",\"coreConflict\":\"...\",\"worldMechanism\":\"...\",\"firstThreeChapterPromise\":\"...\",\"serialEngine\":\"...\",\"differentiation\":[\"...\"],\"risks\":[\"...\"],\"scoreComponents\":{\"platformFit\":0,\"openingHook\":0,\"emotionalPayoff\":0,\"differentiation\":0,\"serialEngine\":0,\"characterStickiness\":0,\"worldEngine\":0,\"readability\":0},\"evidenceIds\":[\"evidence-id\"],\"evidenceCoverage\":0.0,\"confidence\":0.0,\"uncertainties\":[\"...\"]}]}. All listed scalar fields and all eight scoreComponents keys are required. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
                     {
                         "phase14Step": "opportunities",
                         "candidateIndex": candidate_index,
@@ -988,7 +988,7 @@ class Phase13Service:
                         "externalCreativeInput": creative_input or None,
                         "scoreLimits": SCORE_LIMITS,
                     },
-                    max_output_tokens=4096,
+                    max_output_tokens=1600,
                     max_retries=0,
                     stream_response=True,
                 )
@@ -1006,7 +1006,7 @@ class Phase13Service:
                         request_id,
                         "Repair one invalid story opportunity card. Return JSON only with exactly {\"opportunities\":[one complete card]}. Preserve only supported evidence IDs and never invent evidence. Required card fields are title, summary, highConcept, protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, serialEngine, differentiation, risks, scoreComponents with platformFit, openingHook, emotionalPayoff, differentiation, serialEngine, characterStickiness, worldEngine, readability, evidenceIds, evidenceCoverage, confidence, and uncertainties.",
                         {"phase14Step": "opportunity_repair", "invalidCard": candidate, "scoreLimits": SCORE_LIMITS, "allowedEvidenceIds": [item["id"] for item in evidence]},
-                        max_output_tokens=4096,
+                        max_output_tokens=1600,
                         max_retries=0,
                         stream_response=True,
                     )

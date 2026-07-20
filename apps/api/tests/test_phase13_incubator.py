@@ -376,7 +376,7 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     opportunity_calls = [item for item in calls if item["role"].startswith("story_incubator:opportunities")]
     assert len(opportunity_calls) == 3
     assert [item["payload"]["candidateIndex"] for item in opportunity_calls] == [1, 2, 3]
-    assert all(item["kwargs"] == {"max_output_tokens": 4096, "max_retries": 0, "stream_response": True} for item in opportunity_calls)
+    assert all(item["kwargs"] == {"max_output_tokens": 1600, "max_retries": 0, "stream_response": True} for item in opportunity_calls)
     assert opportunity_calls[0]["payload"]["previousDirections"] == []
     assert opportunity_calls[2]["payload"]["previousDirections"] == ["Direction 1", "Direction 2"]
     evidence = opportunity_calls[0]["payload"]["report"]["evidence"]

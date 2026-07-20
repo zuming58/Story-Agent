@@ -7,6 +7,7 @@
 ## 本轮完成
 
 - 在“故事机会候选”标题右侧新增“导入外部创意”入口。用户可粘贴和其他 Agent 打磨后的题材、人物、冲突、世界观取舍、保留项与禁写项，然后选择“从输入生成方向”。
+- 入口在尚未选定方向前始终显示；已有候选时按钮明确显示为“导入外部创意重做方向”。提交后，旧的待选卡会被审计性标为 `superseded` 并从候选区隐藏，新结果仍只有三张可操作卡，避免混成六张。
 - 外部文本通过现有机会生成接口的 `creativeInput` 交给 `story_incubator`。模型仍必须从已接受研究的证据 ID 中生成三张候选；外部文本仅作为用户创作偏好，不能作为市场事实或证据引用。
 - 原文不写入 StoryOpportunity、Canon 或审计详情；结果仅保存外部输入 checksum，审计事件保存 checksum 与长度。输入失败时页面保留文本，便于修改后重试。
 - 保持三张候选、评分上限、证据归属、revision、事务、人工选择与后续 StoryBrief/Canon 确认门槛不变。
@@ -17,7 +18,7 @@
 
 ## 验证
 
-- 定向 API：`5 passed`，验证外部输入到模型 payload、结果只保留 checksum、不回显原文，以及既有机会卡结构修复。
+- 定向 API：`5 passed`，验证外部输入到模型 payload、结果只保留 checksum、不回显原文、重新导入替换旧待选卡，以及既有机会卡结构修复。
 - Web 单测：`15 passed`；`npm run build` 通过，仅有既有 Vite chunk-size warning。
 - Playwright：隔离 `desktop-1280 10 passed`；`compileall` 与 `git diff --check` 将在提交前再执行。
 

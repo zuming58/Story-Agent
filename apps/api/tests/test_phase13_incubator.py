@@ -384,6 +384,14 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     assert opportunity_calls[0]["payload"]["externalCreativeInput"] == external_input
     assert all("excerpt" not in str(item["payload"]) for item in opportunity_calls)
 
+    replacement = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={
+        "expectedJobRevision": accepted["revision"], "creativeInput": "Keep the family conflict, but rebuild the central mystery around public records.",
+    })
+    assert replacement.status_code == 201, replacement.text
+    all_opportunities = client.get(f"/api/v1/projects/{project['id']}/story-opportunities?jobId={stopped['id']}").json()
+    assert len([item for item in all_opportunities if item["status"] == "pending"]) == 3
+    assert len([item for item in all_opportunities if item["status"] == "superseded"]) == 3
+
 
 def test_story_opportunity_response_accepts_one_card_equivalent_envelopes(client):
     phase13 = client.app.state.story_service.phase13

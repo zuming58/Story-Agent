@@ -938,6 +938,12 @@ class Phase13Service:
                 self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
                 if job.status != "accepted":
                     raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the evidence-complete research report before creating story opportunities.")
+                if creative_input and session.scalar(select(StoryOpportunity.id).where(
+                    StoryOpportunity.job_id == job.id,
+                    StoryOpportunity.status == "accepted",
+                    StoryOpportunity.is_current.is_(True),
+                )):
+                    raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
                 evidence = [self._evidence_dict(item) for item in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()]
                 # Story opportunity generation needs the audited evidence IDs
                 # and concise claims, not full source excerpts or project
@@ -1020,10 +1026,25 @@ class Phase13Service:
                 raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the evidence-complete research report before creating story opportunities.")
             if generated is not None and job.report_checksum != report["reportChecksum"]:
                 raise StoryError(409, "RESEARCH_REPORT_DRIFT", "The research report changed while opportunities were generated.")
+            if creative_input and session.scalar(select(StoryOpportunity.id).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "accepted",
+                StoryOpportunity.is_current.is_(True),
+            )):
+                raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
             drafts = payload.opportunities or generated
             if len(drafts) < 3 or len(drafts) > 5:
                 raise StoryError(422, "STORY_OPPORTUNITY_COUNT_INVALID", "Create three to five opportunities.")
             evidence_ids = {item.id for item in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()}
+            replaced_pending_count = 0
+            if creative_input:
+                now = _now()
+                for previous in session.scalars(select(StoryOpportunity).where(
+                    StoryOpportunity.job_id == job.id,
+                    StoryOpportunity.status == "pending",
+                )).all():
+                    previous.status, previous.revision, previous.updated_at = "superseded", previous.revision + 1, now
+                    replaced_pending_count += 1
             rows: list[StoryOpportunity] = []
             for draft_model in drafts:
                 draft = draft_model.model_dump(mode="json", by_alias=True) if hasattr(draft_model, "model_dump") else draft_model
@@ -1054,7 +1075,7 @@ class Phase13Service:
                 row = StoryOpportunity(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision, report_checksum=job.report_checksum, high_concept=draft["highConcept"], story_json=dumps(story), score_components_json=dumps(scores), total_score=total, evidence_coverage=draft["evidenceCoverage"], confidence=draft["confidence"], uncertainties_json=dumps(draft.get("uncertainties", [])), evidence_ids_json=dumps(sorted(refs)), checksum=checksum, status="pending", is_current=False, revision=1, created_at=_now(), updated_at=_now())
                 session.add(row)
                 rows.append(row)
-            session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows), "externalCreativeInputChecksum": creative_input_checksum, "externalCreativeInputChars": len(creative_input)}, request_id))
+            session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows), "replacedPendingCount": replaced_pending_count, "externalCreativeInputChecksum": creative_input_checksum, "externalCreativeInputChars": len(creative_input)}, request_id))
             session.flush()
             return [self._opportunity_dict(row) for row in rows]
 

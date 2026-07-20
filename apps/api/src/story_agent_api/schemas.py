@@ -1879,6 +1879,8 @@ class OpportunityScore(ApiModel):
 
 
 class StoryOpportunityDraft(ApiModel):
+    title: str | None = Field(default=None, max_length=80)
+    summary: str | None = Field(default=None, max_length=600)
     high_concept: str = Field(min_length=1, max_length=4000)
     protagonist: str = Field(min_length=1, max_length=2000)
     core_desire: str = Field(min_length=1, max_length=2000)

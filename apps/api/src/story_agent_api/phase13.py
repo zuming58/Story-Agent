@@ -967,7 +967,7 @@ class Phase13Service:
                     "story_incubator",
                     "story_incubator:opportunities" if candidate_index == 1 else f"story_incubator:opportunities:{candidate_index}",
                     request_id,
-                    "Generate exactly one story opportunity grounded only in the supplied evidence IDs. It must be substantially different from previousDirections. Keep highConcept under 90 characters and every other text field under 160 characters. Score components are integers within their documented caps and may total less than 100. Return one item in the opportunities array. Never imitate an author or copy source text.",
+                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Keep protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, and serialEngine to one tentative phrase each; use notEstablished when the direction does not need that decision yet. Score components are integers within their documented caps and may total less than 100. Return one item in the opportunities array. Never imitate an author or copy source text.",
                     {
                         "phase14Step": "opportunities",
                         "candidateIndex": candidate_index,
@@ -1014,7 +1014,10 @@ class Phase13Service:
                     component_refs.update(values)
                 if component_refs and not component_refs.issubset(refs):
                     raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Component evidence must also appear in the opportunity evidence list.")
+                title = str(draft.get("title") or draft["highConcept"]).strip()[:80]
+                summary = str(draft.get("summary") or draft["highConcept"]).strip()[:600]
                 story = {key: draft.get(key) for key in ("protagonist", "coreDesire", "coreConflict", "worldMechanism", "firstThreeChapterPromise", "serialEngine", "differentiation", "risks", "evidenceByComponent")}
+                story.update({"title": title, "summary": summary})
                 checksum = stable_digest({"highConcept": draft["highConcept"], "story": story, "scores": scores, "evidence": sorted(refs), "report": job.report_checksum})
                 row = StoryOpportunity(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision, report_checksum=job.report_checksum, high_concept=draft["highConcept"], story_json=dumps(story), score_components_json=dumps(scores), total_score=total, evidence_coverage=draft["evidenceCoverage"], confidence=draft["confidence"], uncertainties_json=dumps(draft.get("uncertainties", [])), evidence_ids_json=dumps(sorted(refs)), checksum=checksum, status="pending", is_current=False, revision=1, created_at=_now(), updated_at=_now())
                 session.add(row)

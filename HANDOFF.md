@@ -12,6 +12,7 @@
 - 人工入口改为“导入外部综合调研报告”：用户可一次粘贴其他 Agent 或自己完成的完整调研报告，不再要求手工按六个视角拆分。`POST /api/v1/research/jobs/{job_id}/manual-materials` 将其保存为 `integrated_report` 来源版本；`POST /api/v1/research/jobs/{job_id}/analyze-manual-materials` 才会发起已绑定研究模型的证据抽取与报告分析，不会调用 Tavily/Firecrawl。
 - 综合报告保留来源、版本、checksum、revision、审计和项目隔离。模型必须从该报告抽出至少一条可追溯证据才能进入“等待人工确认”；仍必须手动接受研究报告，不能直接跳到故事机会。
 - 火山 Coding Plan 连接测试成功，`research_analyst` 确认绑定 `DeepSeek-V4-Pro`。真实失败记录表明连接正常但旧证据抽取会在 60 秒超时后重试一次，或被过紧输出预算截断。
+- 新增 `POST /api/v1/models/{model_id}/test` 模型专用探针。它显式发送配置的 `model` ID、要求固定 JSON、不会创建项目数据或发送用户文本。真实探针均成功：`DeepSeek-V4-Pro -> deepseek-v4-pro`（约 3.0 秒），`Kimi-K2.6 -> kimi-k2.6`（约 3.2 秒）。Provider 的 `/models` 列表首项不能代表实际调用模型，后续应以该专用探针或 `ModelRun.modelId` 为准。
 - 综合报告现不再调用逐句原文定位的 `research_analyst:evidence`。它以明确标识的外部推断证据进入 `research_analyst:report`，报告归纳限制为最多两项竞品和四条发现，保留 `4096` 输出预算；网页抓取来源仍使用原有逐句证据抽取链。
 - 用户授权的最终复测：任务 `fc27fcad-5983-4187-b7bb-6fa2d43a8e86` 在约 40 秒内完成，状态为 `awaiting_review`，`integratedManualReportCoverageMet=true`，未自动接受报告。
 

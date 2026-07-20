@@ -352,6 +352,16 @@ class ProviderConnectionTestOut(ApiModel):
     message: str
 
 
+class ModelConnectionTestOut(ApiModel):
+    ok: bool
+    status: Literal["success", "missing_api_key", "auth_failed", "timeout", "network_error", "invalid_response", "credential_unavailable", "rate_limited", "server_error", "request_failed", "content_truncated"]
+    model_config_id: str
+    configured_model_id: str
+    actual_model_id: str | None = None
+    duration_ms: int
+    message: str
+
+
 class ApiError(ApiModel):
     code: str
     message: str

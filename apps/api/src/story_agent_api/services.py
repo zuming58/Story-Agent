@@ -617,6 +617,63 @@ class StoryService:
             session.refresh(model)
             return self._model_dict(model)
 
+    def test_model_config(self, model_id: str) -> dict[str, Any]:
+        """Run a bounded model-specific probe without creating project data."""
+        started = time.perf_counter()
+        with self.db.catalog() as session:
+            model = session.scalar(select(ModelConfig).where(ModelConfig.id == model_id).options(selectinload(ModelConfig.provider)))
+            if not model:
+                raise StoryError(404, "MODEL_CONFIG_NOT_FOUND", "Model configuration was not found.")
+            provider = model.provider
+            assert provider
+            configured_model_id = model.model_id
+            provider_base_url = provider.base_url
+            timeout_seconds = min(max(provider.timeout_seconds, 1), 30)
+            max_retries = 0
+            key_ref = provider.api_key_ref
+
+        def result(ok: bool, status: str, message: str, actual_model_id: str | None = None) -> dict[str, Any]:
+            return {
+                "ok": ok,
+                "status": status,
+                "modelConfigId": model_id,
+                "configuredModelId": configured_model_id,
+                "actualModelId": actual_model_id,
+                "durationMs": int((time.perf_counter() - started) * 1000),
+                "message": message,
+            }
+
+        if not key_ref:
+            return result(False, "missing_api_key", "No API key is configured for this model provider.")
+        try:
+            api_key = self.secret_store.get_secret(key_ref)
+        except SecretStoreUnavailable:
+            return result(False, "credential_unavailable", "Credential Manager is unavailable.")
+        if not api_key:
+            return result(False, "missing_api_key", "Credential Manager does not contain the API key.")
+        client = OpenAICompatibleModelProvider(provider_base_url, api_key, timeout_seconds, max_retries)
+        try:
+            probe = asyncio.run(client.complete_chat({
+                "model": configured_model_id,
+                "messages": [
+                    {"role": "system", "content": "Return exactly one JSON object and nothing else."},
+                    {"role": "user", "content": "Return {\"ok\":true}."},
+                ],
+                "temperature": 0,
+                "max_tokens": 1024,
+                "response_format": {"type": "json_object"},
+            }))
+        except ModelProviderError as exc:
+            status = exc.code if exc.code in {"auth_failed", "timeout", "network_error", "invalid_response", "rate_limited", "server_error", "request_failed", "content_truncated"} else "request_failed"
+            return result(False, status, exc.message)
+        try:
+            parsed = json.loads(probe.text)
+        except ValueError:
+            return result(False, "invalid_response", "The configured model did not return JSON.", probe.actual_model)
+        if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+            return result(False, "invalid_response", "The configured model returned an unexpected probe response.", probe.actual_model)
+        return result(True, "success", "The configured model completed the JSON probe.", probe.actual_model)
+
     def delete_model_config(self, model_id: str) -> None:
         with self.db.catalog() as session:
             model = session.get(ModelConfig, model_id)

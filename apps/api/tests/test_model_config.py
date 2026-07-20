@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +28,23 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         body = b'{"data":[{"id":"fake-planner"}]}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/chat/completions" or self.headers.get("Authorization", "") != "Bearer unit-test-secret-value":
+            self.send_response(401)
+            self.end_headers()
+            return
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+        body = json.dumps({
+            "model": payload.get("model"),
+            "choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -69,6 +87,16 @@ def test_provider_secret_is_stored_outside_sqlite_and_connection_test_uses_fake_
         assert tested.json()["status"] == "success"
         assert tested.json()["model"] == "fake-planner"
         assert "unit-test-secret-value" not in tested.text
+
+        model = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={
+            "modelId": "fake-specific-model", "displayName": "Fake specific model",
+        })
+        assert model.status_code == 201
+        model_test = client.post(f"/api/v1/models/{model.json()['id']}/test")
+        assert model_test.status_code == 200
+        assert model_test.json()["ok"] is True
+        assert model_test.json()["configuredModelId"] == "fake-specific-model"
+        assert model_test.json()["actualModelId"] == "fake-specific-model"
     finally:
         server.shutdown()
         server.server_close()

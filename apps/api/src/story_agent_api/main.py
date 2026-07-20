@@ -88,6 +88,7 @@ from .schemas import (
     ForeshadowOut,
     KnowledgeBoundaryOut,
     ModelConfigCreate,
+    ModelConnectionTestOut,
     ModelConfigOut,
     ModelConfigUpdate,
     ModelProviderCreate,
@@ -253,6 +254,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.patch("/api/v1/models/{model_id}", response_model=ModelConfigOut)
     def update_model_config(model_id: str, payload: ModelConfigUpdate) -> object:
         return service.update_model_config(model_id, payload)
+
+    @app.post("/api/v1/models/{model_id}/test", response_model=ModelConnectionTestOut)
+    def test_model_config(model_id: str) -> object:
+        return service.test_model_config(model_id)
 
     @app.delete("/api/v1/models/{model_id}", status_code=204)
     def delete_model_config(model_id: str) -> None:

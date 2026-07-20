@@ -44,8 +44,9 @@ if not exist "%API_PYTHON%" (
 )
 
 echo Starting Story Agent services...
-start "Story Agent API" /min /D "%~dp0apps\api" cmd /k ""%API_PYTHON%" -m uvicorn story_agent_api.main:app --host 127.0.0.1 --port 8765"
-start "Story Agent Web" /min /D "%~dp0apps\web" cmd /k "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort"
+powershell -NoProfile -WindowStyle Hidden -Command ^
+  "Start-Process -FilePath '%API_PYTHON%' -ArgumentList @('-m','uvicorn','story_agent_api.main:app','--host','127.0.0.1','--port','8765') -WorkingDirectory '%~dp0apps\api' -WindowStyle Hidden;" ^
+  "Start-Process -FilePath 'npm.cmd' -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173','--strictPort') -WorkingDirectory '%~dp0apps\web' -WindowStyle Hidden"
 
 echo Waiting for the workspace to become ready...
 powershell -NoProfile -Command ^

@@ -15,6 +15,8 @@
 - 新增 `POST /api/v1/models/{model_id}/test` 模型专用探针。它显式发送配置的 `model` ID、要求固定 JSON、不会创建项目数据或发送用户文本。真实探针均成功：`DeepSeek-V4-Pro -> deepseek-v4-pro`（约 3.0 秒），`Kimi-K2.6 -> kimi-k2.6`（约 3.2 秒）。Provider 的 `/models` 列表首项不能代表实际调用模型，后续应以该专用探针或 `ModelRun.modelId` 为准。
 - 综合报告现不再调用逐句原文定位的 `research_analyst:evidence`。它以明确标识的外部推断证据进入 `research_analyst:report`，报告归纳限制为最多两项竞品和四条发现，保留 `4096` 输出预算；网页抓取来源仍使用原有逐句证据抽取链。
 - 用户授权的最终复测：任务 `fc27fcad-5983-4187-b7bb-6fa2d43a8e86` 在约 40 秒内完成，状态为 `awaiting_review`，`integratedManualReportCoverageMet=true`，未自动接受报告。
+- 修复“导入并分析报告”的前端错误语义：报告保存成功后，后续模型分析失败不会再显示笼统 `NETWORK_ERROR`；页面明确提示“报告已成功导入，可重新分析”，并锁定重复提交。`STARTUP_RECOVERY` 也明确说明服务重启只中断分析，材料仍在。
+- `START-STORY-AGENT.cmd` 改为隐藏启动唯一 API 与 Web 进程，不再用 `cmd /k` 创建任务栏常驻窗口。Playwright 回归继续使用隔离端口，不能重启用户正在使用的 `8765/5173` 服务。
 
 ## 用户当前调研判断
 

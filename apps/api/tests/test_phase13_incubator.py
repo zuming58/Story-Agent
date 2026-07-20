@@ -381,6 +381,18 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     assert all("excerpt" not in str(item["payload"]) for item in opportunity_calls)
 
 
+def test_story_opportunity_response_accepts_one_card_equivalent_envelopes(client):
+    phase13 = client.app.state.story_service.phase13
+    card = {"highConcept": "A bounded premise", "scoreComponents": {}, "evidenceIds": []}
+
+    assert phase13._single_generated_opportunity({"opportunities": [card]}) == card
+    assert phase13._single_generated_opportunity({"opportunities": card}) == card
+    assert phase13._single_generated_opportunity({"opportunity": card}) == card
+    assert phase13._single_generated_opportunity({"storyOpportunity": card}) == card
+    assert phase13._single_generated_opportunity(card) == card
+    assert phase13._single_generated_opportunity({"opportunities": [card, card]}) is None
+
+
 def test_phase14_deterministic_canon_and_opening_gates(client):
     phase13 = client.app.state.story_service.phase13
     incomplete = phase13._generic_canon_checks(

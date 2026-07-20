@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -61,6 +62,7 @@ from .schemas import (
     StoryBriefProposalCreate,
     StoryOpportunityAction,
     StoryOpportunityCreate,
+    StoryOpportunityDraft,
 )
 from .services import StoryError, dumps, safe_json_loads, stable_digest
 
@@ -969,7 +971,7 @@ class Phase13Service:
                     "story_incubator",
                     "story_incubator:opportunities" if candidate_index == 1 else f"story_incubator:opportunities:{candidate_index}",
                     request_id,
-                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Keep protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, and serialEngine to one tentative phrase each; use notEstablished when the direction does not need that decision yet. Score components are integers within their documented caps and may total less than 100. Return one item in the opportunities array. Never imitate an author or copy source text.",
+                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Keep protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, and serialEngine to one tentative phrase each; use notEstablished when the direction does not need that decision yet. Score components are integers within their documented caps and may total less than 100. Return exactly this outer JSON shape: {\"opportunities\":[{...}]}. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
                     {
                         "phase14Step": "opportunities",
                         "candidateIndex": candidate_index,
@@ -981,10 +983,13 @@ class Phase13Service:
                     max_retries=0,
                     stream_response=True,
                 )
-                candidates = output.get("opportunities") if isinstance(output.get("opportunities"), list) else None
-                if not candidates or len(candidates) != 1 or not isinstance(candidates[0], dict):
+                candidate = self._single_generated_opportunity(output)
+                if candidate is None:
                     raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator did not return exactly one opportunity for the requested direction.")
-                generated.append(candidates[0])
+                try:
+                    generated.append(StoryOpportunityDraft.model_validate(candidate).model_dump(mode="json", by_alias=True))
+                except ValidationError as exc:
+                    raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator returned an incomplete opportunity card.") from exc
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)
             assert job
@@ -1977,6 +1982,20 @@ class Phase13Service:
         evidence = sorted(session.scalars(select(ResearchEvidence.id).where(ResearchEvidence.job_id == job.id)).all())
         competitors = sorted(row.checksum for row in session.scalars(select(CompetitorProfile).where(CompetitorProfile.job_id == job.id, CompetitorProfile.excluded.is_(False))).all())
         return stable_digest({"job": job.id, "reportRevision": job.report_revision, "evidence": evidence, "competitors": competitors})
+
+    @staticmethod
+    def _single_generated_opportunity(output: dict[str, Any]) -> dict[str, Any] | None:
+        """Accept equivalent one-card JSON envelopes, then validate the card strictly."""
+        raw = output.get("opportunities")
+        if isinstance(raw, list):
+            return raw[0] if len(raw) == 1 and isinstance(raw[0], dict) else None
+        if isinstance(raw, dict):
+            return raw
+        for key in ("opportunity", "storyOpportunity", "candidate"):
+            raw = output.get(key)
+            if isinstance(raw, dict):
+                return raw
+        return output if {"highConcept", "scoreComponents", "evidenceIds"}.issubset(output) else None
 
     @staticmethod
     def _validate_scores(raw: dict[str, Any]) -> tuple[dict[str, int], int]:

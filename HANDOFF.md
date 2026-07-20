@@ -1,3 +1,27 @@
+# 2026-07-20 真实创意机会卡结构兼容修补
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与定向回归，待提交推送。**
+
+## 问题与修补
+
+- 用户点击“生成 3 个方向”时收到 `STORY_OPPORTUNITY_MODEL_INVALID`。只读取了安全的 ModelRun 元数据：`Kimi-K2.6` 在约 66.8 秒内成功完成流式调用，记录 `430` prompt tokens、`2097` completion tokens，故障不属于网络、鉴权、超时或流式内容为空。
+- 根因位于机会卡外层 JSON 形状：旧实现只接受 `{"opportunities":[card]}`，实际模型的等价单卡对象外壳会被过早拒绝。
+- 提示现在明确要求唯一外壳 `{"opportunities":[{...}]}`，并明确禁止裸对象、单数键、文本和 Markdown。后端仍兼容已知的等价单卡外壳：对象型 `opportunities`、`opportunity`、`storyOpportunity`、`candidate` 和具备机会卡关键字段的裸对象。
+- 兼容只处理外壳；内层卡片一律通过 `StoryOpportunityDraft` 模式验证，随后继续执行既有的固定评分上限、证据 ID、跨研究归属、revision、事务与人工选择校验。多个候选或缺字段仍明确失败，不会写入半套机会。
+
+## 验证
+
+- 定向 API：`4 passed`，覆盖流式 Provider、紧凑机会快照和五种单卡外壳兼容。
+- `compileall` 与 `git diff --check` 通过。完整 Phase 13 专项再次受到桌面 124 秒命令上限中断，未记为通过；此前完整假模型链路已通过。
+
+## 下一步
+
+- API 重启后，用户可直接再次点击“生成 3 个方向”。这会消耗一次真实 Kimi 调用；本轮开发未主动发起该调用。
+
+---
+
 # 2026-07-20 创意孵化链路收敛：人机共创入口与流式模型完成
 
 当前分支：`agent/model-backed-story-incubator`

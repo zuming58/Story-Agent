@@ -4,6 +4,12 @@
 
 状态：**已完成代码与专项回归，待提交推送。**
 
+## 2026-07-20 截断修复补充
+
+- 真实 ModelRun 诊断确认：`story_incubator:ideation-kickoff` 调用 Kimi K2.6 时被本地代码错误限制为 `max_tokens=2000`，而此前成功的 Kimi 结构化调用实际使用 `2760-3697` completion tokens。失败调用在 54-71 秒后以 provider `finish_reason=length` 收敛，部分输出长度为 0 或 13；不是网络、鉴权、输入未送达或用户操作问题。
+- 起始底稿现拆为三个独立短 JSON 调用：`ideation-kickoff:world`、`ideation-kickoff:characters`、`ideation-kickoff:boundaries`。每块允许 Kimi 已配置的完整 `4096` 上限，不再人为压低到 2000；三个 ModelRun 全部成功且模式校验通过后才一次性写入底稿。
+- 任何分段返回 `length` 现在会显示精确错误码，例如 `IDEATION_KICKOFF_WORLD_TRUNCATED`，并提示“世界观与连载承诺生成被模型截断；该部分尚未保存”。不会把泛化的 `MODEL_CONTENT_TRUNCATED` 误导为整条流程已写入，也不会写入任何半成品。
+
 ## 本轮完成
 
 - 修复“选中故事方向后，人机共创页面空白”的体验缺口：新增 `POST /api/v1/ideation/sessions/{session_id}/kickoff`。用户明确点击“生成共创底稿”后，才会调用 `story_incubator:ideation-kickoff`。

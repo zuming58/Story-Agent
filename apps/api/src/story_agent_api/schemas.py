@@ -1965,6 +1965,26 @@ class IdeationKickoffDraft(ApiModel):
     open_questions: list[str] = Field(min_length=2, max_length=8)
 
 
+class IdeationKickoffWorldDraft(ApiModel):
+    title: str = Field(min_length=1, max_length=120)
+    premise: str = Field(min_length=1, max_length=1000)
+    world_view: str = Field(min_length=1, max_length=2400)
+    first_three_chapter_promise: str = Field(min_length=1, max_length=1400)
+    serial_engine: str = Field(min_length=1, max_length=1400)
+
+
+class IdeationKickoffCharacterDraft(ApiModel):
+    character_candidates: list[str] = Field(min_length=1, max_length=6)
+    relationship_candidates: list[str] = Field(default_factory=list, max_length=6)
+    rules_and_resources: str = Field(min_length=1, max_length=1800)
+    core_conflicts: list[str] = Field(min_length=1, max_length=5)
+
+
+class IdeationKickoffBoundaryDraft(ApiModel):
+    writing_boundaries: list[str] = Field(min_length=1, max_length=8)
+    open_questions: list[str] = Field(min_length=2, max_length=8)
+
+
 class IdeationMessageOut(ApiModel):
     id: str
     project_id: str

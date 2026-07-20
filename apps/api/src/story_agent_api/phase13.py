@@ -49,7 +49,10 @@ from .research_providers import (
 from .schemas import (
     CompetitorExclude,
     ExternalCreativeDirection,
+    IdeationKickoffBoundaryDraft,
+    IdeationKickoffCharacterDraft,
     IdeationKickoffDraft,
+    IdeationKickoffWorldDraft,
     IdeationMessageCreate,
     IdeationSessionCreate,
     IncubationCanonProposalCreate,
@@ -1308,24 +1311,28 @@ class Phase13Service:
                 "opportunityChecksum": opportunity.checksum,
                 "researchReportChecksum": job.report_checksum,
             }
-        output, model_run_id = self._complete_model_json(
-            project,
-            "story_incubator",
-            "story_incubator:ideation-kickoff",
-            request_id,
-            "Generate a compact co-creation kickoff draft for the selected story direction. This is a discussion draft, not a StoryBrief or Canon: every proposed detail remains unconfirmed. Cover premise, worldView, one to six characterCandidates with role/age-or-life-stage/motivation, optional relationshipCandidates, rulesAndResources (use notApplicable where the genre has no power, artifact, or resource system), coreConflicts, firstThreeChapterPromise, serialEngine, writingBoundaries, and two to eight openQuestions. Do not write chapter prose, a full plot outline, market claims, or named-author imitation. Return JSON only: {title,premise,worldView,characterCandidates,relationshipCandidates,rulesAndResources,coreConflicts,firstThreeChapterPromise,serialEngine,writingBoundaries,openQuestions}.",
-            {
-                "phase14Step": "ideation_kickoff",
-                "opportunity": self._opportunity_dict(opportunity),
-                "researchReportChecksum": job.report_checksum,
-                "existingState": state,
-            },
-            max_output_tokens=2000,
-            max_retries=0,
-            stream_response=True,
+        base_payload = {
+            "opportunity": self._opportunity_dict(opportunity),
+            "researchReportChecksum": job.report_checksum,
+            "existingState": state,
+        }
+        world, world_run_id = self._complete_ideation_kickoff_section(
+            project, request_id, "world", "世界观与连载承诺", IdeationKickoffWorldDraft,
+            "Return only a compact discussion draft for the selected direction. Do not write prose, a full plot, characters, rules, boundaries, or commentary. Return exactly {title,premise,worldView,firstThreeChapterPromise,serialEngine}. Every value is provisional, not Canon.",
+            {"phase14Step": "ideation_kickoff_world", **base_payload},
+        )
+        characters, character_run_id = self._complete_ideation_kickoff_section(
+            project, request_id, "characters", "人物与规则", IdeationKickoffCharacterDraft,
+            "Return only compact candidates for the selected direction. Do not write prose, a full plot, worldView, boundaries, or commentary. Return exactly {characterCandidates,relationshipCandidates,rulesAndResources,coreConflicts}. characterCandidates must state role, age-or-life-stage, and motivation. rulesAndResources must say notApplicable if this genre has no power, artifact, or resource system. Every value is provisional, not Canon.",
+            {"phase14Step": "ideation_kickoff_characters", **base_payload},
+        )
+        boundaries, boundary_run_id = self._complete_ideation_kickoff_section(
+            project, request_id, "boundaries", "边界与待确认问题", IdeationKickoffBoundaryDraft,
+            "Return only compact discussion constraints for the selected direction. Do not write prose, worldView, characters, rules, plot, or commentary. Return exactly {writingBoundaries,openQuestions}. Include two to eight questions the human author must decide. Every value is provisional, not Canon.",
+            {"phase14Step": "ideation_kickoff_boundaries", **base_payload},
         )
         try:
-            draft = IdeationKickoffDraft.model_validate(output.get("draft", output)).model_dump(mode="json", by_alias=True)
+            draft = IdeationKickoffDraft.model_validate({**world, **characters, **boundaries}).model_dump(mode="json", by_alias=True)
         except ValidationError as exc:
             raise StoryError(422, "IDEATION_KICKOFF_MODEL_INVALID", "The story incubator returned an incomplete co-creation kickoff draft.") from exc
         content = self._format_ideation_kickoff(draft)
@@ -1350,8 +1357,8 @@ class Phase13Service:
             seq = (session.scalar(select(func.max(IdeationMessage.sequence_number)).where(IdeationMessage.session_id == row.id)) or 0) + 1
             assistant = IdeationMessage(
                 id=str(uuid4()), project_id=project.id, session_id=row.id, sequence_number=seq, role="assistant",
-                content=content, structured_state_json=dumps({"kind": "co_creation_kickoff", "status": "unconfirmed", "draft": draft}),
-                evidence_ids_json=dumps(next_state["evidenceIds"]), model_run_id=model_run_id, created_at=_now(),
+                content=content, structured_state_json=dumps({"kind": "co_creation_kickoff", "status": "unconfirmed", "draft": draft, "modelRunIds": [world_run_id, character_run_id, boundary_run_id]}),
+                evidence_ids_json=dumps(next_state["evidenceIds"]), model_run_id=world_run_id, created_at=_now(),
             )
             session.add(assistant)
             row.state_json, row.revision, row.updated_at = dumps(next_state), row.revision + 1, _now()
@@ -2262,6 +2269,40 @@ class Phase13Service:
             f"十、请你先拍板的问题\n{bullets(draft['openQuestions'])}",
             "你可以逐条说“保留、删除、改成……”。这些内容不会自动写入 StoryBrief、Canon、规划或正文。",
         ))
+
+    def _complete_ideation_kickoff_section(
+        self,
+        project: Any,
+        request_id: str,
+        section: str,
+        label: str,
+        schema: Any,
+        instruction: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        try:
+            output, run_id = self._complete_model_json(
+                project,
+                "story_incubator",
+                f"story_incubator:ideation-kickoff:{section}",
+                request_id,
+                instruction,
+                payload,
+                # Kimi K2.6 is configured for 4096. Do not undercut its
+                # reasoning budget here; previous 2000-token calls truncated
+                # before emitting any JSON content.
+                max_output_tokens=4096,
+                max_retries=0,
+                stream_response=True,
+            )
+        except StoryError as exc:
+            if exc.code == "MODEL_CONTENT_TRUNCATED":
+                raise StoryError(502, f"IDEATION_KICKOFF_{section.upper()}_TRUNCATED", f"{label}生成被模型截断；该部分尚未保存。") from exc
+            raise
+        try:
+            return schema.model_validate(output.get("draft", output)).model_dump(mode="json", by_alias=True), run_id
+        except ValidationError as exc:
+            raise StoryError(422, f"IDEATION_KICKOFF_{section.upper()}_INVALID", f"{label}没有返回完整结构，未保存任何底稿。") from exc
 
     @staticmethod
     def _validate_brief(brief: dict[str, Any]) -> None:

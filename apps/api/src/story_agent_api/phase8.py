@@ -214,6 +214,8 @@ class Phase8Service:
         *,
         response_json: bool = False,
         run_role: str | None = None,
+        max_output_tokens: int | None = None,
+        max_retries: int | None = None,
     ) -> tuple[str, str]:
         resolved = self.service._resolve_role_model(role)
         if not resolved:
@@ -248,13 +250,13 @@ class Phase8Service:
             provider_row.base_url,
             api_key,
             provider_row.timeout_seconds,
-            provider_row.max_retries,
+            provider_row.max_retries if max_retries is None else max(0, min(max_retries, 1)),
         )
         payload: dict[str, Any] = {
             "model": model.model_id,
             "messages": messages,
             "temperature": min(float(model.temperature), 0.35),
-            "max_tokens": min(model.max_output_tokens, 8192),
+            "max_tokens": min(model.max_output_tokens, max_output_tokens or 8192, 8192),
         }
         if response_json:
             payload["response_format"] = {"type": "json_object"}

@@ -310,6 +310,10 @@ def test_single_integrated_manual_report_can_reach_human_research_review(client)
     assert analyzed.status_code == 200, analyzed.text
     assert analyzed.json()["status"] == "awaiting_review"
     assert analyzed.json()["coverage"]["integratedManualReportCoverageMet"] is True
+    runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
+    roles = {item["role"] for item in runs}
+    assert "research_analyst:report" in roles
+    assert "research_analyst:evidence" not in roles
     accepted = client.post(f"/api/v1/research/jobs/{stopped['id']}/accept", json={"expectedRevision": analyzed.json()["revision"]})
     assert accepted.status_code == 200, accepted.text
 

@@ -1,8 +1,8 @@
-# 2026-07-20 真实用户调研恢复：综合报告入口
+# 2026-07-20 真实用户调研恢复：综合报告与火山模型稳定性
 
 当前分支：`agent/model-backed-story-incubator`
 
-状态：**已完成本地验证，待提交。没有触发用户真实 Tavily、Firecrawl 或模型调用。**
+状态：**已完成本地验证和一次用户授权的真实火山模型复测，待提交。未调用 Tavily 或 Firecrawl。**
 
 ## 本轮完成
 
@@ -11,6 +11,9 @@
 - 创意孵化调研台新增运行轨迹，活动任务每 2.5 秒刷新；显示当前阶段、搜索结果、发现来源、抓取失败与每条查询状态。右侧 Story Agent 没有被伪装成调研日志。
 - 人工入口改为“导入外部综合调研报告”：用户可一次粘贴其他 Agent 或自己完成的完整调研报告，不再要求手工按六个视角拆分。`POST /api/v1/research/jobs/{job_id}/manual-materials` 将其保存为 `integrated_report` 来源版本；`POST /api/v1/research/jobs/{job_id}/analyze-manual-materials` 才会发起已绑定研究模型的证据抽取与报告分析，不会调用 Tavily/Firecrawl。
 - 综合报告保留来源、版本、checksum、revision、审计和项目隔离。模型必须从该报告抽出至少一条可追溯证据才能进入“等待人工确认”；仍必须手动接受研究报告，不能直接跳到故事机会。
+- 火山 Coding Plan 连接测试成功，`research_analyst` 确认绑定 `DeepSeek-V4-Pro`。真实失败记录表明连接正常但旧证据抽取会在 60 秒超时后重试一次，或被过紧输出预算截断。
+- 综合报告现不再调用逐句原文定位的 `research_analyst:evidence`。它以明确标识的外部推断证据进入 `research_analyst:report`，报告归纳限制为最多两项竞品和四条发现，保留 `4096` 输出预算；网页抓取来源仍使用原有逐句证据抽取链。
+- 用户授权的最终复测：任务 `fc27fcad-5983-4187-b7bb-6fa2d43a8e86` 在约 40 秒内完成，状态为 `awaiting_review`，`integratedManualReportCoverageMet=true`，未自动接受报告。
 
 ## 用户当前调研判断
 
@@ -20,7 +23,7 @@
 
 ## 验证
 
-- API 新增用例：单份 `integrated_report` 经模型分析后进入人工研究确认，且接受操作仍为显式门槛；该定向用例通过。完整 Phase 13 专项在桌面 124 秒命令上限下中止，未将超时记为通过。
+- API 新增用例：单份 `integrated_report` 经模型分析后进入人工研究确认、只走 `research_analyst:report` 而不走逐句证据抽取，且接受操作仍为显式门槛；该定向用例通过。完整 Phase 13 专项在桌面 124 秒命令上限下中止，未将超时记为通过。
 - Web 单测：`3 files / 15 passed`。
 - Build：通过；仅有既有 Vite chunk-size warning。
 - Playwright：隔离端口下 `desktop-1440 10 passed`、`desktop-1280 10 passed`。
@@ -30,6 +33,7 @@
 
 - 尚未重新发起用户真实调研，避免消耗额度。刷新到本轮 API 后，应先读取运行轨迹再决定是否由用户点击“恢复任务”。
 - 人工报告分析会调用已绑定的研究模型，因此仅在用户明确点击“导入并分析报告”时执行；它不会自动接受研究报告。
+- 外部综合报告的结论属于用户提供的二手研究材料，应以 `inference`/`opinion` 和不确定性呈现，不应当被当作已验证的网页事实。
 - `npm run test` 的完整 API 回归此前受桌面命令 124 秒上限影响，本轮已完成变更相关 API 专项、Web 全量、构建与双规格 Playwright，未将超时误记为通过。
 
 ---

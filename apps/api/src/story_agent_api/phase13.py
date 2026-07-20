@@ -117,6 +117,8 @@ class Phase13Service:
         payload: dict[str, Any],
         *,
         budget_job_id: str | None = None,
+        max_output_tokens: int | None = None,
+        max_retries: int | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Run one bounded JSON call plus one explicit repair attempt.
 
@@ -132,6 +134,7 @@ class Phase13Service:
             self._assert_research_model_budget(project, budget_job_id)
         text, run_id = self.service.phase8._complete_role(
             project, role, messages, request_id, response_json=True, run_role=run_role,
+            max_output_tokens=max_output_tokens, max_retries=max_retries,
         )
         if budget_job_id:
             self._charge_research_model_run(project, budget_job_id, run_id)
@@ -153,6 +156,8 @@ class Phase13Service:
             request_id,
             response_json=True,
             run_role=f"{run_role}:repair",
+            max_output_tokens=max_output_tokens,
+            max_retries=max_retries,
         )
         if budget_job_id:
             self._charge_research_model_run(project, budget_job_id, repair_run_id)
@@ -501,6 +506,7 @@ class Phase13Service:
                 return self._job_dict(job)
             versions = list(session.scalars(select(ResearchSourceVersion).where(ResearchSourceVersion.job_id == job.id)).all())
             sources = {item.id: item for item in session.scalars(select(ResearchSource).where(ResearchSource.job_id == job.id)).all()}
+            query_perspectives = {item.id: item.perspective for item in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id)).all()}
             frozen = {
                 "revision": job.revision,
                 "briefChecksum": job.brief_checksum,
@@ -508,7 +514,8 @@ class Phase13Service:
                 "startedAt": job.started_at,
                 "limits": safe_json_loads(job.limits_json, {}),
             }
-        extracted: list[tuple[ResearchSourceVersion, dict[str, Any]]] = []
+        extracted: list[tuple[ResearchSourceVersion, int, dict[str, Any]]] = []
+        external_reports: list[dict[str, Any]] = []
         for version in versions:
             source = sources.get(version.source_id)
             if not source or source.excluded or not version.bounded_content:
@@ -519,16 +526,34 @@ class Phase13Service:
                 return self.get_job(job_id)
             if self._runtime_exceeded(frozen["startedAt"], frozen["limits"]):
                 return self._fail_job(project, job_id, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.", request_id)
-            output, _ = self._complete_model_json(
-                project,
-                "research_analyst",
-                "research_analyst:evidence",
-                request_id,
-                "Extract up to three short evidence items. Each item needs claimType (fact/opinion/inference), claim, excerpt copied exactly from sourceContent, locator start/end offsets, confidence 0..1, and perspectives. Do not reproduce long text or invent evidence.",
-                {"phase14Step": "evidence", "sourceVersionId": version.id, "sourceContent": version.bounded_content[:8000]},
-                budget_job_id=job_id,
-            )
-            extracted.append((version, output))
+            content = version.bounded_content
+            is_integrated_report = source.source_type == "manual" and query_perspectives.get(source.query_id) == "integrated_report"
+            if is_integrated_report:
+                excerpt = content[:600].strip()
+                if excerpt:
+                    extracted.append((version, 0, {"evidence": [{
+                        "claimType": "inference",
+                        "claim": "A user-supplied external research report was provided for human review.",
+                        "excerpt": excerpt,
+                        "locator": {"start": 0, "end": len(excerpt)},
+                        "confidence": 0.45,
+                    }]}))
+                    external_reports.append({"sourceVersionId": version.id, "title": source.title, "reportContent": content[:6000]})
+                continue
+            chunks = [(0, content)] if not is_integrated_report else [(offset, content[offset:offset + 4000]) for offset in range(0, len(content), 4000)]
+            for offset, source_content in chunks:
+                output, _ = self._complete_model_json(
+                    project,
+                    "research_analyst",
+                    "research_analyst:evidence",
+                    request_id,
+                    "Extract at most two short evidence items. Each item needs claimType (fact/opinion/inference), claim, excerpt copied exactly from sourceContent, locator start/end offsets, confidence 0..1, and perspectives. Do not reproduce long text or invent evidence.",
+                    {"phase14Step": "evidence", "sourceVersionId": version.id, "sourceContent": source_content},
+                    budget_job_id=job_id,
+                    max_output_tokens=1800,
+                    max_retries=0,
+                )
+                extracted.append((version, offset, output))
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)
             assert job
@@ -538,13 +563,17 @@ class Phase13Service:
                 return self._fail_job_in_session(session, job, "RESEARCH_BRIEF_DRIFT", "Research changed while evidence was analyzed.", request_id)
             job.status, job.updated_at = "analyzing", _now()
             evidence_rows: list[ResearchEvidence] = []
-            for version, output in extracted:
+            for version, offset, output in extracted:
                 for raw in output.get("evidence", []) if isinstance(output.get("evidence"), list) else []:
                     if not isinstance(raw, dict):
                         continue
                     excerpt = str(raw.get("excerpt") or "").strip()[:600]
                     start = raw.get("locator", {}).get("start") if isinstance(raw.get("locator"), dict) else None
                     end = raw.get("locator", {}).get("end") if isinstance(raw.get("locator"), dict) else None
+                    if isinstance(start, int):
+                        start += offset
+                    if isinstance(end, int):
+                        end += offset
                     if not excerpt or excerpt not in version.bounded_content or not isinstance(start, int) or not isinstance(end, int) or start < 0 or end > len(version.bounded_content) or version.bounded_content[start:end] != excerpt:
                         continue
                     existing = session.scalar(select(ResearchEvidence).where(ResearchEvidence.source_version_id == version.id, ResearchEvidence.excerpt == excerpt))
@@ -568,9 +597,10 @@ class Phase13Service:
             "research_analyst",
             "research_analyst:report",
             request_id,
-            "Analyze supplied short evidence into competitor profiles and research findings. Facts must cite evidenceIds; unsupported items must be inference with uncertainties. Do not imitate authors or reconstruct source text.",
-            {"phase14Step": "research_report", "evidence": evidence_payload, "sources": [{"id": source.id, "title": source.title, "domain": source.domain} for source in sources.values()]},
+            "Analyze supplied short evidence into at most two competitor profiles and four concise research findings. External research reports are user-supplied secondary material: do not turn them into verified facts, and mark conclusions based on them as inference or opinion with uncertainties. Facts must cite evidenceIds; unsupported items must be inference with uncertainties. Do not imitate authors or reconstruct source text.",
+            {"phase14Step": "research_report", "evidence": evidence_payload, "sources": [{"id": source.id, "title": source.title, "domain": source.domain} for source in sources.values()], "externalReports": external_reports},
             budget_job_id=job_id,
+            max_output_tokens=4096,
         )
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)

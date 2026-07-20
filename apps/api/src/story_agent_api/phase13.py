@@ -960,19 +960,28 @@ class Phase13Service:
                         "confidence": item["confidence"],
                     } for item in evidence],
                 }
-            output, _ = self._complete_model_json(
-                project,
-                "story_incubator",
-                "story_incubator:opportunities",
-                request_id,
-                "Generate exactly three differentiated story opportunities grounded only in the supplied evidence IDs. Keep every highConcept under 90 characters and every other text field under 160 characters. Score components are integers within their documented caps and may total less than 100. Never imitate an author or copy source text.",
-                {"phase14Step": "opportunities", "report": report, "scoreLimits": SCORE_LIMITS},
-                max_output_tokens=2800,
-                max_retries=0,
-            )
-            generated = output.get("opportunities") if isinstance(output.get("opportunities"), list) else None
-            if not generated:
-                raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator did not return opportunities.")
+            generated = []
+            for candidate_index in range(1, 4):
+                output, _ = self._complete_model_json(
+                    project,
+                    "story_incubator",
+                    "story_incubator:opportunities" if candidate_index == 1 else f"story_incubator:opportunities:{candidate_index}",
+                    request_id,
+                    "Generate exactly one story opportunity grounded only in the supplied evidence IDs. It must be substantially different from previousDirections. Keep highConcept under 90 characters and every other text field under 160 characters. Score components are integers within their documented caps and may total less than 100. Return one item in the opportunities array. Never imitate an author or copy source text.",
+                    {
+                        "phase14Step": "opportunities",
+                        "candidateIndex": candidate_index,
+                        "previousDirections": [item.get("highConcept") for item in generated],
+                        "report": report,
+                        "scoreLimits": SCORE_LIMITS,
+                    },
+                    max_output_tokens=4096,
+                    max_retries=0,
+                )
+                candidates = output.get("opportunities") if isinstance(output.get("opportunities"), list) else None
+                if not candidates or len(candidates) != 1 or not isinstance(candidates[0], dict):
+                    raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator did not return exactly one opportunity for the requested direction.")
+                generated.append(candidates[0])
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)
             assert job

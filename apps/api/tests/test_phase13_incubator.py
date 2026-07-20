@@ -41,7 +41,7 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         elif step == "research_report":
             data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); evidence = data["evidence"]; value = {"competitors": [{"name": "Comparable", "profile": {"readingPromise": "A bounded promise"}, "evidenceIds": [evidence[0]["id"]], "confidence": 0.6}], "findings": [{"category": "opening_strategy", "statement": "Evidence-backed finding.", "claimType": "inference", "evidenceIds": [evidence[0]["id"]], "confidence": 0.6, "uncertainties": ["sample"]}]}
         elif step == "opportunities":
-            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; value = {"opportunities": [{"highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notApplicable", "firstThreeChapterPromise": "A choice", "serialEngine": "Escalation", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []} for n in range(1,4)]}
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; n = int(data.get("candidateIndex", 1)); value = {"opportunities": [{"highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notApplicable", "firstThreeChapterPromise": "A choice", "serialEngine": "Escalation", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []}]}
         elif step == "ideation": value = {"reply": "A concrete constraint is recorded.", "confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": []}
         elif step == "story_brief": value = {"brief": {"format":"long-form","platform":"undecided","audience":"adult readers","chapterWordRange":{"min":100,"max":1000},"premise":"A costly search","readerPromise":"A choice","theme":"trust","tone":"scene-led","pov":"close third","pace":"purposeful","endingDirection":"consequence","protagonist":"Ming","coreDesire":"Find truth","coreConflict":"Truth costs trust","worldMechanism":"notApplicable","serialEngine":"Escalation","emotionalRewards":["tension"],"differentiators":["original"],"forbiddenContent":[],"referenceTraits":["abstract"]}}
         elif step in {"canon", "canon_repair"}: value = {"markdown": "# Story Core\nMing searches for truth.\n## Conflict\nTruth costs trust.\n## Boundaries\nNo imitation and no unsupported facts.", "structured": {"entities": [{"canonicalName":"Ming","entityTypeName":"person","aliasesJson":[],"attributesJson":{"desire":"Find truth"}}], "relations": [], "rules": [{"ruleCode":"TRUTH-COST","category":"story","statement":"Truth costs trust.","severity":"high","constraintJson":{"hard":True}}]}}
@@ -345,11 +345,15 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"]})
 
     assert response.status_code == 201, response.text
-    call = next(item for item in calls if item["role"] == "story_incubator:opportunities")
-    assert call["kwargs"] == {"max_output_tokens": 2800, "max_retries": 0}
-    evidence = call["payload"]["report"]["evidence"]
+    opportunity_calls = [item for item in calls if item["role"].startswith("story_incubator:opportunities")]
+    assert len(opportunity_calls) == 3
+    assert [item["payload"]["candidateIndex"] for item in opportunity_calls] == [1, 2, 3]
+    assert all(item["kwargs"] == {"max_output_tokens": 4096, "max_retries": 0} for item in opportunity_calls)
+    assert opportunity_calls[0]["payload"]["previousDirections"] == []
+    assert opportunity_calls[2]["payload"]["previousDirections"] == ["Direction 1", "Direction 2"]
+    evidence = opportunity_calls[0]["payload"]["report"]["evidence"]
     assert evidence and set(evidence[0]) == {"id", "claimType", "claim", "confidence"}
-    assert "excerpt" not in str(call["payload"])
+    assert all("excerpt" not in str(item["payload"]) for item in opportunity_calls)
 
 
 def test_phase14_deterministic_canon_and_opening_gates(client):

@@ -1,3 +1,27 @@
+# 2026-07-20 创意机会卡完整字段合同与单次语义修复
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与定向回归，待提交推送。**
+
+## 问题与修补
+
+- 用户再次触发机会生成后，外壳已能识别，但 `Kimi-K2.6` 返回的卡片仍缺少 `StoryOpportunityDraft` 必填字段。最近的两次 Provider 调用均成功完成并有 token 统计，故障在结构语义校验之后，不是连接或超时。
+- 机会生成提示现在给出完整、逐字段的 JSON 合同：所有故事字段、八个 `scoreComponents` 键、证据 ID、覆盖率、置信度和不确定性均不可省略。
+- 若第一次返回仍缺字段，系统会将该 ModelRun 标为 `opportunity_schema_invalid`，只保存字段路径等结构诊断、不保存模型正文，然后发起一次独立的 `story_incubator:opportunities:N:repair` 流式修复调用。修复调用只能使用同一研究的允许证据 ID。
+- 修复结果仍必须通过 `StoryOpportunityDraft`、评分上限、证据归属、revision 和事务校验。第二次仍不完整则显式失败，不会生成模板卡、固定评分或半套候选。
+
+## 验证
+
+- 定向 API：`5 passed`，包含“首次返回不完整卡 -> 一次修复 -> 三张完整机会卡”的端到端假模型用例，以及外壳兼容和流式 Provider 回归。
+- `compileall` 与 `git diff --check` 通过。
+
+## 下一步
+
+- API 重启后，用户刷新创意孵化页并再次点击“生成 3 个方向”。这是一次真实 Kimi 调用；本轮开发没有主动调用用户 Provider。
+
+---
+
 # 2026-07-20 真实创意机会卡结构兼容修补
 
 当前分支：`agent/model-backed-story-incubator`

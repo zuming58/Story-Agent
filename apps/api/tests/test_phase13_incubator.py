@@ -28,7 +28,7 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(body or b"{}")
         joined = "\n".join(item.get("content", "") for item in payload.get("messages", []) if isinstance(item, dict))
-        step = next((name for name in ("query_plan", "evidence", "research_report", "opportunities", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
+        step = next((name for name in ("query_plan", "evidence", "research_report", "opportunity_repair", "opportunities", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
         perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
         if step == "query_plan": value = {"queries": [{"perspective": item, "query": f"undecided urban mystery adult readers {item.replace('_', ' ')}".replace("genre leaders", "leading works").replace("reader praise", "reader praise").replace("reader dropoff", "reader dropoff reasons").replace("opening strategy", "opening hook strategy").replace("serial engine", "serial retention engine")} for item in perspectives]}
         elif step == "evidence":
@@ -40,8 +40,8 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
             ]}
         elif step == "research_report":
             data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); evidence = data["evidence"]; value = {"competitors": [{"name": "Comparable", "profile": {"readingPromise": "A bounded promise"}, "evidenceIds": [evidence[0]["id"]], "confidence": 0.6}], "findings": [{"category": "opening_strategy", "statement": "Evidence-backed finding.", "claimType": "inference", "evidenceIds": [evidence[0]["id"]], "confidence": 0.6, "uncertainties": ["sample"]}]}
-        elif step == "opportunities":
-            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; n = int(data.get("candidateIndex", 1)); value = {"opportunities": [{"title": f"Direction {n}", "summary": f"A concise overview for direction {n}.", "highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notEstablished", "firstThreeChapterPromise": "A choice", "serialEngine": "notEstablished", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []}]}
+        elif step in {"opportunities", "opportunity_repair"}:
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]] if step == "opportunities" else data["allowedEvidenceIds"]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; n = int(data.get("candidateIndex", 1)); value = {"opportunities": [{"title": f"Direction {n}", "summary": f"A concise overview for direction {n}.", "highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notEstablished", "firstThreeChapterPromise": "A choice", "serialEngine": "notEstablished", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []}]}
         elif step == "ideation": value = {"reply": "A concrete constraint is recorded.", "confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": []}
         elif step == "story_brief": value = {"brief": {"format":"long-form","platform":"undecided","audience":"adult readers","chapterWordRange":{"min":100,"max":1000},"premise":"A costly search","readerPromise":"A choice","theme":"trust","tone":"scene-led","pov":"close third","pace":"purposeful","endingDirection":"consequence","protagonist":"Ming","coreDesire":"Find truth","coreConflict":"Truth costs trust","worldMechanism":"notApplicable","serialEngine":"Escalation","emotionalRewards":["tension"],"differentiators":["original"],"forbiddenContent":[],"referenceTraits":["abstract"]}}
         elif step in {"canon", "canon_repair"}: value = {"markdown": "# Story Core\nMing searches for truth.\n## Conflict\nTruth costs trust.\n## Boundaries\nNo imitation and no unsupported facts.", "structured": {"entities": [{"canonicalName":"Ming","entityTypeName":"person","aliasesJson":[],"attributesJson":{"desire":"Find truth"}}], "relations": [], "rules": [{"ruleCode":"TRUTH-COST","category":"story","statement":"Truth costs trust.","severity":"high","constraintJson":{"hard":True}}]}}
@@ -391,6 +391,40 @@ def test_story_opportunity_response_accepts_one_card_equivalent_envelopes(client
     assert phase13._single_generated_opportunity({"storyOpportunity": card}) == card
     assert phase13._single_generated_opportunity(card) == card
     assert phase13._single_generated_opportunity({"opportunities": [card, card]}) is None
+
+
+def test_story_opportunity_repairs_one_incomplete_model_card(client, monkeypatch):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    }).json()
+    stopped = client.post(f"/api/v1/research/jobs/{created['id']}/cancel", json={"expectedRevision": created["revision"]}).json()
+    report = client.post(f"/api/v1/research/jobs/{stopped['id']}/manual-materials", json={
+        "expectedRevision": stopped["revision"], "title": "Repair report", "content": "Readers need a choice with a visible cost. " * 20,
+    }).json()
+    analyzed = client.post(f"/api/v1/research/jobs/{stopped['id']}/analyze-manual-materials", json={"expectedRevision": report["revision"]}).json()
+    accepted = client.post(f"/api/v1/research/jobs/{stopped['id']}/accept", json={"expectedRevision": analyzed["revision"]}).json()
+
+    phase13 = client.app.state.story_service.phase13
+    original = phase13._complete_model_json
+    returned_incomplete = False
+
+    def incomplete_once(*args, **kwargs):
+        nonlocal returned_incomplete
+        if args[2] == "story_incubator:opportunities" and not returned_incomplete:
+            returned_incomplete = True
+            return {"opportunity": {"highConcept": "Incomplete"}}, "synthetic-invalid-run"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(phase13, "_complete_model_json", incomplete_once)
+    response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"]})
+
+    assert response.status_code == 201, response.text
+    assert len(response.json()) == 3
+    roles = {item["role"] for item in client.get(f"/api/v1/projects/{project['id']}/model-runs").json()}
+    assert "story_incubator:opportunities:1:repair" in roles
 
 
 def test_phase14_deterministic_canon_and_opening_gates(client):

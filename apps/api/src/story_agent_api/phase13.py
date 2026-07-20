@@ -546,7 +546,7 @@ class Phase13Service:
                 continue
             chunks = [(0, content)] if not is_integrated_report else [(offset, content[offset:offset + 4000]) for offset in range(0, len(content), 4000)]
             for offset, source_content in chunks:
-                output, _ = self._complete_model_json(
+                output, model_run_id = self._complete_model_json(
                     project,
                     "research_analyst",
                     "research_analyst:evidence",
@@ -966,12 +966,12 @@ class Phase13Service:
                 }
             generated = []
             for candidate_index in range(1, 4):
-                output, _ = self._complete_model_json(
+                output, model_run_id = self._complete_model_json(
                     project,
                     "story_incubator",
                     "story_incubator:opportunities" if candidate_index == 1 else f"story_incubator:opportunities:{candidate_index}",
                     request_id,
-                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Keep protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, and serialEngine to one tentative phrase each; use notEstablished when the direction does not need that decision yet. Score components are integers within their documented caps and may total less than 100. Return exactly this outer JSON shape: {\"opportunities\":[{...}]}. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
+                    "Generate exactly one lightweight story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: do not build a complete world, character bible, plot outline, chapter plan, or ending. It must be substantially different from previousDirections. Return a tentative title under 20 Chinese characters, a two-to-three-sentence summary under 180 Chinese characters, and a one-sentence highConcept under 80 Chinese characters. Return JSON only, with exactly this shape: {\"opportunities\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\",\"protagonist\":\"...\",\"coreDesire\":\"...\",\"coreConflict\":\"...\",\"worldMechanism\":\"...\",\"firstThreeChapterPromise\":\"...\",\"serialEngine\":\"...\",\"differentiation\":[\"...\"],\"risks\":[\"...\"],\"scoreComponents\":{\"platformFit\":0,\"openingHook\":0,\"emotionalPayoff\":0,\"differentiation\":0,\"serialEngine\":0,\"characterStickiness\":0,\"worldEngine\":0,\"readability\":0},\"evidenceIds\":[\"evidence-id\"],\"evidenceCoverage\":0.0,\"confidence\":0.0,\"uncertainties\":[\"...\"]}]}. All listed scalar fields and all eight scoreComponents keys are required. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
                     {
                         "phase14Step": "opportunities",
                         "candidateIndex": candidate_index,
@@ -984,12 +984,31 @@ class Phase13Service:
                     stream_response=True,
                 )
                 candidate = self._single_generated_opportunity(output)
-                if candidate is None:
-                    raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator did not return exactly one opportunity for the requested direction.")
                 try:
+                    if candidate is None:
+                        raise ValueError("The model omitted a single opportunity card.")
                     generated.append(StoryOpportunityDraft.model_validate(candidate).model_dump(mode="json", by_alias=True))
-                except ValidationError as exc:
-                    raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator returned an incomplete opportunity card.") from exc
+                except (ValidationError, ValueError) as exc:
+                    self._record_opportunity_schema_failure(project, model_run_id, exc)
+                    repaired, repair_run_id = self._complete_model_json(
+                        project,
+                        "story_incubator",
+                        f"story_incubator:opportunities:{candidate_index}:repair",
+                        request_id,
+                        "Repair one invalid story opportunity card. Return JSON only with exactly {\"opportunities\":[one complete card]}. Preserve only supported evidence IDs and never invent evidence. Required card fields are title, summary, highConcept, protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, serialEngine, differentiation, risks, scoreComponents with platformFit, openingHook, emotionalPayoff, differentiation, serialEngine, characterStickiness, worldEngine, readability, evidenceIds, evidenceCoverage, confidence, and uncertainties.",
+                        {"phase14Step": "opportunity_repair", "invalidCard": candidate, "scoreLimits": SCORE_LIMITS, "allowedEvidenceIds": [item["id"] for item in evidence]},
+                        max_output_tokens=4096,
+                        max_retries=0,
+                        stream_response=True,
+                    )
+                    repaired_candidate = self._single_generated_opportunity(repaired)
+                    try:
+                        if repaired_candidate is None:
+                            raise ValueError("The repair omitted a single opportunity card.")
+                        generated.append(StoryOpportunityDraft.model_validate(repaired_candidate).model_dump(mode="json", by_alias=True))
+                    except (ValidationError, ValueError) as repair_exc:
+                        self._record_opportunity_schema_failure(project, repair_run_id, repair_exc)
+                        raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator returned an incomplete opportunity card after one repair.") from repair_exc
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)
             assert job
@@ -1996,6 +2015,21 @@ class Phase13Service:
             if isinstance(raw, dict):
                 return raw
         return output if {"highConcept", "scoreComponents", "evidenceIds"}.issubset(output) else None
+
+    def _record_opportunity_schema_failure(self, project: Any, run_id: str, error: ValidationError | ValueError) -> None:
+        """Keep diagnostics structural so invalid model bodies are never persisted."""
+        fields = ["opportunities"]
+        if isinstance(error, ValidationError):
+            fields = sorted(".".join(str(part) for part in item["loc"]) for item in error.errors())
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            row = session.get(ModelRun, run_id)
+            if not row:
+                return
+            diagnostic = safe_json_loads(row.diagnostic_json, {})
+            diagnostic["schemaValidation"] = {"schema": "StoryOpportunityDraft", "invalidFields": fields}
+            row.status = "failed"
+            row.error_code = "opportunity_schema_invalid"
+            row.diagnostic_json = dumps(diagnostic)
 
     @staticmethod
     def _validate_scores(raw: dict[str, Any]) -> tuple[dict[str, int], int]:

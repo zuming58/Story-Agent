@@ -373,7 +373,7 @@ def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
     assert response.json()[0]["story"]["summary"] == "A concise overview for direction 1."
     assert response.json()[0]["story"]["externalCreativeInputChecksum"]
     assert external_input not in json.dumps(response.json())
-    opportunity_calls = [item for item in calls if item["role"].startswith("story_incubator:opportunities")]
+    opportunity_calls = [item for item in calls if item["role"].startswith("research_analyst:external-opportunities")]
     assert len(opportunity_calls) == 3
     assert [item["payload"]["candidateIndex"] for item in opportunity_calls] == [1, 2, 3]
     assert all(item["kwargs"] == {"max_output_tokens": 1600, "max_retries": 0, "stream_response": True} for item in opportunity_calls)
@@ -436,7 +436,7 @@ def test_story_opportunity_repairs_one_incomplete_model_card(client, monkeypatch
     assert response.status_code == 201, response.text
     assert len(response.json()) == 3
     roles = {item["role"] for item in client.get(f"/api/v1/projects/{project['id']}/model-runs").json()}
-    assert "story_incubator:opportunities:1:repair" in roles
+    assert "story_incubator:opportunities:repair" in roles
 
 
 def test_phase14_deterministic_canon_and_opening_gates(client):

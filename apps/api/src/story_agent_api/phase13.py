@@ -974,10 +974,20 @@ class Phase13Service:
                 }
             generated = []
             for candidate_index in range(1, 4):
+                opportunity_role = "research_analyst" if creative_input else "story_incubator"
+                opportunity_run_role = (
+                    "research_analyst:external-opportunities"
+                    if creative_input and candidate_index == 1
+                    else f"research_analyst:external-opportunities:{candidate_index}"
+                    if creative_input
+                    else "story_incubator:opportunities"
+                    if candidate_index == 1
+                    else f"story_incubator:opportunities:{candidate_index}"
+                )
                 output, model_run_id = self._complete_model_json(
                     project,
-                    "story_incubator",
-                    "story_incubator:opportunities" if candidate_index == 1 else f"story_incubator:opportunities:{candidate_index}",
+                    opportunity_role,
+                    opportunity_run_role,
                     request_id,
                     "Generate exactly one compact story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: never write a complete world, character bible, plot outline, chapter plan, ending, rationale, or explanation. External creative input is a user preference, not market evidence: use it to guide the direction, but never present it as a researched fact or cite it as evidence. Keep title under 20 Chinese characters; summary under 90 Chinese characters; highConcept under 50 Chinese characters; each protagonist/desire/conflict/world/promise/serial field under 36 Chinese characters; differentiation, risks, and uncertainties at most two short items each. Return JSON only, under 1200 tokens, with exactly this shape: {\"opportunities\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\",\"protagonist\":\"...\",\"coreDesire\":\"...\",\"coreConflict\":\"...\",\"worldMechanism\":\"...\",\"firstThreeChapterPromise\":\"...\",\"serialEngine\":\"...\",\"differentiation\":[\"...\"],\"risks\":[\"...\"],\"scoreComponents\":{\"platformFit\":0,\"openingHook\":0,\"emotionalPayoff\":0,\"differentiation\":0,\"serialEngine\":0,\"characterStickiness\":0,\"worldEngine\":0,\"readability\":0},\"evidenceIds\":[\"evidence-id\"],\"evidenceCoverage\":0.0,\"confidence\":0.0,\"uncertainties\":[\"...\"]}]}. All listed scalar fields and all eight scoreComponents keys are required. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
                     {
@@ -1001,8 +1011,8 @@ class Phase13Service:
                     self._record_opportunity_schema_failure(project, model_run_id, exc)
                     repaired, repair_run_id = self._complete_model_json(
                         project,
-                        "story_incubator",
-                        f"story_incubator:opportunities:{candidate_index}:repair",
+                        opportunity_role,
+                        f"{opportunity_run_role}:repair",
                         request_id,
                         "Repair one invalid story opportunity card. Return JSON only with exactly {\"opportunities\":[one complete card]}. Preserve only supported evidence IDs and never invent evidence. Required card fields are title, summary, highConcept, protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, serialEngine, differentiation, risks, scoreComponents with platformFit, openingHook, emotionalPayoff, differentiation, serialEngine, characterStickiness, worldEngine, readability, evidenceIds, evidenceCoverage, confidence, and uncertainties.",
                         {"phase14Step": "opportunity_repair", "invalidCard": candidate, "scoreLimits": SCORE_LIMITS, "allowedEvidenceIds": [item["id"] for item in evidence]},

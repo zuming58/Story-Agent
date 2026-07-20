@@ -1,3 +1,26 @@
+# 2026-07-20 外部创意导入改走结构分析角色
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与定向回归，待提交推送。**
+
+## 真实诊断与修补
+
+- 最新两次“从输入生成方向”均在首张机会卡阶段由 `Kimi-K2.6` 返回 `content_truncated`，运行时长约 47 秒和 64 秒；这证明短输出预算不足以解决 Kimi 的结构化输出截断。
+- 外部创意导入现改用既有 `research_analyst` 角色。该角色在当前双模型分工中绑定结构分析模型，适合将用户和其他 Agent 打磨后的结果规整为带证据、评分和不确定性的机会卡。
+- 普通“生成 3 个方向”、人机共创、StoryBrief、Canon 和开篇仍使用 `story_incubator` 写作角色，未修改全局绑定或用户模型设置。
+- ModelRun 会明确记录 `research_analyst:external-opportunities[:N]`，保留调用审计和失败诊断；外部输入仍不作为研究事实或证据引用。
+
+## 验证
+
+- 定向 API：`5 passed`，覆盖外部输入角色路由、卡片结构修复、候选替换和流式 Provider。
+
+## 下一步
+
+- API 重启后，用户可保持当前 1076 字符输入不变，重新点击“从输入生成方向”。本轮自动测试未调用真实 Provider。
+
+---
+
 # 2026-07-20 外部创意方向生成的截断收敛
 
 当前分支：`agent/model-backed-story-incubator`

@@ -1,3 +1,40 @@
+# 2026-07-21 人机共创底稿改为五模块独立生成与保存
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**本轮代码与全部回归已完成。下方 2026-07-20 的“三段生成后由 DeepSeek 一次归一化”方案已被本节替代。**
+
+## 本轮完成
+
+- 人机共创起始底稿拆为五个独立模块：故事内核与创作承诺、人物与关系合同、世界与叙事发动机、题材专属台账、叙事边界与待确认问题。
+- 每个模块单独调用 `story_incubator` 绑定模型、单独创建并收敛 ModelRun、单独写入 `IdeationSession.state.kickoffSections`，并拥有独立模块 revision。模型调用期间不持有 SQLite 写事务；写回前重新校验 session revision、故事机会 revision/checksum 和研究报告 checksum。
+- 删除失败率高且不必要的 `research_analyst:ideation-kickoff-normalize` 整批归一化调用。各模块只要求有明确字数上限的短中文讨论材料，不再要求 Kimi 生成大块 JSON，也不再把整份底稿塞入一条聊天消息。
+- 任一模块失败时不保存该模块，也不影响其他已保存模块；页面只在当前模块显示“正在生成”，失败信息明确模块名称，并允许只重试当前模块。
+- 人物数量不设固定值。题材专属台账按作品动态选择：悬疑可使用线索链，玄幻可使用能力与代价，职业文可使用行业流程，科幻可使用技术边界，言情可使用关系阶段；不适用的台账不得硬加。
+- 所有模块仍是待讨论建议，不计入用户讨论轮次，不写入 `confirmedDecisions`，不自动创建或确认 StoryBrief、Canon、规划或正文。StoryBrief 仍要求至少两轮真实用户讨论和后续人工确认。
+
+## 接口与数据
+
+- 删除旧接口 `POST /api/v1/ideation/sessions/{session_id}/kickoff`。
+- 新增 `POST /api/v1/ideation/sessions/{session_id}/kickoff-sections/{section}`，其中 `section` 为 `core`、`characters`、`world`、`genre` 或 `boundaries`；请求继续携带 `expectedSessionRevision`，响应为更新后的 `IdeationSession`。
+- 无数据库迁移、无新表。五个模块保存在既有 `IdeationSession.state_json` 的 `kickoffSections` 字段中；旧聊天消息不迁移、不删除。
+
+## 验证
+
+- Phase 13/14 孵化专项：`uv run --project apps/api pytest apps/api/tests/test_phase13_incubator.py -q`，`20 passed`。
+- Web 单测：`npm run test:web -- --run`，`3 files / 15 passed`。
+- API 全量测试因桌面单命令 10 分钟上限改为三组执行：基础 API `32 passed + 62 passed`、Phase 7–12 `70 passed`、Phase 13/14 `20 passed`，合计 `184 passed`；没有失败。原始 `npm run test` 组合命令因超过 10 分钟被中止，不能单独记为通过，但其 API 与 Web 测试集合已全部由上述拆分命令覆盖通过。
+- `npm run build`：通过，仅有既有 Vite chunk-size warning。
+- `npm run test:e2e` 首次因用户开发 API 已占用 `8765` 被 Playwright 主动拒绝；改用隔离端口 `8767/4175` 和隔离 `.e2e-data` 后，`desktop-1440 10 passed`、`desktop-1280 10 passed`，合计 `20 passed`。
+- `compileall` 与最终 `git diff --check`：通过。
+
+## 已知限制
+
+- 自动测试仅使用 FakeModel，没有调用用户真实 Kimi、DeepSeek、Tavily 或 Firecrawl，也没有消费用户额度。真实 Provider 的每模块输出质量仍需用户在当前已打开的“提刑女官 → 人机共创”页面逐块手动验证。
+- 为避免并发 revision 冲突，页面同一时间只允许生成一个模块；这不会阻止模块按任意顺序生成。
+
+---
+
 # 2026-07-20 人机共创起始底稿
 
 当前分支：`agent/model-backed-story-incubator`

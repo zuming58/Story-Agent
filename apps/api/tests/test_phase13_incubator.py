@@ -28,7 +28,7 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(body or b"{}")
         joined = "\n".join(item.get("content", "") for item in payload.get("messages", []) if isinstance(item, dict))
-        step = next((name for name in ("query_plan", "evidence", "research_report", "external_directions", "opportunity_repair", "opportunities", "ideation_kickoff_world_text", "ideation_kickoff_characters_text", "ideation_kickoff_boundaries_text", "ideation_kickoff_normalize", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
+        step = next((name for name in ("query_plan", "evidence", "research_report", "external_directions", "opportunity_repair", "opportunities", "ideation_kickoff_core_text", "ideation_kickoff_world_text", "ideation_kickoff_characters_text", "ideation_kickoff_genre_text", "ideation_kickoff_boundaries_text", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
         perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
         if step == "query_plan": value = {"queries": [{"perspective": item, "query": f"undecided urban mystery adult readers {item.replace('_', ' ')}".replace("genre leaders", "leading works").replace("reader praise", "reader praise").replace("reader dropoff", "reader dropoff reasons").replace("opening strategy", "opening hook strategy").replace("serial engine", "serial retention engine")} for item in perspectives]}
         elif step == "evidence":
@@ -43,10 +43,11 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         elif step == "external_directions": value = {"directions": [{"title": "External one", "summary": "A focused imported direction.", "highConcept": "Imported direction one."}, {"title": "External two", "summary": "A second focused imported direction.", "highConcept": "Imported direction two."}]}
         elif step in {"opportunities", "opportunity_repair"}:
             data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]] if step == "opportunities" else data["allowedEvidenceIds"]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; n = int(data.get("candidateIndex", 1)); value = {"opportunities": [{"title": f"Direction {n}", "summary": f"A concise overview for direction {n}.", "highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notEstablished", "firstThreeChapterPromise": "A choice", "serialEngine": "notEstablished", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []}]}
+        elif step == "ideation_kickoff_core_text": value = {"note": "A costly truth-seeking story with a trust payoff."}
         elif step == "ideation_kickoff_world_text": value = {"note": "A provisional world, opening promise, and serial engine."}
         elif step == "ideation_kickoff_characters_text": value = {"note": "Ming and a rival carry the central relationship and conflict."}
+        elif step == "ideation_kickoff_genre_text": value = {"note": "The mystery needs a clue, suspect, and reveal ledger."}
         elif step == "ideation_kickoff_boundaries_text": value = {"note": "No imitation; the author must decide the first loss and key relationship."}
-        elif step == "ideation_kickoff_normalize": value = {"title": "A provisional world", "premise": "A choice begins the story.", "worldView": "A constrained world with a visible cost.", "characterCandidates": ["Ming, early career, wants the truth."], "relationshipCandidates": ["Ming and a rival need each other."], "rulesAndResources": "Status and evidence carry a cost; no fantasy power system.", "coreConflicts": ["Truth costs trust."], "firstThreeChapterPromise": "A choice creates a public consequence.", "serialEngine": "Each answer creates a harder choice.", "writingBoundaries": ["No imitation."], "openQuestions": ["How public is the first loss?", "Which relationship hurts most?"]}
         elif step == "ideation": value = {"reply": "A concrete constraint is recorded.", "confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": []}
         elif step == "story_brief": value = {"brief": {"format":"long-form","platform":"undecided","audience":"adult readers","chapterWordRange":{"min":100,"max":1000},"premise":"A costly search","readerPromise":"A choice","theme":"trust","tone":"scene-led","pov":"close third","pace":"purposeful","endingDirection":"consequence","protagonist":"Ming","coreDesire":"Find truth","coreConflict":"Truth costs trust","worldMechanism":"notApplicable","serialEngine":"Escalation","emotionalRewards":["tension"],"differentiators":["original"],"forbiddenContent":[],"referenceTraits":["abstract"]}}
         elif step in {"canon", "canon_repair"}: value = {"markdown": "# Story Core\nMing searches for truth.\n## Conflict\nTruth costs trust.\n## Boundaries\nNo imitation and no unsupported facts.", "structured": {"entities": [{"canonicalName":"Ming","entityTypeName":"person","aliasesJson":[],"attributesJson":{"desire":"Find truth"}}], "relations": [], "rules": [{"ruleCode":"TRUTH-COST","category":"story","statement":"Truth costs trust.","severity":"high","constraintJson":{"hard":True}}]}}
@@ -178,14 +179,22 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client, mon
     ideation = client.post(f"/api/v1/projects/{project['id']}/ideation/sessions", json={"opportunityId": opportunity["id"], "expectedOpportunityRevision": opportunity["revision"]})
     assert ideation.status_code == 201, ideation.text
     session = ideation.json()
-    kickoff = client.post(f"/api/v1/ideation/sessions/{session['id']}/kickoff", json={"expectedSessionRevision": session["revision"]})
-    assert kickoff.status_code == 201, kickoff.text
-    assert kickoff.json()["structuredState"]["kind"] == "co_creation_kickoff"
-    assert "全部待你确认" in kickoff.json()["content"]
-    restored_session = client.get(f"/api/v1/projects/{project['id']}/ideation/sessions/{session['id']}").json()
-    assert restored_session["revision"] == session["revision"] + 1
+    for index, section in enumerate(("core", "characters", "world", "genre", "boundaries"), start=1):
+        kickoff = client.post(f"/api/v1/ideation/sessions/{session['id']}/kickoff-sections/{section}", json={"expectedSessionRevision": session["revision"]})
+        assert kickoff.status_code == 201, kickoff.text
+        session = kickoff.json()
+        assert session["state"]["kickoffSections"][section]["status"] == "ready"
+        assert session["state"]["kickoffSections"][section]["revision"] == 1
+        assert len(session["state"]["kickoffSections"]) == index
+        assert session["messages"] == []
+    core_before = session["state"]["kickoffSections"]["core"]["content"]
+    regenerated = client.post(f"/api/v1/ideation/sessions/{session['id']}/kickoff-sections/world", json={"expectedSessionRevision": session["revision"]})
+    assert regenerated.status_code == 201, regenerated.text
+    restored_session = regenerated.json()
+    assert restored_session["state"]["kickoffSections"]["world"]["revision"] == 2
+    assert restored_session["state"]["kickoffSections"]["core"]["content"] == core_before
     assert not restored_session["state"]["confirmedDecisions"]
-    assert len(restored_session["messages"]) == 1
+    assert restored_session["messages"] == []
     message = client.post(f"/api/v1/ideation/sessions/{session['id']}/messages", json={"expectedSessionRevision": restored_session["revision"], "content": "No archive-number exposition."})
     assert message.status_code == 201, message.text
     premature = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": restored_session["revision"] + 1})
@@ -240,7 +249,8 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client, mon
     assert client.post(f"/api/v1/projects/{project['id']}/canon/lock", json={"expectedRevision": current_canon["revision"]}).status_code == 200
     runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
     roles = {item["role"] for item in runs}
-    assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:ideation-kickoff:world-text", "story_incubator:ideation-kickoff:characters-text", "story_incubator:ideation-kickoff:boundaries-text", "research_analyst:ideation-kickoff-normalize", "story_incubator:story-brief", "story_incubator:canon", "research_analyst:canon-analyzer", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
+    assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:ideation-kickoff:core-text", "story_incubator:ideation-kickoff:world-text", "story_incubator:ideation-kickoff:characters-text", "story_incubator:ideation-kickoff:genre-text", "story_incubator:ideation-kickoff:boundaries-text", "story_incubator:story-brief", "story_incubator:canon", "research_analyst:canon-analyzer", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
+    assert "research_analyst:ideation-kickoff-normalize" not in roles
     incubator_calls = [item for item in calls if item["run_role"].startswith("story_incubator:")]
     assert {"story_incubator:ideation", "story_incubator:story-brief", "story_incubator:canon", "story_incubator:opening-expand"}.issubset({item["run_role"] for item in incubator_calls})
     assert any(item["run_role"].startswith("story_incubator:opportunities") for item in incubator_calls)

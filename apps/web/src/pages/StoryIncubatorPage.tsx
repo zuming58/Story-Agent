@@ -14,6 +14,18 @@ const stages = [
   ["人机共创", "讨论到你真正认可"], ["StoryBrief", "冻结创作承诺"], ["Canon 与开篇", "三种开头先试后定"],
 ] as const;
 
+const kickoffSectionDefinitions = [
+  ["core", "故事内核与创作承诺", "读者承诺、主题、情绪回报和结局方向"],
+  ["characters", "人物与关系合同", "按故事实际需要提出主角、配角、关系与人物弧"],
+  ["world", "世界与叙事发动机", "时空规则、核心冲突、前三章承诺和长线推进"],
+  ["genre", "题材专属台账", "只生成本故事需要的线索、能力、职业、技术或关系台账"],
+  ["boundaries", "叙事边界与待确认问题", "视角、语气、节奏、禁写边界和待拍板问题"],
+] as const;
+
+type KickoffSectionKey = typeof kickoffSectionDefinitions[number][0];
+
+type KickoffSection = { label?: string; status?: string; content?: string; modelRunId?: string; revision?: number; generatedAt?: string };
+
 const readinessLabels: Record<string, string> = {
   INCUBATION_MODEL_ROLE_MISSING: "模型角色未配置",
   INCUBATION_MODEL_UNAVAILABLE: "模型或密钥不可用",
@@ -74,6 +86,7 @@ export function StoryIncubatorPage() {
   const [externalCreativeInput, setExternalCreativeInput] = useState("");
   const [externalCreativeInputOpen, setExternalCreativeInputOpen] = useState(false);
   const [message, setMessage] = useState("");
+  const [generatingKickoffSection, setGeneratingKickoffSection] = useState<KickoffSectionKey | null>(null);
   const [briefForm, setBriefForm] = useState(() => createBriefForm());
   const initializedDraftProjectId = useRef<string | null>(null);
 
@@ -101,7 +114,8 @@ export function StoryIncubatorPage() {
   const currentCanon = canonQuery.data?.documents.find((item) => item.id === "story-core") ?? canonQuery.data?.documents[0] ?? null;
   const researchNeedsRecovery = Boolean(currentJob && ["failed", "cancelled", "insufficient_evidence"].includes(currentJob.status));
   const ideationUserTurns = activeSession?.messages.filter((item) => item.role === "user").length ?? 0;
-  const hasIdeationKickoff = Boolean(activeSession?.messages.some((item) => item.structuredState.kind === "co_creation_kickoff"));
+  const kickoffSections = (activeSession?.state.kickoffSections as Record<string, KickoffSection> | undefined) ?? {};
+  const hasIdeationKickoff = kickoffSectionDefinitions.every(([key]) => kickoffSections[key]?.status === "ready");
 
   const evidenceQuery = useQuery({ queryKey: ["incubator-evidence", currentJob?.id], queryFn: () => api.researchEvidence(currentJob!.id), enabled: Boolean(currentJob) });
   const competitorsQuery = useQuery({ queryKey: ["incubator-competitors", currentJob?.id], queryFn: () => api.researchCompetitors(currentJob!.id), enabled: Boolean(currentJob) });
@@ -247,9 +261,17 @@ export function StoryIncubatorPage() {
     const content = message.trim(); setMessage("");
     await run("共创意见已记录", () => api.addIdeationMessage(session.id, session.revision, content));
   };
-  const createIdeationKickoff = async () => {
-    const session = await ensureSession(); if (!session) return;
-    await run("共创底稿已生成，等待你的逐项确认", () => api.createIdeationKickoff(session.id, session.revision));
+  const createIdeationKickoffSection = async (section: KickoffSectionKey) => {
+    const label = kickoffSectionDefinitions.find(([key]) => key === section)?.[1] ?? "共创底稿分段";
+    setGeneratingKickoffSection(section);
+    try {
+      const session = await ensureSession(); if (!session) return;
+      await run(`${label}已保存`, () => api.createIdeationKickoffSection(session.id, section, session.revision));
+    } catch (cause) {
+      setError(`${label}生成失败：${errorText(cause)}。其他已保存模块不受影响，可只重试本模块。`);
+    } finally {
+      setGeneratingKickoffSection(null);
+    }
   };
   const generateStoryBrief = async () => { const session = await ensureSession(); if (session) await run("StoryBrief 提案已生成", () => api.createIncubationStoryBriefProposal(session.id, session.revision)); };
   const decideBrief = (action: "apply" | "reject") => pendingBriefProposal && void run(action === "apply" ? "StoryBrief 已成为当前版本" : "StoryBrief 提案已拒绝", () => api.decideIncubationStoryBriefProposal(pendingBriefProposal.id, action, pendingBriefProposal.revision));
@@ -297,7 +319,7 @@ export function StoryIncubatorPage() {
 
       {stage === 2 && <div className="incubator-panel opportunity-deck"><header><div><Sparkle /><span><strong>故事机会候选</strong><small>这里只选方向，完整设定留到人机共创</small></span></div>{currentJob?.status === "accepted" && !acceptedOpportunity && <div className="opportunity-actions"><button onClick={() => setExternalCreativeInputOpen((open) => !open)} disabled={mutation.isPending}><Books />{opportunitiesQuery.data?.length ? "导入外部创意重做方向" : "导入外部创意"}</button>{!opportunitiesQuery.data?.length && <button className="gold-action" onClick={() => void generateOpportunities()} disabled={mutation.isPending}>{mutation.isPending ? <><CircleNotch className="spin" />正在生成方向…</> : <><Sparkle />生成 3 个方向</>}</button>}</div>}</header>{externalCreativeInputOpen && <section className="external-opportunity-input"><header><div><Books /><span><strong>导入外部创意结果</strong><small>只作为创作偏好；保留输入中实际存在的一到六个方向，并替换当前待选方向</small></span></div><button aria-label="关闭外部创意输入" onClick={() => setExternalCreativeInputOpen(false)}><X /></button></header><textarea value={externalCreativeInput} onChange={(event) => setExternalCreativeInput(event.target.value)} placeholder="粘贴你和其他 Agent 打磨后的完整结果：一个方向就生成一个，多个方向就分别生成；题材融合、核心冲突、人物关系、世界观取舍、想保留或排除的元素都可以写。" /><footer><small>{externalCreativeInput.trim().length}/30000 · 不会作为研究事实写入证据链</small><button className="gold-action" onClick={() => void importExternalCreativeInput()} disabled={mutation.isPending || externalCreativeInput.trim().length < 40}>{mutation.isPending ? <><CircleNotch className="spin" />正在整理…</> : <><Sparkle />从输入生成方向</>}</button></footer></section>}<div className="opportunity-grid">{opportunitiesQuery.data?.filter((item) => item.status !== "superseded").map((item, index) => <article key={item.id} className={item.status === "accepted" ? "is-accepted" : ""}><header><span>{item.story.inputOrigin === "externalCreativeInput" ? `外部方向 ${String(index + 1).padStart(2, "0")}` : `方向 ${String(index + 1).padStart(2, "0")}`}</span><strong>{item.story.inputOrigin === "externalCreativeInput" ? <small>外部</small> : <>{item.totalScore}<small>/100</small></>}</strong></header><h2>{String(item.story.title ?? item.highConcept)}</h2><p className="opportunity-summary">{String(item.story.summary ?? item.highConcept)}</p><footer><span>{item.story.inputOrigin === "externalCreativeInput" ? "外部创意 · 待人机共创" : `${Math.round(item.evidenceCoverage * 100)}% 证据覆盖`}</span>{item.status === "pending" && <div><button onClick={() => decideOpportunity(item.id, item.revision, "reject")}><X />排除</button><button className="accept" onClick={() => void decideOpportunity(item.id, item.revision, "accept")}><Check />选这个方向</button></div>}{item.status === "accepted" && <b><CheckCircle />当前方向</b>}</footer></article>)}</div>{!opportunitiesQuery.data?.filter((item) => item.status !== "superseded").length && <div className="incubator-empty"><Lightbulb /><strong>先接受研究报告，再让模型基于证据提出真正不同的故事方向。</strong></div>}</div>}
 
-      {stage === 3 && <div className="ideation-layout"><aside className="incubator-panel decision-ledger"><header><div><Brain /><span><strong>共创台账</strong><small>只有你确认后的决定才会进入 StoryBrief</small></span></div></header>{[["confirmedDecisions", "已确认决定"], ["openQuestions", "待你拍板"], ["aiSuggestions", "Agent 建议"], ["conflicts", "待解决冲突"]].map(([key, label]) => <section key={key}><h3>{label}</h3>{((activeSession?.state[key] as unknown[]) ?? []).map((item, index) => <p key={index}>{String(item)}</p>)}</section>)}</aside><main className="incubator-panel ideation-chat"><header><div><Sparkle /><span><strong>和故事策划 Agent 讨论</strong><small>{acceptedOpportunity?.highConcept ?? "请先选择一个故事方向"}</small></span></div>{!hasIdeationKickoff && <button className="gold-action" onClick={() => void createIdeationKickoff()} disabled={!acceptedOpportunity || mutation.isPending}>{mutation.isPending ? <><CircleNotch className="spin" />正在生成底稿…</> : <><Sparkle />生成共创底稿</>}</button>}<em>{activeSession ? `REV ${activeSession.revision}` : "NEW"}</em></header><div className="ideation-messages">{activeSession?.messages.map((item) => <article key={item.id} className={`is-${item.role}${item.structuredState.kind === "co_creation_kickoff" ? " is-kickoff" : ""}`}><strong>{item.role === "user" ? "你" : item.structuredState.kind === "co_creation_kickoff" ? "共创底稿 · 全部待确认" : "故事策划"}</strong><p>{item.content}</p></article>)}{!activeSession?.messages.length && <div className="incubator-empty"><Brain /><strong>先生成一份可修改的世界观、人物与规则底稿，再逐条告诉 Agent 哪些保留、删除或重做。</strong><button className="gold-action" onClick={() => void createIdeationKickoff()} disabled={!acceptedOpportunity || mutation.isPending}><Sparkle />生成共创底稿</button></div>}</div><footer><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="例如：保留女官探案，但主角不要天选血脉；把她和皇子的关系改为互相利用；能力体系不要升级打怪。" /><button className="gold-action" onClick={() => void sendMessage()} disabled={!acceptedOpportunity || !message.trim() || mutation.isPending}><PaperPlaneTilt />发送</button></footer></main></div>}
+      {stage === 3 && <div className="ideation-layout"><aside className="incubator-panel decision-ledger"><header><div><Brain /><span><strong>共创台账</strong><small>只有你确认后的决定才会进入 StoryBrief</small></span></div></header>{[["confirmedDecisions", "已确认决定"], ["openQuestions", "待你拍板"], ["aiSuggestions", "Agent 建议"], ["conflicts", "待解决冲突"]].map(([key, label]) => <section key={key}><h3>{label}</h3>{((activeSession?.state[key] as unknown[]) ?? []).map((item, index) => <p key={index}>{String(item)}</p>)}</section>)}</aside><main className="ideation-main"><section className="incubator-panel kickoff-workbench"><header><div><Sparkle /><span><strong>共创底稿分段</strong><small>按当前故事需要逐块生成；每块立即保存，可以单独重做</small></span></div><em>{Object.values(kickoffSections).filter((item) => item.status === "ready").length}/{kickoffSectionDefinitions.length}</em></header><div className="kickoff-section-grid">{kickoffSectionDefinitions.map(([key, label, description]) => { const section = kickoffSections[key]; const ready = section?.status === "ready" && Boolean(section.content); const isGenerating = generatingKickoffSection === key; return <article key={key} className={ready ? "is-ready" : ""}><header><span>{ready ? <CheckCircle /> : <CircleNotch />}</span><div><strong>{label}</strong><small>{isGenerating ? "正在生成并保存…" : ready ? `已保存 · V${section.revision ?? 1}` : "尚未生成"}</small></div></header><p>{description}</p>{ready ? <pre>{section.content}</pre> : <div className="kickoff-section-empty">此模块独立生成，失败不会影响其他已保存模块。</div>}<footer><button onClick={() => void createIdeationKickoffSection(key)} disabled={!acceptedOpportunity || mutation.isPending}>{isGenerating ? <CircleNotch className="spin" /> : <Sparkle />}{isGenerating ? "正在生成本模块…" : ready ? "重新生成本模块" : "生成并保存"}</button></footer></article>; })}</div></section><section className="incubator-panel ideation-chat"><header><div><Brain /><span><strong>和故事策划 Agent 讨论</strong><small>{acceptedOpportunity?.highConcept ?? "请先选择一个故事方向"}</small></span></div><em>{activeSession ? `REV ${activeSession.revision}` : "NEW"}</em></header><div className="ideation-messages">{activeSession?.messages.map((item) => <article key={item.id} className={`is-${item.role}`}><strong>{item.role === "user" ? "你" : "故事策划"}</strong><p>{item.content}</p></article>)}{!activeSession?.messages.length && <div className="incubator-empty"><Brain /><strong>{hasIdeationKickoff ? "五个共创模块已保存。现在逐条告诉 Agent 哪些保留、删除或重做。" : "可以先生成最重要的模块，也可以直接开始讨论；不必等待全部模块完成。"}</strong></div>}</div><footer><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="例如：保留女官探案，但不要超自然能力；把她和皇子的关系改为互相利用；案件真相不能依赖巧合。" /><button className="gold-action" onClick={() => void sendMessage()} disabled={!acceptedOpportunity || !message.trim() || mutation.isPending}><PaperPlaneTilt />发送</button></footer></section></main></div>}
 
       {stage === 4 && <div className="incubator-panel storybrief-review"><header><div><LockKey /><span><strong>StoryBrief 决策闸门</strong><small>这是 Canon 的上游合同，不确认就不会向下游写入</small></span></div>{activeSession && !pendingBriefProposal && !currentStoryBrief && <button className="gold-action" onClick={() => void generateStoryBrief()} disabled={mutation.isPending || ideationUserTurns < 2}><Sparkle />生成 StoryBrief 提案 · {ideationUserTurns}/2 轮</button>}</header>{pendingBriefProposal ? <><div className="storybrief-json"><pre>{jsonPreview(pendingBriefProposal.proposedBrief)}</pre></div><footer><button onClick={() => decideBrief("reject")}><X />拒绝</button><button className="accept" onClick={() => decideBrief("apply")}><Check />确认成为当前 StoryBrief</button></footer></> : currentStoryBrief ? <><div className="brief-authority"><CheckCircle /><div><strong>StoryBrief V{currentStoryBrief.versionNumber} 已生效</strong><span>Checksum {currentStoryBrief.checksum.slice(0, 12)} · 后续 Canon 必须从此版本生成</span></div></div><div className="storybrief-json"><pre>{jsonPreview(currentStoryBrief.brief)}</pre></div></> : <div className="incubator-empty"><LockKey /><strong>{ideationUserTurns < 2 ? `至少完成两轮真实讨论后再冻结 StoryBrief；当前 ${ideationUserTurns}/2 轮。` : "共创讨论已达到最低轮次，可以生成提案；你仍需要人工确认。"}</strong></div>}</div>}
 

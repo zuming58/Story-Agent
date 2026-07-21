@@ -126,7 +126,7 @@ from .schemas import (
     ShortStoryReadinessOut,
     CompetitorExclude,
     CompetitorProfileOut,
-    IdeationKickoffCreate,
+    IdeationKickoffSectionCreate,
     IdeationMessageCreate,
     IdeationMessageOut,
     IdeationSessionCreate,
@@ -765,9 +765,9 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def add_ideation_message(session_id: str, payload: IdeationMessageCreate, request: Request) -> object:
         return service.phase13.add_ideation_message(session_id, payload, request.state.request_id)
 
-    @app.post("/api/v1/ideation/sessions/{session_id}/kickoff", response_model=IdeationMessageOut, status_code=201)
-    def create_ideation_kickoff(session_id: str, payload: IdeationKickoffCreate, request: Request) -> object:
-        return service.phase13.create_ideation_kickoff(session_id, payload, request.state.request_id)
+    @app.post("/api/v1/ideation/sessions/{session_id}/kickoff-sections/{section}", response_model=IdeationSessionOut, status_code=201)
+    def create_ideation_kickoff_section(session_id: str, section: str, payload: IdeationKickoffSectionCreate, request: Request) -> object:
+        return service.phase13.create_ideation_kickoff_section(session_id, section, payload, request.state.request_id)
 
     @app.post("/api/v1/ideation/sessions/{session_id}/story-brief-proposals", response_model=StoryBriefProposalOut, status_code=201)
     def create_story_brief_proposal(session_id: str, payload: StoryBriefProposalCreate, request: Request) -> object:

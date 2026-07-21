@@ -5,6 +5,7 @@ import {
   CloudArrowUp,
   FilmStrip,
   House,
+  Lightbulb,
   PenNib,
   Question,
   SlidersHorizontal,
@@ -16,6 +17,7 @@ import { Link, useLocation } from "react-router-dom";
 
 const navigation = [
   { to: "/overview", label: "作品总览", icon: House },
+  { to: "/incubator", label: "创意孵化", icon: Lightbulb },
   { to: "/canon", label: "Canon", icon: BookOpen },
   { to: "/planning", label: "故事规划", icon: ShareNetwork },
   { to: "/writing", label: "章节写作", icon: PenNib },

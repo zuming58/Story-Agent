@@ -1,3 +1,545 @@
+# 2026-07-21 人机共创底稿改为五模块独立生成与保存
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**本轮代码与全部回归已完成。下方 2026-07-20 的“三段生成后由 DeepSeek 一次归一化”方案已被本节替代。**
+
+## 本轮完成
+
+- 人机共创起始底稿拆为五个独立模块：故事内核与创作承诺、人物与关系合同、世界与叙事发动机、题材专属台账、叙事边界与待确认问题。
+- 每个模块单独调用 `story_incubator` 绑定模型、单独创建并收敛 ModelRun、单独写入 `IdeationSession.state.kickoffSections`，并拥有独立模块 revision。模型调用期间不持有 SQLite 写事务；写回前重新校验 session revision、故事机会 revision/checksum 和研究报告 checksum。
+- 删除失败率高且不必要的 `research_analyst:ideation-kickoff-normalize` 整批归一化调用。各模块只要求有明确字数上限的短中文讨论材料，不再要求 Kimi 生成大块 JSON，也不再把整份底稿塞入一条聊天消息。
+- 任一模块失败时不保存该模块，也不影响其他已保存模块；页面只在当前模块显示“正在生成”，失败信息明确模块名称，并允许只重试当前模块。
+- 人物数量不设固定值。题材专属台账按作品动态选择：悬疑可使用线索链，玄幻可使用能力与代价，职业文可使用行业流程，科幻可使用技术边界，言情可使用关系阶段；不适用的台账不得硬加。
+- 所有模块仍是待讨论建议，不计入用户讨论轮次，不写入 `confirmedDecisions`，不自动创建或确认 StoryBrief、Canon、规划或正文。StoryBrief 仍要求至少两轮真实用户讨论和后续人工确认。
+
+## 接口与数据
+
+- 删除旧接口 `POST /api/v1/ideation/sessions/{session_id}/kickoff`。
+- 新增 `POST /api/v1/ideation/sessions/{session_id}/kickoff-sections/{section}`，其中 `section` 为 `core`、`characters`、`world`、`genre` 或 `boundaries`；请求继续携带 `expectedSessionRevision`，响应为更新后的 `IdeationSession`。
+- 无数据库迁移、无新表。五个模块保存在既有 `IdeationSession.state_json` 的 `kickoffSections` 字段中；旧聊天消息不迁移、不删除。
+
+## 验证
+
+- Phase 13/14 孵化专项：`uv run --project apps/api pytest apps/api/tests/test_phase13_incubator.py -q`，`20 passed`。
+- Web 单测：`npm run test:web -- --run`，`3 files / 15 passed`。
+- API 全量测试因桌面单命令 10 分钟上限改为三组执行：基础 API `32 passed + 62 passed`、Phase 7–12 `70 passed`、Phase 13/14 `20 passed`，合计 `184 passed`；没有失败。原始 `npm run test` 组合命令因超过 10 分钟被中止，不能单独记为通过，但其 API 与 Web 测试集合已全部由上述拆分命令覆盖通过。
+- `npm run build`：通过，仅有既有 Vite chunk-size warning。
+- `npm run test:e2e` 首次因用户开发 API 已占用 `8765` 被 Playwright 主动拒绝；改用隔离端口 `8767/4175` 和隔离 `.e2e-data` 后，`desktop-1440 10 passed`、`desktop-1280 10 passed`，合计 `20 passed`。
+- `compileall` 与最终 `git diff --check`：通过。
+
+## 已知限制
+
+- 自动测试仅使用 FakeModel，没有调用用户真实 Kimi、DeepSeek、Tavily 或 Firecrawl，也没有消费用户额度。真实 Provider 的每模块输出质量仍需用户在当前已打开的“提刑女官 → 人机共创”页面逐块手动验证。
+- 为避免并发 revision 冲突，页面同一时间只允许生成一个模块；这不会阻止模块按任意顺序生成。
+
+---
+
+# 2026-07-20 人机共创起始底稿
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与专项回归，待提交推送。**
+
+## 2026-07-20 截断修复补充
+
+- 后续真实重试显示 Kimi 的 `world` 与 `characters` ModelRun 均已成功，completion tokens 为 `1462-2451`；失败转为 `IDEATION_KICKOFF_CHARACTERS_INVALID` 和 `INCUBATOR_MODEL_JSON_INVALID`，证明剩余故障是 Kimi 未稳定遵守 JSON 字段合同，而非再次截断。
+- 共创底稿现按双模型职责重构：Kimi K2.6 的三个 ModelRun 仅生成有字数上限的中文创意文本，不再启用 `response_format=json_object`；DeepSeek V4 Pro 通过 `research_analyst:ideation-kickoff-normalize` 将三段材料一次整理为 `IdeationKickoffDraft`。Kimi 负责创意，DeepSeek 负责结构审校。
+- Kimi 任一文本调用返回空内容、`finish_reason=length` 或异常超长时，整份底稿不写入；DeepSeek 整理结果必须通过完整 Pydantic 模式后才原子写入。所有四个 ModelRun ID 会随消息结构状态保留审计引用。
+- 真实 ModelRun 诊断确认：`story_incubator:ideation-kickoff` 调用 Kimi K2.6 时被本地代码错误限制为 `max_tokens=2000`，而此前成功的 Kimi 结构化调用实际使用 `2760-3697` completion tokens。失败调用在 54-71 秒后以 provider `finish_reason=length` 收敛，部分输出长度为 0 或 13；不是网络、鉴权、输入未送达或用户操作问题。
+- 起始底稿现拆为三个独立短 JSON 调用：`ideation-kickoff:world`、`ideation-kickoff:characters`、`ideation-kickoff:boundaries`。每块允许 Kimi 已配置的完整 `4096` 上限，不再人为压低到 2000；三个 ModelRun 全部成功且模式校验通过后才一次性写入底稿。
+- 任何分段返回 `length` 现在会显示精确错误码，例如 `IDEATION_KICKOFF_WORLD_TRUNCATED`，并提示“世界观与连载承诺生成被模型截断；该部分尚未保存”。不会把泛化的 `MODEL_CONTENT_TRUNCATED` 误导为整条流程已写入，也不会写入任何半成品。
+
+## 本轮完成
+
+- 修复“选中故事方向后，人机共创页面空白”的体验缺口：新增 `POST /api/v1/ideation/sessions/{session_id}/kickoff`。用户明确点击“生成共创底稿”后，才会调用 `story_incubator:ideation-kickoff`。
+- 底稿固定涵盖：故事定位、暂定世界观、人物和关系候选、规则/成长/资源体系、核心冲突、前三章承诺、长线发动机、写作边界与待拍板问题。没有等级、法宝或超自然机制的题材必须明确写 `notApplicable`，不得硬编。
+- 底稿为独立的 `IdeationMessage`，结构状态为 `co_creation_kickoff` / `unconfirmed`；不产生用户讨论轮次，不写入 `confirmedDecisions`，不会自动创建 StoryBrief、Canon、规划或正文。用户后续通过正常对话逐项确认后，才可生成 StoryBrief 提案。
+- 同一共创会话只允许一份起始底稿；调用期间没有 SQLite 写事务，写入前重新校验 session、机会和研究报告 revision/checksum。
+- 人机共创台账改用中文含义：已确认决定、待你拍板、Agent 建议、待解决冲突，避免将模型建议误解为已锁定设定。
+
+## Canon 范围
+
+- StoryBrief 被用户接受后，Canon 才以 proposal 形式生成与交叉分析。Canon 的结构化范围为实体（人物、地点、物品、能力/职业等）、关系、可执行规则、世界机制和代价、信息边界、秘密/揭示窗口、写作边界和文风约束。
+- Canon 草稿仍须经完整性检查、独立 Analyzer 交叉校验和用户应用；随后还要三种开篇实验、选中一版、扩写并人工批准前三章，才允许锁定。它不是共创底稿，也不会在本轮自动锁定。
+
+## 验证
+
+- `apps/api/tests/test_phase13_incubator.py`：`20 passed`，覆盖起始底稿的 ModelRun 角色、无确认状态、无用户轮次、StoryBrief 门禁及既有全链路。
+- `npm run build`：通过，仅既有 Vite chunk-size warning。
+- `python -m compileall -q apps/api/src apps/api/tests`、`git diff --check`：通过。
+
+## 下一步
+
+- 本地 API 已在 `127.0.0.1:8765` 重启并健康检查 `200`。用户刷新创意孵化页面后，点“生成共创底稿”，阅读并逐条反馈。
+- 自动测试未调用真实模型；真实调用由用户点击后发生。此前 `1ac71e6` 及本轮后续提交仍待 GitHub 网络恢复后推送。
+
+---
+
+# 2026-07-20 外部创意导入与研究评分卡解耦
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码、外部导入 API 用例与构建，待提交推送。**
+
+## 根因与重构
+
+- 原实现错误地把外部自由创作文本强制转换为三张市场研究评分卡，要求八项评分、证据 ID 和多个故事字段；这使模型必须生成过重 JSON，反复触发 `MODEL_CONTENT_TRUNCATED`。这是产品建模错误，不是用户输入问题。
+- 外部导入现是独立的轻量路径：`research_analyst:external-directions` 只提炼用户文本里实际存在的一到六个方向，每个只需 `title`、`summary` 和 `highConcept`。一个方向保留一个，多个方向分别保留，不再硬凑三张。
+- 导入结果替换同一研究下的旧待选候选；旧卡审计性标为 `superseded` 并隐藏。外部卡在页面明确显示“外部方向 / 待人机共创”，不伪造研究评分或证据覆盖率。
+- 已接受研究仍是 StoryBrief 的上游；外部输入仅代表用户创作偏好，不写入研究证据、Canon 或数据库正文，只保留 checksum 与长度审计。
+
+## 验证
+
+- 外部导入 API 用例：`1 passed`，覆盖“两条外部方向 -> 两张外部候选 -> 再次导入替换旧候选”，并验证原文不回显。
+- 结构修复和 Provider 定向：`4 passed`；`npm run build` 通过，只有既有 Vite chunk-size warning。
+- 合并的定向命令因桌面 124 秒外部时限中断，不作为通过结果记录。
+
+## 下一步
+
+- API 重启后，用户可保持当前外部文本，重新点击“从输入生成方向”。只会进行一次轻量结构分析调用，不再要求三张完整研究评分卡。
+
+---
+
+# 2026-07-20 外部创意导入改走结构分析角色
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与定向回归，待提交推送。**
+
+## 真实诊断与修补
+
+- 最新两次“从输入生成方向”均在首张机会卡阶段由 `Kimi-K2.6` 返回 `content_truncated`，运行时长约 47 秒和 64 秒；这证明短输出预算不足以解决 Kimi 的结构化输出截断。
+- 外部创意导入现改用既有 `research_analyst` 角色。该角色在当前双模型分工中绑定结构分析模型，适合将用户和其他 Agent 打磨后的结果规整为带证据、评分和不确定性的机会卡。
+- 普通“生成 3 个方向”、人机共创、StoryBrief、Canon 和开篇仍使用 `story_incubator` 写作角色，未修改全局绑定或用户模型设置。
+- ModelRun 会明确记录 `research_analyst:external-opportunities[:N]`，保留调用审计和失败诊断；外部输入仍不作为研究事实或证据引用。
+
+## 验证
+
+- 定向 API：`5 passed`，覆盖外部输入角色路由、卡片结构修复、候选替换和流式 Provider。
+
+## 下一步
+
+- API 重启后，用户可保持当前 1076 字符输入不变，重新点击“从输入生成方向”。本轮自动测试未调用真实 Provider。
+
+---
+
+# 2026-07-20 外部创意方向生成的截断收敛
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与定向回归，待提交；前一提交因 GitHub 网络不可达尚未推送。**
+
+## 真实问题与修补
+
+- 用户导入 404 字符外部创意后，输入确实进入模型调用。第一张卡和一次结构修复均成功，但第二张机会卡在约 143 秒后以 `content_truncated` 失败。三张卡需要全部通过才写入，因此旧候选保持不变，未出现半套新结果。
+- 机会卡提示现在禁止世界观、人物小传、推理过程、解释和 Markdown，收紧标题、摘要、核心字段和列表长度，并要求完整 JSON 小于 1200 tokens。
+- 单张机会卡及其语义修复调用的输出预算从 `4096` 降到 `1600`。这只影响轻量候选卡，不影响后续共创、StoryBrief、Canon 或开篇的输出预算。
+
+## 验证
+
+- 定向 API：`5 passed`，覆盖流式机会卡、结构修复、外部导入与替换旧候选。
+
+## 下一步
+
+- API 重启后，用户可使用已保留的外部创意输入重新点击“从输入生成方向”。这会发起新的真实 Kimi 调用；本轮自动测试未消费用户额度。
+
+---
+
+# 2026-07-20 外部创意结果导入入口
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成并通过定向 API、Web、构建与桌面回归，待提交推送。**
+
+## 本轮完成
+
+- 在“故事机会候选”标题右侧新增“导入外部创意”入口。用户可粘贴和其他 Agent 打磨后的题材、人物、冲突、世界观取舍、保留项与禁写项，然后选择“从输入生成方向”。
+- 入口在尚未选定方向前始终显示；已有候选时按钮明确显示为“导入外部创意重做方向”。提交后，旧的待选卡会被审计性标为 `superseded` 并从候选区隐藏，新结果仍只有三张可操作卡，避免混成六张。
+- 外部文本通过现有机会生成接口的 `creativeInput` 交给 `story_incubator`。模型仍必须从已接受研究的证据 ID 中生成三张候选；外部文本仅作为用户创作偏好，不能作为市场事实或证据引用。
+- 原文不写入 StoryOpportunity、Canon 或审计详情；结果仅保存外部输入 checksum，审计事件保存 checksum 与长度。输入失败时页面保留文本，便于修改后重试。
+- 保持三张候选、评分上限、证据归属、revision、事务、人工选择与后续 StoryBrief/Canon 确认门槛不变。
+
+## 接口变化
+
+- `POST /api/v1/research/jobs/{job_id}/opportunities` 新增可选 `creativeInput`，最大 `30000` 字符。
+
+## 验证
+
+- 定向 API：`5 passed`，验证外部输入到模型 payload、结果只保留 checksum、不回显原文、重新导入替换旧待选卡，以及既有机会卡结构修复。
+- Web 单测：`15 passed`；`npm run build` 通过，仅有既有 Vite chunk-size warning。
+- Playwright：隔离 `desktop-1280 10 passed`；`compileall` 与 `git diff --check` 将在提交前再执行。
+
+## 已知限制
+
+- 点击“从输入生成方向”仍会调用已配置的真实 `story_incubator` 模型并消耗额度；本轮自动回归只使用 FakeModel。
+
+---
+
+# 2026-07-20 创意机会卡完整字段合同与单次语义修复
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与定向回归，待提交推送。**
+
+## 问题与修补
+
+- 用户再次触发机会生成后，外壳已能识别，但 `Kimi-K2.6` 返回的卡片仍缺少 `StoryOpportunityDraft` 必填字段。最近的两次 Provider 调用均成功完成并有 token 统计，故障在结构语义校验之后，不是连接或超时。
+- 机会生成提示现在给出完整、逐字段的 JSON 合同：所有故事字段、八个 `scoreComponents` 键、证据 ID、覆盖率、置信度和不确定性均不可省略。
+- 若第一次返回仍缺字段，系统会将该 ModelRun 标为 `opportunity_schema_invalid`，只保存字段路径等结构诊断、不保存模型正文，然后发起一次独立的 `story_incubator:opportunities:N:repair` 流式修复调用。修复调用只能使用同一研究的允许证据 ID。
+- 修复结果仍必须通过 `StoryOpportunityDraft`、评分上限、证据归属、revision 和事务校验。第二次仍不完整则显式失败，不会生成模板卡、固定评分或半套候选。
+
+## 验证
+
+- 定向 API：`5 passed`，包含“首次返回不完整卡 -> 一次修复 -> 三张完整机会卡”的端到端假模型用例，以及外壳兼容和流式 Provider 回归。
+- `compileall` 与 `git diff --check` 通过。
+
+## 下一步
+
+- API 重启后，用户刷新创意孵化页并再次点击“生成 3 个方向”。这是一次真实 Kimi 调用；本轮开发没有主动调用用户 Provider。
+
+---
+
+# 2026-07-20 真实创意机会卡结构兼容修补
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成代码与定向回归，待提交推送。**
+
+## 问题与修补
+
+- 用户点击“生成 3 个方向”时收到 `STORY_OPPORTUNITY_MODEL_INVALID`。只读取了安全的 ModelRun 元数据：`Kimi-K2.6` 在约 66.8 秒内成功完成流式调用，记录 `430` prompt tokens、`2097` completion tokens，故障不属于网络、鉴权、超时或流式内容为空。
+- 根因位于机会卡外层 JSON 形状：旧实现只接受 `{"opportunities":[card]}`，实际模型的等价单卡对象外壳会被过早拒绝。
+- 提示现在明确要求唯一外壳 `{"opportunities":[{...}]}`，并明确禁止裸对象、单数键、文本和 Markdown。后端仍兼容已知的等价单卡外壳：对象型 `opportunities`、`opportunity`、`storyOpportunity`、`candidate` 和具备机会卡关键字段的裸对象。
+- 兼容只处理外壳；内层卡片一律通过 `StoryOpportunityDraft` 模式验证，随后继续执行既有的固定评分上限、证据 ID、跨研究归属、revision、事务与人工选择校验。多个候选或缺字段仍明确失败，不会写入半套机会。
+
+## 验证
+
+- 定向 API：`4 passed`，覆盖流式 Provider、紧凑机会快照和五种单卡外壳兼容。
+- `compileall` 与 `git diff --check` 通过。完整 Phase 13 专项再次受到桌面 124 秒命令上限中断，未记为通过；此前完整假模型链路已通过。
+
+## 下一步
+
+- API 重启后，用户可直接再次点击“生成 3 个方向”。这会消耗一次真实 Kimi 调用；本轮开发未主动发起该调用。
+
+---
+
+# 2026-07-20 创意孵化链路收敛：人机共创入口与流式模型完成
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成本轮修补并通过假模型全链路、Web、构建、双桌面 Playwright 回归；待提交推送。**
+
+## 本轮完成
+
+- “故事机会”选择成功后，界面自动进入第 4 步“人机共创”。这只改变当前页面阶段；不会自动创建共创会话、生成 StoryBrief 或越过任何人工确认。
+- 人机共创的实际对话入口是中央面板“和故事策划 Agent 讨论”：发送第一条意见时才创建会话。至少两次用户消息后，才允许生成 StoryBrief 提案；StoryBrief、Canon、开篇选择、三章人工批准和 Canon 锁定仍全部要求显式人工操作。
+- `story_incubator` 的机会、共创回复、StoryBrief、Canon、Canon 修复、三种开篇和开篇扩写均使用现有 SSE 聚合完成路径。模型调用期间仍不持有 SQLite 写事务，输出依旧通过 JSON、evidence、revision 和上游 checksum 校验后才写入。
+- 新增回归断言：完整“调研 -> 机会 -> 共创 -> StoryBrief -> Canon -> 三开篇”假模型链中，所有 `story_incubator:*` 调用必须显式使用流式完成；非创意角色的研究分析与双评审保持原有独立调用。
+
+## 验证
+
+- API：`uv run --project apps/api pytest apps/api/tests/test_phase13_incubator.py apps/api/tests/test_model_provider.py`，`20 passed`。
+- Web 单测：`15 passed`；`npm run build` 通过，只有既有 Vite chunk-size warning；`compileall` 通过。
+- Playwright：`desktop-1280 10 passed`、`desktop-1440 10 passed`，使用隔离端口和临时测试数据。未拆分的 `npm run test:e2e` 曾被桌面 124 秒命令上限中断，不能视为通过；两次拆分回归完整通过。
+
+## 已知限制
+
+- 流式协议避免了等待完整 JSON 才收到首个响应所导致的 60 秒静等，但不能保证上游模型或网络自身永不失败。尚未用用户真实 Kimi/DeepSeek 发起本轮完整创意链测试，以免擅自消耗额度；应由用户从“选这个方向”开始手动验证一次。
+
+---
+
+# 2026-07-20 笔记本可读性小修：创意孵化工作台
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成创意孵化页可读性调整和故事机会模型超时收敛；未改变三栏结构、确认链、证据归属或业务数据。待提交。**
+
+## 本轮完成
+
+- 创意孵化工作台保留原有“墨曜指挥舱”的紧凑布局和金色状态层级；调高步骤导航、阻断提示、面板标题、表单标签、调研进度、证据抽屉、人工报告入口、故事机会、共创记录、StoryBrief、Canon 与开篇实验等阅读型文字。
+- 将原先大量的 `6-9px` 辅助文字提高到适合笔记本正常观看距离的 `9-12px`，证据正文、共创消息和开篇正文提高至 `11px`；同时提高低对比度灰字亮度，未改为纯白或改变语义色。
+- 在 `1280x800` 视口人工检查：无整体横向溢出，三栏壳体、固定右侧 Story Agent 与孵化页的响应式三行步骤导航保持正常。
+- 修复“生成 3 个方向”的 `MODEL_TIMEOUT` 与 `MODEL_CONTENT_TRUNCATED`：调用不再发送完整证据摘录与项目元数据，只发送可审计的证据 ID、短 claim、类型、置信度和研究发现；三个候选拆为三次独立结构化调用，每次只生成一个方向并使用模型配置允许的完整 `4096` 输出预算，关闭隐式 Provider 重试。三个结果全部成功后才在同一短事务中写入，任何一步失败都不会留下半套候选；证据 ID、评分上限、revision 与人工选择门槛保持不变。
+- 真实 ModelRun 诊断确认火山 Coding Plan 的 `Kimi-K2.6` 在机会生成中以非流式整包响应连续约 `61` 秒后超时，且没有返回 token；这不是上下文容量不足。机会生成现使用现有 OpenAI-compatible SSE 流式通道聚合最终 JSON：推理/输出事件会保持连接活跃，但推理内容不会显示或落库；最终仍只有完整 JSON 通过验证后才写入。
+- 故事机会明确收敛为“方向卡”，不是提前生成 StoryBrief 或 Canon：每项只要求暂定名称、两三句故事概况、一句高概念和极短的待定比较字段；禁止在此阶段生成完整世界观、人物小传、全书大纲、章节规划或结局。候选卡 UI 只展示名称、概况、分数与证据覆盖，具体人物、冲突和世界规则留给下一步人机共创。
+
+## 验证
+
+- Web 单测：`3 files / 15 passed`。
+- `npm run build`：通过；仅有既有 Vite chunk-size warning。
+- Playwright：使用临时隔离端口 `8767/4175` 运行 `desktop-1280`，`10 passed`；未重启用户的 `8765/5173` 服务，也未使用正式 `.data`。
+- `git diff --check`：通过。
+- API 专项：`test_story_opportunities_use_a_compact_model_snapshot` 与完整研究到开篇主流程定向用例通过，验证紧凑输入快照、三次独立 `4096` token 调用、方向差异上下文、无重试和原有权威链。
+- Provider 专项：流式完成聚合测试通过，验证最终结构化 JSON、token 元数据与既有 SSE 重试边界。
+- 完整 `npm run test` 与全双规格 `npm run test:e2e` 分别超过桌面命令 `124` 秒上限而中止，未记为通过；本轮 UI 相关 Web 单测、构建、1280 专项回归均通过。
+
+## 已知限制
+
+- 此轮仅覆盖创意孵化页最密集的文字区域；其他工作台仍保留历史紧凑字号，后续应按真实用户反馈逐页调整，避免全局粗暴放大。
+- 若紧凑机会生成仍在当前 Provider 超时，用户可在“模型设置”将火山 Provider 超时从默认 `30` 秒提高到 `60` 秒后再手动重试；不要自动重试或自动接受任何候选。
+
+---
+
+# 2026-07-20 真实用户调研恢复：综合报告与火山模型稳定性
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已完成本地验证和一次用户授权的真实火山模型复测，待提交。未调用 Tavily 或 Firecrawl。**
+
+## 本轮完成
+
+- 调研任务新增 `GET /api/v1/research/jobs/{job_id}/queries`：逐条返回调研视角、查询文本、运行状态、结果数和安全错误码，不返回 API Key 或正文。
+- Tavily HTTP 错误现在明确分类：`401/403 -> SEARCH_AUTH_FAILED`，`429 -> SEARCH_RATE_LIMITED`，其他 HTTP 状态安全显示为 `SEARCH_PROVIDER_FAILED (HTTP status)`；搜索异常同时落到对应 `ResearchQuery`，不再只显示空白计数。
+- 创意孵化调研台新增运行轨迹，活动任务每 2.5 秒刷新；显示当前阶段、搜索结果、发现来源、抓取失败与每条查询状态。右侧 Story Agent 没有被伪装成调研日志。
+- 人工入口改为“导入外部综合调研报告”：用户可一次粘贴其他 Agent 或自己完成的完整调研报告，不再要求手工按六个视角拆分。`POST /api/v1/research/jobs/{job_id}/manual-materials` 将其保存为 `integrated_report` 来源版本；`POST /api/v1/research/jobs/{job_id}/analyze-manual-materials` 才会发起已绑定研究模型的证据抽取与报告分析，不会调用 Tavily/Firecrawl。
+- 综合报告保留来源、版本、checksum、revision、审计和项目隔离。模型必须从该报告抽出至少一条可追溯证据才能进入“等待人工确认”；仍必须手动接受研究报告，不能直接跳到故事机会。
+- 火山 Coding Plan 连接测试成功，`research_analyst` 确认绑定 `DeepSeek-V4-Pro`。真实失败记录表明连接正常但旧证据抽取会在 60 秒超时后重试一次，或被过紧输出预算截断。
+- 新增 `POST /api/v1/models/{model_id}/test` 模型专用探针。它显式发送配置的 `model` ID、要求固定 JSON、不会创建项目数据或发送用户文本。真实探针均成功：`DeepSeek-V4-Pro -> deepseek-v4-pro`（约 3.0 秒），`Kimi-K2.6 -> kimi-k2.6`（约 3.2 秒）。Provider 的 `/models` 列表首项不能代表实际调用模型，后续应以该专用探针或 `ModelRun.modelId` 为准。
+- 综合报告现不再调用逐句原文定位的 `research_analyst:evidence`。它以明确标识的外部推断证据进入 `research_analyst:report`，报告归纳限制为最多两项竞品和四条发现，保留 `4096` 输出预算；网页抓取来源仍使用原有逐句证据抽取链。
+- 用户授权的最终复测：任务 `fc27fcad-5983-4187-b7bb-6fa2d43a8e86` 在约 40 秒内完成，状态为 `awaiting_review`，`integratedManualReportCoverageMet=true`，未自动接受报告。
+- 修复“导入并分析报告”的前端错误语义：报告保存成功后，后续模型分析失败不会再显示笼统 `NETWORK_ERROR`；页面明确提示“报告已成功导入，可重新分析”，并锁定重复提交。`STARTUP_RECOVERY` 也明确说明服务重启只中断分析，材料仍在。
+- `START-STORY-AGENT.cmd` 改为隐藏启动唯一 API 与 Web 进程，不再用 `cmd /k` 创建任务栏常驻窗口。Playwright 回归继续使用隔离端口，不能重启用户正在使用的 `8765/5173` 服务。
+
+## 用户当前调研判断
+
+- 截图中“查询 12、来源页面 0、证据片段 0、`insufficient_evidence`”表示搜索尝试累计了 12 条，但没有成功入库来源，不表示已抓取 12 个页面。
+- 这是搜索 Provider 产出问题，不是研究模型或写作模型“太强”造成的。刷新本地页面并再次操作后，运行轨迹会显示具体失败码；不要盲目反复换 Key 或点击恢复。
+- 使用人工入口时，直接粘贴一整份外部综合调研报告。点击“导入并分析报告”后，模型会拆解其中的读者偏好、竞品、平台趋势、开篇建议和不确定性；随后人工查看并接受报告。
+
+## 验证
+
+- API 新增用例：单份 `integrated_report` 经模型分析后进入人工研究确认、只走 `research_analyst:report` 而不走逐句证据抽取，且接受操作仍为显式门槛；该定向用例通过。完整 Phase 13 专项在桌面 124 秒命令上限下中止，未将超时记为通过。
+- Web 单测：`3 files / 15 passed`。
+- Build：通过；仅有既有 Vite chunk-size warning。
+- Playwright：隔离端口下 `desktop-1440 10 passed`、`desktop-1280 10 passed`。
+- `compileall` 和 `git diff --check`：通过；仅保留 Windows LF/CRLF 提示。
+
+## 已知限制
+
+- 尚未重新发起用户真实调研，避免消耗额度。刷新到本轮 API 后，应先读取运行轨迹再决定是否由用户点击“恢复任务”。
+- 人工报告分析会调用已绑定的研究模型，因此仅在用户明确点击“导入并分析报告”时执行；它不会自动接受研究报告。
+- 外部综合报告的结论属于用户提供的二手研究材料，应以 `inference`/`opinion` 和不确定性呈现，不应当被当作已验证的网页事实。
+- `npm run test` 的完整 API 回归此前受桌面命令 124 秒上限影响，本轮已完成变更相关 API 专项、Web 全量、构建与双规格 Playwright，未将超时误记为通过。
+
+---
+
+# 2026-07-19 真实用户测试小修：孵化题材、章节继承与调研边界
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**题材方向和计划章节问题已修复；真实调研仍使用 Tavily + Firecrawl + 已绑定研究模型，OpenCLI/OpenClaw 尚未接入研究 Provider。**
+
+## 用户反馈与修复
+
+- 移除创意孵化研究目标中硬编码的“现代中式悬疑”；题材方向改为自由文本，明确支持“古代悬疑探案 + 女性成长 + 言情”等混合题材。
+- 新作品尚无研究 Brief 时，长篇计划章节自动继承 `project.totalChapters`，不再固定显示 120；短篇保持按目标总字数填写。
+- 已保存 Brief 与作品计划章节不一致时不静默覆盖，页面显示“作品计划为 N 章”和“同步”按钮；同步只更新表单，用户保存后仍通过现有 revision 机制创建新 Brief 版本。
+- 研究目标页显示既有 `includedDomains` / `excludedDomains` 能力。`includedDomains` 的真实语义是限定域名：留空广搜，填写后只允许这些网站；排除域名继续过滤来源。
+- 市场调研页明确职责：Tavily 发现公开页面，Firecrawl 提取可访问正文，DeepSeek/绑定研究模型归纳证据；登录、付费墙和反爬内容不保证可读。
+- 真实首次调研暴露 `RESEARCH_QUERY_PLAN_INVALID`：模型返回了合法 JSON，但缺少必需的 `queries` 数组。查询规划提示现已给出精确 JSON 结构；结构校验失败时增加一次有独立 ModelRun 的 schema repair，修复后仍严格校验六个视角，绝不回退到固定模板查询。
+- 查询规划、查询不完整和研究密钥缺失错误在页面显示中文操作提示；已有失败任务可在后端更新后直接点击“恢复任务”。
+- Playwright 的 API/Web 端口支持环境变量覆盖，真实用户服务占用 `8765/5173` 时可用隔离端口和临时数据目录完成回归，不关闭用户页面、不碰正式 `.data`。
+- 用户手册同步题材、章节、域名和 Provider 边界。
+
+## 调研能力边界
+
+- 当前“开始真实调研”只调用 Tavily 与 Firecrawl；本机安装 OpenCLI/OpenClaw 不会被按钮自动使用。
+- 当前可以研究知乎、小红书、晋江、起点等平台的公开且 Provider 可访问页面、公开榜单、书籍简介、公开评论和行业资料；不能承诺获取登录后、付费或反爬保护内容。
+- 若后续增加浏览器深读，应作为显式的本地研究 Provider 开发，并补齐会话授权、验证码停止、来源版本冻结、证据引用、revision、SSRF、跨作品隔离、审计和确定性测试，不能绕过现有研究证据链。
+
+## 测试
+
+- Web 单测：`3 files / 15 passed`，覆盖 1000 章继承、混合题材输入和旧 Brief 显式同步。
+- Build：通过，仅有既有 Vite chunk-size warning。
+- API 专项：`test_phase13_incubator.py` 为 `11 passed`，新增“合法 JSON 缺少 queries 时结构修复成功”和“修复后仍不完整时明确失败”回归；`test_projects.py + test_model_provider.py` 为 `5 passed`。
+- Playwright 全量：使用隔离端口与临时数据目录，`desktop-1440 10 passed`、`desktop-1280 10 passed`，共 `20 passed`。
+- 根 `npm run test`：API 长回归在桌面 124 秒命令上限被中止，无失败断言；继续扩大并行度会造成 Windows SQLite/文件系统争用，因此未把超时误记为通过。Web 单测与相关 API 专项均另行完整通过。
+- `git diff --check`：提交前执行；只有既有 Windows LF/CRLF 提示。
+
+## 已知限制
+
+- 用户首次真实尝试已调用研究规划模型，但在 Tavily 搜索前因查询计划结构失败，查询/来源/证据均为 0；修复后尚未由用户点击“恢复任务”验证真实服务。自动测试未调用外部服务、未消费用户额度。
+- OpenCLI/OpenClaw 混合调研是后续独立功能，不属于本次小修的已完成能力。
+
+---
+
+# 2026-07-19 真实用户测试小修：设置入口与齿轮语义收敛
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已修复并完成双分辨率回归。顶部齿轮不再误创建备份；Provider 预设与自定义入口已归到左侧 Provider 区。**
+
+## 用户反馈与根因
+
+- 模型设置页顶部“DeepSeek 官方 / 火山 Coding Plan”按钮用于创建预设，而左侧列表用于选择 Provider，但两者位置分离且预设已存在时按钮仍常驻，表现为重复入口。
+- 顶栏齿轮使用 `GearSix` 图标和“创建作品备份”行为，用户按“设置”理解后会意外创建 ZIP；备份本已有安全审计页面和明确按钮，这是错误的交互映射。
+
+## 修复
+
+- 移除模型设置页标题区的预设按钮，把“快速添加 Provider”放到左侧 Provider 列表下；添加后统一进入上方列表，自定义 Provider 也明确说明添加位置。
+- 已存在的 DeepSeek/火山预设显示绿色“已添加”并禁用，避免无意义重复点击；列表仍负责选择和编辑，不再混淆创建与选择。
+- 顶栏齿轮改为“打开安全与系统管理”，导航至 `/settings?tab=safety`；不再调用备份 API。
+- 设置分栏改为 URL 权威：左侧“模型设置”默认打开模型配置，齿轮和安全审计标签打开 `tab=safety`，刷新后保持当前分栏。
+- 创建备份只保留在安全审计页面的“创建备份”按钮，恢复、审计事件和模型调用诊断仍集中在该页面。
+- 用户手册同步 Provider 与齿轮语义。
+
+## 验证
+
+- Web 单测：`3 files / 14 passed`，新增齿轮导航且不发送备份 POST 的回归。
+- Build：通过，仅有既有 Vite chunk-size warning。
+- Playwright 定向：1440/1280 共 `2 passed`，验证预设位置、齿轮导航和备份数量不变。
+- Playwright 全量：`desktop-1440 10 passed`，`desktop-1280 10 passed`，共 `20 passed`。
+- 根 `npm run test`：API 长回归在桌面 124 秒上限被中止，无失败断言；本轮未修改后端，当前后端已在上一检查点完成 `172 passed`，本轮 Web 单测另行完整通过。
+- `git diff --check`：提交前执行。
+
+## 已知限制
+
+- 顶栏“工作记录”图标当前仍没有正式业务页面，本轮未扩大范围处理；后续应在有明确工作记录需求时接入审计时间线或移除，不能继续保留无行为图标。
+- 本轮未创建、删除或修改任何用户备份；截图中的已有备份由旧齿轮行为产生，仍保留在用户 `.data`，未擅自删除。
+
+---
+
+# 2026-07-19 真实用户测试小修：火山 Coding Plan 双模型配置
+
+当前分支：`agent/model-backed-story-incubator`
+
+状态：**已实现、已完成本地回归，等待用户填写火山引擎 Coding Plan 密钥并做一次最小连接测试。未调用真实 Kimi、DeepSeek 或火山引擎。**
+
+## 本轮完成项
+
+- 模型设置页新增“火山 Coding Plan”内置 Provider 预设，Base URL 固定为用户提供的 OpenAI 兼容地址：`https://ark.cn-beijing.volces.com/api/coding/v3`。
+- 预设创建两项可单独绑定的模型记录：`Kimi-K2.6`（正文）与 `DeepSeek-V4-Pro`（结构审校）；预设幂等，重复点击只复用 Provider 和补齐缺失模型，不保存或回显 API Key。
+- 设置页新增“正文与修订模型 / 结构与审校模型”双模型分工：Kimi 绑定 `chinese_writer`、`reviser`、`story_incubator`；DeepSeek 绑定 `architect`、`planner`、`fact_extractor`、`logic_reviewer`、`continuity_reviewer`、`story_editor`、`style_reviewer`、研究、读者和开篇评审角色。
+- “套用双模型分工”走新的原子批量绑定接口，先验证所有角色与模型，再在一个 catalog SQLite 事务中更新；`Embedding` 不会被错误绑定到文本模型，保留给独立向量模型。
+- 角色下拉框现在加载全部 Provider 的模型，不再只能选择当前 Provider 或已绑定模型；Kimi 与 DeepSeek 可以来自同一个火山 Provider。
+- 用户手册已同步 Coding Plan、Kimi K2.6 与 DeepSeek V4 Pro 的配置流程。
+
+## 接口变化
+
+- `POST /api/v1/model-providers/volcengine-coding-plan-preset`：创建或补齐火山 Coding Plan Provider 与两项模型记录。
+- `PUT /api/v1/model-role-bindings/bulk`：请求体 `{ "modelIds": { "role": "model-id" } }`，原子更新指定角色绑定并保留各角色已有费用上限。
+
+## 用户下一步
+
+1. 打开“模型与费用设置”，点击“火山 Coding Plan”。
+2. 在 Provider 中填写火山 API Key，点击“测试连接”。密钥只写入 `SecretStore`，不会进入 SQLite、API 响应、日志或 Git。
+3. 选择 `Kimi K2.6（正文）` 与 `DeepSeek V4 Pro（结构审校）`，点击“套用双模型分工”。
+4. 按 Coding Plan 实际抵扣/账单填写两项模型价格，再启用自动托管；价格未知时系统应继续阻断自动托管，避免费用台账伪造为零。
+5. 先用一部新测试作品进行连接测试、一个开篇与一章手动试写；不得用《夜巡人》消耗真实额度。
+
+## 验证结果
+
+- API：16 个测试文件拆分全量回归，`172 passed`；`test_model_provider.py + test_model_config.py` 为 `11 passed`，覆盖 Coding Plan 预设、幂等、无密钥回显和双模型原子绑定。
+- Web 单测：`3 files / 13 passed`，覆盖跨 Provider 选择两项模型与批量角色映射。
+- Build：通过；仅现有 Vite chunk-size warning。
+- Playwright：`desktop-1440` 9 passed，`desktop-1280` 9 passed，共 18 passed。
+- `npm run test` 与未拆分 `npm run test:e2e` 均因桌面 124 秒命令上限中断；上述拆分运行完整覆盖同一套 API/Web/E2E 测试。
+- `git diff --check`：通过，仅有既有 Windows LF/CRLF 提示。
+
+## 已知限制
+
+- 尚未使用用户的火山 API Key 对真实 `/models` 或对话请求做连接测试；模型 ID 与 Base URL 使用用户提供的 Coding Plan 页面信息，必须以“测试连接”实际响应为准。
+- Coding Plan 抵扣无法从 OpenAI 兼容响应推导精确每百万 Token 单价，因此预设不擅自填写 `0`；自动托管前由用户补充实际价格/等效预算。
+- 本轮只增加 Provider 和角色分工，不改变 Canon、章节候选隔离、revision、事务或自动审批规则。
+
+---
+
+# 2026-07-19 第十四阶段最终审计与创意孵化 UI 交付
+
+当前分支：`agent/model-backed-story-incubator`
+
+审计基线：`081a01a`；另一台电脑交付：`cb73f21`、`a30e363`。
+
+状态：**第十四阶段后端深度审计、修复、创意孵化 UI、双分辨率回归和浏览器验收均已完成。代码已达到用户真实 Provider 冒烟测试条件；在用户完成一次真实市场调研与开篇选择前暂不合并 `main`。**
+
+## 最终接力入口（2026-07-19）
+
+- 面向下一台电脑/Codex 的最终交付快照：`FINAL-HANDOFF.md`。
+- UI 颜色、字体、三栏外壳、组件状态、响应式、Agent 和视觉验收规范：`docs/ui/UI-DESIGN-SYSTEM.md`。
+- 面向普通用户的图文操作手册：`docs/Story-Agent-使用手册.html`。
+- 后续以真实用户测试、小修、调试、易用性和回归测试为主；另一台电脑现在可以修改 UI，但必须遵守正式 UI 规范。
+- 当前完整分支仍是 `agent/model-backed-story-incubator`；`main` 只合并到第七阶段，接力不得从 `main` 开始。
+
+## 面向用户的完整操作手册（2026-07-19）
+
+- 新增 `docs/Story-Agent-使用手册.html`，这是可直接双击浏览的非 Markdown 手册；配套 9 张当前真实页面截图位于 `docs/assets/user-guide/`。
+- 手册按普通用户实际顺序覆盖：第一次使用、开发状态、作品总览、创意孵化、Canon、故事规划、章节写作、质量中心、自动托管、模型设置与安全审计、右侧故事 Agent、常见阻断和《夜巡人》后续测试。
+- 明确标注“故事状态”和“短剧制作”仍为占位/暂缓模块，避免把页面入口误认为正式功能。
+- 已解释现场最容易误解的状态：临时书名与后续改名、`第 6—6 章` 的范围含义、候选稿与正式提交的区别、质量按钮消失、旧 `superseded` 问题、修订上限与未收口任务。
+- HTML 浏览器验收：13 个内容章节、9/9 图片加载成功、1440 宽度无横向溢出、无脚本或控制台错误；支持左侧目录、全文模块搜索、打印/另存 PDF和直接打开本地应用。
+
+前序安全检查点：`ac921e8`；主要审计修复提交：`49a96ed`。本节最终中文可用性修复将在紧随其后的提交中落盘。
+
+## 真实用户测试热修：新建作品与改名（2026-07-19）
+
+- 用户现场反馈“书名尚未想好却必须先填写”和“创建并开始构思点击后没有反应”。后端日志确认旧界面在冷启动建库期间没有 pending 状态，也没有阻止重复提交；用户的多次点击因此真的创建了多部空白作品。
+- 新建作品现在允许书名留空，提交时生成带时间的“未命名作品”临时名称；界面明确说明书名可在完成创意讨论后修改。
+- 创建期间按钮立即显示“正在创建，请稍候…”，取消、关闭和再次提交均被锁定；前端另有同步 ref 防止同一渲染帧内的双击竞态。
+- 创建成功后先把返回结果写入 React Query 并立即跳转 `/incubator`，作品列表后台刷新不再阻塞导航；失败时在弹窗内显示中文错误，不再表现为静默无响应。
+- 作品卡片新增“修改书名”铅笔按钮，调用既有 `PATCH /api/v1/projects/{project_id}`。改名只更新作品显示名称、项目元数据和 `project.json`，不移动稳定目录，不影响 Canon、规划、章节和历史记录。
+- 后端创建顺序调整为“完整迁移/初始化项目库 → 写项目文件 → 最后发布 catalog 行”。未来即使建库过程中断，也只会留下带 `.failed-create` 的未发布诊断目录，不会再让半迁移项目阻断整个应用启动。
+- 本次现场重复提交产生的 25 部 `currentChapter=0` 空白“测试作品”仍被保留，未擅自删除。清理必须得到用户明确确认；正式《夜巡人》与演示项目没有被改动。
+- 一部因服务重启时仍在迁移而中断的空白“测试作品”已在验证无业务行后修复；修改前备份保存在其 `.data` 项目目录内，未进入 Git。
+- 验证：项目 API 专项 `4 passed`；Web 单测 `12 passed`；Web build 通过（仅既有 chunk-size warning）；新增 Playwright“留空创建一次并稍后改名”在 1440×1024 与 1280×800 均通过（`2 passed`）。
+
+## 本检查点新增内容（2026-07-19）
+
+- 创意孵化页面已补齐墨曜指挥舱 CSS、窄屏布局、阶段卡片、阻断条和研究任务恢复区；未改变既有页面设计令牌。
+- 刷新页面后，研究 Brief 表单从 SQLite 权威版本恢复，避免默认值覆盖已保存目标。
+- 研究失败、取消或密钥缺失时，可在页面安全补录/轮换 Tavily 与 Firecrawl 密钥后恢复；完整密钥仍只进入 `SecretStore`，不回显、不落库。
+- 人机共创必须至少完成两轮用户输入后才能生成 StoryBrief，并在模型调用前阻断，避免浪费模型费用。
+- 新建正式作品和空白作品入口改为先进入 `/incubator`；作品总览在 Canon 前新增“完成创意孵化”步骤。
+- 补齐 Phase 14 五个模型角色在公共类型和模型设置中的展示：市场调研规划、研究证据分析、故事创意孵化、目标读者模拟、开篇编辑评审。
+- 孵化就绪检查新增五角色绑定、Provider/密钥可用性和连接测试校验，并给出可点击的模型设置修复入口。
+- Canon 分析交叉检查改为同时阻断“缺失项”和“意外新增项”；固定模板残留检查改为区分通用类型词与多个/显著专有残留，减少误报。
+- Web 单测已扩展孵化入口和模型角色显示；Playwright 已加入孵化六阶段路径并调整新建作品落点。
+- API 全量回归已完成：`169` 项收集并运行至 `100%`、进程退出码为 `0`，无失败输出；仅有既有 SQLAlchemy/Python 3.13 弃用警告。
+- 最新 Phase 14 专项测试通过（进程退出码 `0`）；Web 单测 `3 files / 12 passed`；`npm run build` 通过，仅有既有 Vite chunk-size warning。
+- Playwright 全量 `16 passed`（1440×1024、1280×800 各 8 条主流程）；最终中文状态调整后，创意孵化定向回归 `2 passed`。
+- 浏览器验收确认两个目标宽度均无横向溢出；1280 宽度自动折叠右侧 Agent，不遮挡表单。审计中发现的英文错误码/阶段名已改为中文任务名称和明确修复提示。
+
+## 已完成的审计与修复
+
+- 研究模型调用已纳入 `ResearchJob` 费用上限，并在每次模型/外部调用前复核取消、运行时和 Brief 漂移，外部调用期间不持有 SQLite 长事务。
+- 报告的事实、推断和观点均限制为当前任务证据；事实必须有引用，推断/观点必须带不确定性，不再允许跨任务 evidence ID。
+- 覆盖率改为从“查询视角 → 来源 → 证据”真实计算，六类研究视角和最少来源类型缺失时不能伪装成充分证据。
+- 故事机会和共创状态中的 evidence ID 必须属于冻结的当前研究任务；跨任务引用会被拒绝。
+- Canon 改为 Architect 生成、独立 `research_analyst:canon-analyzer` 分析、确定性交叉检查、最多一次修复重试；空结构化实体/规则、缺故事内核/冲突/边界均不能通过。
+- 开篇实验增加章节字数范围、三方案差异度、完整评审分数/取值范围和 finding 定位校验。
+- 新增故事机会及待处理 StoryBrief 提案列表接口，刷新页面后能恢复业务状态。
+- 研究任务创建可安全接收 Tavily/Firecrawl 密钥并写入 `SecretStore`；API、数据库、fingerprint 和日志不返回完整密钥。
+- Phase 8 应用孵化 Canon 时重新执行通用 readiness，避免旧提案绕过新校验。
+- 已补 Phase 14 专项回归测试并在最终代码上通过；密钥写入、轮换、模型角色就绪、两轮共创和跨任务证据隔离均有回归覆盖。
+
+## 已落盘的 UI
+
+- 新增 `/incubator` 路由、侧栏“创意孵化”入口和 `StoryIncubatorPage.tsx`。
+- 页面已串联六步真实流程：研究目标、市场调研、故事机会、人机共创、StoryBrief、Canon 与三开篇实验。
+- React Query 读取 SQLite 权威数据，业务状态不写入 `localStorage`；页面刷新使用新增列表接口恢复。
+- 固定右侧 Story Agent 已增加创意孵化作用域与“检查方向 / 整理决策 / 比较开篇”动作。
+- 已为 `.incubator-*` 组件补齐墨曜指挥舱 CSS 和响应式布局，并完成 1440×1024、1280×800 的最终交互验收。
+- 孵化阻断项不再暴露英文错误码；模型、StoryBrief、Canon、开篇和文风基线均显示中文任务与下一步。
+
+## 用户真实测试顺序
+
+1. 在“模型设置”绑定并连接测试五个孵化角色；DeepSeek 可复用同一 Provider/模型，但角色必须完整绑定。
+2. 新建一部正式作品；系统应自动进入“创意孵化”，不要从 Canon 或章节写作开始。
+3. 填写研究目标，在“市场调研”安全输入 Tavily 与 Firecrawl 密钥并开始真实调研。
+4. 接受研究报告，比较并选定一个故事机会；与故事策划至少真实讨论两轮。
+5. 生成并人工确认 StoryBrief，生成 Canon 候选并检查阻断项。
+6. 应用 Canon 草稿，生成三个开篇，选择愿意继续读的方向并扩写/批准三章。
+7. 将问题按“系统 Bug、模型输出、调研证据、故事吸引力”分类反馈；不要继续消耗《夜巡人》失败样本的费用。
+
+## 当前未验证项与严格边界
+
+- 尚未用真实 Tavily、Firecrawl、DeepSeek 完成一次端到端人工孵化；自动测试必须继续使用确定性 Provider，不能消费真实额度。
+- 不修改 `.data`、API Key、Windows Credential Manager 中既有密钥、夜巡人正文和用户正式作品。
+- 不修改已有页面的设计风格或视觉快照；UI 只在当前电脑完成。
+- 第十四阶段合并条件：用户完成真实 Provider 冒烟测试、确认孵化 UI 可理解，并至少选出一个愿意继续阅读的开篇方向。
+
+---
+
 # 2026-07-17 第十三阶段重制交接：市场研究与故事孵化
 
 当前分支：`agent/general-story-incubator-foundation`
@@ -915,3 +1457,78 @@ uncertainty and no-imitation constraints. Keep provider calls outside SQLite
 write transactions and retain the current proposal/approval gates.
 
 ---
+# 2026-07-18 Phase 14 handoff: model-backed story incubator
+
+Current branch: `agent/model-backed-story-incubator`
+
+Base commit: `081a01a` (`agent/general-story-incubator-foundation`, Phase 13
+GPT-5.6 audit fixes).
+
+Status: **Phase 14 backend plan is ready for the other computer. No Phase 14
+implementation has started on this branch.**
+
+Authoritative plan:
+`docs/plans/PHASE-14-MODEL-BACKED-STORY-INCUBATOR.md`
+
+Copy/paste prompt for the other Codex:
+`docs/plans/PHASE-14-OTHER-CODEX-PROMPT.md`
+
+Scope split:
+
+- The other computer implements only the model-backed backend and tests.
+- The current computer owns all Phase 14 UI, CSS, design tokens, page components
+  and visual snapshots after the backend returns for audit.
+- The other computer must not use real provider credentials or touch `.data`
+  and must not continue the Night Watch manuscript.
+- GitHub is the code authority. Do not work on this branch simultaneously from
+  both computers.
+
+The next audit must treat deterministic Phase 13 prose and scores as scaffolding,
+not as a fallback. A model failure must remain a visible failure. The opening
+human gate added in `081a01a` must remain intact: selection alone is insufficient;
+all three experimental chapters require explicit approval before StyleBaseline
+creation and incubation Canon locking.
+
+---
+# 2026-07-19 Phase 14 模型驱动故事孵化器后端交接
+
+当前分支：`agent/model-backed-story-incubator`
+
+准确基线：`081a01ae9614bde42309cbf34ad39019ffad00d1`
+
+本轮后端实现提交：`cb73f21`（后续交接文档提交仅记录该实现结果）。
+
+状态：**第十四阶段后端实现与本地确定性回归已完成；停止继续开发，等待 GPT-5.6 审计。**
+
+## 本轮完成
+
+- 复用现有 OpenAI-compatible Provider、RoleBinding、SecretStore 和 ModelRun；Phase 13 新增统一 JSON 模型调用边界，非法 JSON 只允许一次独立修复调用，仍失败则显式报错。
+- `research_planner` 生成并校验六个固定 perspective 的查询计划；Provider 凭据在规划前校验，查询重复、缺失或越界均使任务失败。
+- `research_analyst` 分批抽取短证据并综合竞品和 findings；excerpt/locator 必须匹配冻结来源版本，fact 必须引用同 job evidenceId。
+- `story_incubator` 生成 3-5 个机会、多轮共创回复、StoryBrief、通用 Canon、三种开篇和选中方向的第 2/3 章实验稿；所有写入前重验 revision/checksum。
+- `reader_simulator` 与 `opening_editor` 分别独立调用并各自关联 ModelRun；失败不生成固定评分或伪通过评审。
+- 修正机会评分：各分项仍受固定上限约束，`totalScore` 为 0-100 自然求和，不再强制等于 100；专项验证模型机会得到 74 分。
+- 保持研究、机会、StoryBrief、Canon 和开篇的人工接受机制；只选中开篇不会创建 StyleBaseline，三章逐章人工批准后才允许孵化 Canon 锁定。
+- 所有模型调用均位于 SQLite 写事务外；模型错误、缺失绑定、凭据错误和研究分析失败均显式收敛，研究任务不会悬挂在运行状态。
+
+## 数据库与 API
+
+- 本阶段无新增迁移、无新增表；复用 `model_runs`、角色绑定和 Phase 13 的 17 张项目表。
+- 无新增 UI 或公开路由；沿用 Phase 13 的研究、机会、共创、StoryBrief、Canon、开篇、逐章批准和 `/model-runs` API，JSON 语义升级为真实模型输出。
+- 自动测试使用本地 FakeModel HTTP Provider 与确定性搜索/抓取 Provider；未调用 DeepSeek、Tavily 或 Firecrawl。
+
+## 验证结果
+
+- Phase 14/13 focused：`7 passed`。
+- API full suite 按桌面 124 秒上限分片完成：`167 passed`。
+- `npm run test` 已运行，但单命令在 API 阶段被 124 秒环境上限终止；等价 API 分片全部通过，`npm run test:web` 为 `3 files / 11 tests passed`。
+- `npm run build`：通过，仅有既有 Vite chunk-size warning。
+- Playwright：整套命令受 124 秒上限终止；按项目拆分后 `desktop-1440 7 passed`、`desktop-1280 7 passed`，合计 `14 passed`。
+- `python -m compileall -q apps/api/src apps/api/tests`：通过。
+- `git diff --check`：通过，仅有 Windows LF/CRLF 提示。
+
+## 已知风险与未完成项
+
+- 真实模型和真实搜索/抓取 Provider 尚未进行付费烟测；审计后应使用全新测试项目和最小预算人工执行，不得复用或读取《夜巡人》项目。
+- 真实模型输出质量、token 成本和长上下文截断仍需 GPT-5.6 审计及后续受控验收；本轮不承诺真实模型生成内容达到出版质量。
+- 未修改 `apps/web/**`、用户 `.data`、密钥、SQLite、日志、备份 ZIP、正式正文或视觉快照。

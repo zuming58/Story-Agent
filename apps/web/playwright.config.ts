@@ -6,6 +6,8 @@ import { resolve } from "node:path";
 const e2eRunId = process.env.STORY_AGENT_E2E_RUN_ID ?? `${Date.now()}-${process.pid}`;
 const e2eDataDir = resolve(process.cwd(), ".e2e-data", e2eRunId);
 const apiPython = process.platform === "win32" ? "..\\api\\.venv\\Scripts\\python.exe" : "../api/.venv/bin/python";
+const apiPort = process.env.STORY_AGENT_E2E_API_PORT ?? "8765";
+const webPort = process.env.STORY_AGENT_E2E_WEB_PORT ?? "4174";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -18,20 +20,20 @@ export default defineConfig({
   retries: 0,
   reporter: "list",
   use: {
-    baseURL: "http://127.0.0.1:4174",
+    baseURL: `http://127.0.0.1:${webPort}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   webServer: [
     {
-      command: `"${apiPython}" -m uvicorn story_agent_api.main:app --host 127.0.0.1 --port 8765`,
-      url: "http://127.0.0.1:8765/api/v1/health",
+      command: `"${apiPython}" -m uvicorn story_agent_api.main:app --host 127.0.0.1 --port ${apiPort}`,
+      url: `http://127.0.0.1:${apiPort}/api/v1/health`,
       env: { STORY_AGENT_DATA_DIR: e2eDataDir },
       reuseExistingServer: false,
     },
     {
-      command: "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort",
-      url: "http://127.0.0.1:4174",
+      command: `npm run dev -- --host 127.0.0.1 --port ${webPort} --strictPort`,
+      url: `http://127.0.0.1:${webPort}`,
       reuseExistingServer: false,
     },
   ],

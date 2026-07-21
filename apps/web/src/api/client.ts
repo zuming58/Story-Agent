@@ -22,9 +22,11 @@ import type {
   ModelConfig,
   ModelRun,
   ModelProvider,
+  ModelRole,
   ModelRoleBinding,
   PlanNode,
   ProjectCreateRequest,
+  ProjectUpdateRequest,
   ProjectSummary,
   ProviderConnectionTest,
   QualityFinding,
@@ -34,6 +36,20 @@ import type {
   PlanGenerationProposal,
   TrialReadiness,
   TrialRunSize,
+  MarketResearchBrief,
+  ResearchJob,
+  ResearchQuery,
+  ResearchEvidence,
+  CompetitorProfile,
+  ResearchFinding,
+  StoryOpportunity,
+  IdeationSession,
+  IdeationMessage,
+  IncubationStoryBriefProposal,
+  IncubationStoryBriefVersion,
+  OpeningExperiment,
+  OpeningCandidate,
+  IncubationReadiness,
 } from "../types";
 
 export class ApiClientError extends Error {
@@ -61,6 +77,8 @@ export const api = {
   health: () => request<{ status: string; storage: string }>("/health"),
   projects: () => request<ProjectSummary[]>("/projects"),
   createProject: (payload: ProjectCreateRequest) => request<ProjectSummary>("/projects", { method: "POST", body: JSON.stringify(payload) }),
+  updateProject: (projectId: string, payload: ProjectUpdateRequest) =>
+    request<ProjectSummary>(`/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   plan: (projectId: string) => request<StoryPlan>(`/projects/${projectId}/plan`),
   updateNode: (projectId: string, nodeId: string, payload: Partial<PlanNode> & { expectedRevision: number }) =>
     request<PlanNode>(`/projects/${projectId}/plan/nodes/${nodeId}`, { method: "PATCH", body: JSON.stringify(payload) }),
@@ -144,6 +162,46 @@ export const api = {
     const suffix = params.toString() ? `?${params.toString()}` : "";
     return request<ModelRun[]>(`/projects/${projectId}/model-runs${suffix}`);
   },
+  researchBriefs: (projectId: string) => request<MarketResearchBrief[]>(`/projects/${projectId}/research/briefs`),
+  saveResearchBrief: (projectId: string, payload: {
+    expectedRevision: number; format: "long-form" | "short-form"; platform: string; genre: string; audience: string;
+    targetChapters?: number | null; targetWords?: number | null; emotionalValue: string[]; researchDateRange?: Record<string, string>;
+    includedDomains?: string[]; excludedDomains?: string[]; referenceWorks?: string[]; forbiddenContent?: string[]; commercialGoals?: string[]; notes?: string;
+  }) => request<MarketResearchBrief>(`/projects/${projectId}/research/briefs`, { method: "POST", body: JSON.stringify(payload) }),
+  researchJobs: (projectId: string) => request<ResearchJob[]>(`/projects/${projectId}/research/jobs`),
+  createResearchJob: (projectId: string, payload: {
+    briefId?: string; expectedBriefRevision: number; idempotencyKey?: string; searchProvider?: "tavily" | "deterministic";
+    fetchProvider?: "firecrawl" | "deterministic"; searchApiKey?: string; fetchApiKey?: string; runImmediately?: boolean;
+    limits?: { maxQueries?: number; maxPages?: number; maxCharsPerPage?: number; maxTotalChars?: number; maxCost?: number; maxRuntimeSeconds?: number; minimumSourceTypes?: number };
+  }) => request<ResearchJob>(`/projects/${projectId}/research/jobs`, { method: "POST", body: JSON.stringify(payload) }),
+  researchJobAction: (jobId: string, action: "run" | "resume" | "cancel" | "accept" | "reject", expectedRevision: number) =>
+    request<ResearchJob>(`/research/jobs/${jobId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  researchQueries: (jobId: string) => request<ResearchQuery[]>(`/research/jobs/${jobId}/queries`),
+  addManualResearchMaterial: (jobId: string, payload: { expectedRevision: number; perspective?: string; title?: string; content: string; sourceUrl?: string }) =>
+    request<ResearchJob>(`/research/jobs/${jobId}/manual-materials`, { method: "POST", body: JSON.stringify(payload) }),
+  analyzeManualResearchMaterials: (jobId: string, expectedRevision: number) =>
+    request<ResearchJob>(`/research/jobs/${jobId}/analyze-manual-materials`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  researchEvidence: (jobId: string) => request<ResearchEvidence[]>(`/research/jobs/${jobId}/evidence`),
+  researchCompetitors: (jobId: string) => request<CompetitorProfile[]>(`/research/jobs/${jobId}/competitors`),
+  researchFindings: (jobId: string) => request<ResearchFinding[]>(`/research/jobs/${jobId}/findings`),
+  storyOpportunities: (projectId: string, jobId?: string) => request<StoryOpportunity[]>(`/projects/${projectId}/story-opportunities${jobId ? `?jobId=${encodeURIComponent(jobId)}` : ""}`),
+  createStoryOpportunities: (jobId: string, expectedJobRevision: number, creativeInput?: string) => request<StoryOpportunity[]>(`/research/jobs/${jobId}/opportunities`, { method: "POST", body: JSON.stringify({ expectedJobRevision, creativeInput: creativeInput || undefined }) }),
+  decideStoryOpportunity: (opportunityId: string, action: "accept" | "reject", expectedRevision: number) => request<StoryOpportunity>(`/story-opportunities/${opportunityId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  ideationSessions: (projectId: string) => request<IdeationSession[]>(`/projects/${projectId}/ideation/sessions`),
+  createIdeationSession: (projectId: string, opportunityId: string, expectedOpportunityRevision: number) => request<IdeationSession>(`/projects/${projectId}/ideation/sessions`, { method: "POST", body: JSON.stringify({ opportunityId, expectedOpportunityRevision }) }),
+  createIdeationKickoffSection: (sessionId: string, section: "core" | "world" | "characters" | "genre" | "boundaries", expectedSessionRevision: number) => request<IdeationSession>(`/ideation/sessions/${sessionId}/kickoff-sections/${section}`, { method: "POST", body: JSON.stringify({ expectedSessionRevision }) }),
+  addIdeationMessage: (sessionId: string, expectedSessionRevision: number, content: string) => request<IdeationMessage>(`/ideation/sessions/${sessionId}/messages`, { method: "POST", body: JSON.stringify({ expectedSessionRevision, content }) }),
+  incubationStoryBriefProposals: (projectId: string, sessionId?: string) => request<IncubationStoryBriefProposal[]>(`/projects/${projectId}/story-brief/proposals${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`),
+  createIncubationStoryBriefProposal: (sessionId: string, expectedSessionRevision: number) => request<IncubationStoryBriefProposal>(`/ideation/sessions/${sessionId}/story-brief-proposals`, { method: "POST", body: JSON.stringify({ expectedSessionRevision }) }),
+  decideIncubationStoryBriefProposal: (proposalId: string, action: "apply" | "reject", expectedRevision: number) => request<IncubationStoryBriefProposal>(`/story-brief-proposals/${proposalId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
+  incubationStoryBriefVersions: (projectId: string) => request<IncubationStoryBriefVersion[]>(`/projects/${projectId}/story-brief/versions`),
+  createIncubationCanonProposal: (projectId: string, expectedStoryBriefRevision: number, instructions = "") => request<CanonGenerationProposal>(`/projects/${projectId}/incubation/canon-proposals`, { method: "POST", body: JSON.stringify({ expectedStoryBriefRevision, instructions }) }),
+  openingExperiments: (projectId: string) => request<OpeningExperiment[]>(`/projects/${projectId}/opening-experiments`),
+  createOpeningExperiment: (projectId: string, expectedStoryBriefRevision: number, expectedCanonRevision: number) => request<OpeningExperiment>(`/projects/${projectId}/opening-experiments`, { method: "POST", body: JSON.stringify({ expectedStoryBriefRevision, expectedCanonRevision }) }),
+  decideOpeningCandidate: (candidateId: string, action: "select" | "reject", expectedRevision: number, expectedExperimentRevision: number) => request<OpeningCandidate>(`/opening-candidates/${candidateId}/${action}`, { method: "POST", body: JSON.stringify({ expectedRevision, expectedExperimentRevision }) }),
+  expandOpeningExperiment: (experimentId: string, selectedCandidateId: string, expectedRevision: number, expectedCandidateRevision: number) => request<OpeningExperiment>(`/opening-experiments/${experimentId}/expand-to-three-chapters`, { method: "POST", body: JSON.stringify({ expectedRevision, selectedCandidateId, expectedCandidateRevision }) }),
+  approveOpeningChapter: (candidateId: string, chapterNumber: number, expectedRevision: number) => request<OpeningCandidate>(`/opening-candidates/${candidateId}/chapters/approve`, { method: "POST", body: JSON.stringify({ expectedRevision, chapterNumber }) }),
+  incubationReadiness: (projectId: string) => request<IncubationReadiness>(`/projects/${projectId}/incubation-readiness`),
   cancelModelRun: (projectId: string, runId: string) => request<ModelRun>(`/projects/${projectId}/model-runs/${runId}/cancel`, { method: "POST" }),
   modelProviders: () => request<ModelProvider[]>("/model-providers"),
   createModelProvider: (payload: {
@@ -156,6 +214,7 @@ export const api = {
     apiKey?: string;
   }) => request<ModelProvider>("/model-providers", { method: "POST", body: JSON.stringify(payload) }),
   createDeepSeekPreset: () => request<ModelProvider>("/model-providers/deepseek-preset", { method: "POST" }),
+  createVolcengineCodingPlanPreset: () => request<ModelProvider>("/model-providers/volcengine-coding-plan-preset", { method: "POST" }),
   updateModelProvider: (providerId: string, payload: Partial<{
     name: string;
     providerType: "openai-compatible";
@@ -193,6 +252,8 @@ export const api = {
   roleBindings: () => request<ModelRoleBinding[]>("/model-role-bindings"),
   updateRoleBinding: (role: string, payload: { modelId: string | null; dailyCostLimit?: number | null }) =>
     request<ModelRoleBinding>(`/model-role-bindings/${role}`, { method: "PUT", body: JSON.stringify(payload) }),
+  updateRoleBindings: (modelIds: Partial<Record<ModelRole, string | null>>) =>
+    request<ModelRoleBinding[]>("/model-role-bindings/bulk", { method: "PUT", body: JSON.stringify({ modelIds }) }),
   canon: (projectId: string) => request<CanonWorkspace>(`/projects/${projectId}/canon`),
   updateCanonDraft: (projectId: string, payload: {
     documents?: Array<Record<string, unknown>>;

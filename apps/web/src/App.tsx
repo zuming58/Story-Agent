@@ -9,6 +9,7 @@ import { QualityCenterPage } from "./pages/QualityCenterPage";
 import { SettingsHubPage } from "./pages/SettingsHubPage";
 import { CanonPage } from "./pages/CanonPage";
 import { AutomationPage } from "./pages/AutomationPage";
+import { StoryIncubatorPage } from "./pages/StoryIncubatorPage";
 
 export function App() {
   return (
@@ -16,6 +17,7 @@ export function App() {
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/overview" replace />} />
         <Route path="overview" element={<ProjectOverviewPage />} />
+        <Route path="incubator" element={<StoryIncubatorPage />} />
         <Route path="canon" element={<CanonPage />} />
         <Route path="planning" element={<StoryPlanningPage />} />
         <Route path="writing" element={<ChapterWritingPage />} />

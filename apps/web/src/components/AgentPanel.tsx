@@ -7,6 +7,7 @@ import {
   CaretDoubleRight,
   Check,
   Checks,
+  Compass,
   GitBranch,
   LinkSimple,
   PaperPlaneTilt,
@@ -37,7 +38,8 @@ export function AgentPanel() {
   const writingMode = location.pathname === "/writing" || location.pathname === "/quality";
   const canonMode = location.pathname === "/canon";
   const automationMode = location.pathname === "/automation";
-  const contextualMode = writingMode || canonMode || automationMode;
+  const incubatorMode = location.pathname === "/incubator";
+  const contextualMode = writingMode || canonMode || automationMode || incubatorMode;
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const { plan, selected, session, proposal, audits, streamPreview, runStatus, proposalStatus, sendMessage, cancelRun, retryLastMessage, applyProposal, rejectProposal, undo } = useStoryWorkspace();
@@ -106,7 +108,7 @@ export function AgentPanel() {
         <div className="agent-header-actions"><button className="icon-button" aria-label="固定面板"><PushPin size={18} /></button><button className="icon-button" onClick={() => setCollapsed(true)} aria-label="折叠故事 Agent"><CaretDoubleRight size={19} /></button></div>
       </header>
       <div className="scope-row"><span>当前：</span>{(contextualMode
-        ? (agentScopeLabels.length ? agentScopeLabels : writingMode ? [`第${selectedChapterNumber}章`, location.pathname === "/quality" ? "质量中心" : "章节写作"] : [canonMode ? "Canon 设定库" : "自动托管"])
+        ? (agentScopeLabels.length ? agentScopeLabels : writingMode ? [`第${selectedChapterNumber}章`, location.pathname === "/quality" ? "质量中心" : "章节写作"] : [canonMode ? "Canon 设定库" : incubatorMode ? "创意孵化" : "自动托管"])
         : [plan?.volumeTitle ?? "当前作品", plan?.arcTitle ?? "当前弧线", selected?.title].filter(Boolean) as string[]
       ).map((label) => <button key={label}>{label}</button>)}</div>
 
@@ -134,6 +136,10 @@ export function AgentPanel() {
             <button onClick={() => void submit(undefined, "请根据当前托管批次作用域解释失败或隔离原因，并给出安全恢复步骤。") } disabled={thinking}><ShieldCheck size={16} />解释失败</button>
             <button onClick={() => void submit(undefined, "请检查当前试写批次的 Token、预计费用和停止策略风险。") } disabled={thinking}><ArrowsInLineHorizontal size={16} />检查成本</button>
             <button onClick={() => void submit(undefined, "请给出不重复付费、不覆盖正式正文的恢复建议。") } disabled={thinking}><ArrowCounterClockwise size={16} />恢复建议</button>
+          </> : incubatorMode ? <>
+            <button onClick={() => void submit(undefined, "请检查当前创意方向是否真正服务目标读者，并指出最可能导致前三章弃读的原因。") } disabled={thinking}><Compass size={16} />检查方向</button>
+            <button onClick={() => void submit(undefined, "请根据当前证据与讨论，列出已确认、待确认和明确否决的创作决策，不要擅自替我定稿。") } disabled={thinking}><Checks size={16} />整理决策</button>
+            <button onClick={() => void submit(undefined, "请比较三个开篇在人物欲望、即时冲突、信息负担和继续阅读欲望上的差异。") } disabled={thinking}><Sparkle size={16} />比较开篇</button>
           </> : <>
             <button onClick={() => void submit(undefined, "请重排当前里程碑的节奏，并给出可审查的修改提案。", "replan") } disabled={thinking}><ArrowsInLineHorizontal size={16} />重排节奏</button>
             <button onClick={() => void submit(undefined, "请检查当前里程碑的逻辑与边界，不要直接修改。", "logic_check") } disabled={thinking}><ShieldCheck size={16} />检查逻辑</button>
@@ -180,7 +186,7 @@ export function AgentPanel() {
       </div>
 
       <form className="agent-composer" onSubmit={(event) => void submit(event)}>
-        <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={writingMode ? "描述要检查或调整的章节内容…" : canonMode ? "询问当前设定、实体或规则…" : automationMode ? "询问运行状态、费用或恢复建议…" : "描述你想调整的规划…"} aria-label="给故事 Agent 发送消息" />
+        <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={writingMode ? "描述要检查或调整的章节内容…" : canonMode ? "询问当前设定、实体或规则…" : automationMode ? "询问运行状态、费用或恢复建议…" : incubatorMode ? "讨论读者、题材、故事方向或开篇选择…" : "描述你想调整的规划…"} aria-label="给故事 Agent 发送消息" />
         <div className="composer-actions"><div><button type="button" className="icon-button" aria-label="添加附件"><Paperclip size={18} /></button><button type="button" className="icon-button" aria-label="引用契约"><BookBookmark size={18} /></button></div><button className="send-button" disabled={!input.trim() || thinking} type="submit"><PaperPlaneTilt size={18} weight="fill" />发送</button></div>
       </form>
       <div className="agent-footnote"><span>{runStatus.status === "running" ? "真实模型流式输出中" : "正式修改写入 SQLite 审计日志"}</span><button onClick={() => void undo()} disabled={!reversible}><ArrowCounterClockwise size={16} />撤销</button></div>

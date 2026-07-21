@@ -1,18 +1,19 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
-async function createProject(page: Page, testInfo: TestInfo, suffix: string) {
+async function createProject(page: Page, testInfo: TestInfo, suffix: string, plannedChapters = 100) {
   await page.goto("/overview");
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: "新建作品" }).click();
   const title = `E2E-${testInfo.project.name}-${suffix}-${Date.now()}`;
   await page.getByLabel("作品名称").fill(title);
+  await page.getByLabel("计划章节").fill(String(plannedChapters));
   await page.getByRole("button", { name: "创建并开始构思" }).click();
   // Project creation initializes and migrates an isolated SQLite database.
   // A cold Windows filesystem/antivirus scan can take more than 15 seconds;
   // keep the test above the measured cold-start envelope so Playwright never
   // kills the API halfway through an Alembic migration.
-  await expect(page).toHaveURL(/\/canon$/, { timeout: 45_000 });
+  await expect(page).toHaveURL(/\/incubator$/, { timeout: 45_000 });
   await page.goto("/planning");
   await expect(page.getByRole("heading", { name: "故事规划中心" })).toBeVisible();
   const projects = await (await page.request.get("/api/v1/projects")).json();
@@ -31,6 +32,34 @@ async function seedProposal(page: Page, projectId: string) {
   });
   await page.reload();
 }
+
+test("an untitled project is created once and can be renamed later", async ({ page }, testInfo) => {
+  await page.goto("/overview");
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  const before = await (await page.request.get("/api/v1/projects")).json() as Array<{ id: string }>;
+  await page.route("**/api/v1/projects", async (route) => {
+    if (route.request().method() === "POST") await new Promise((resolve) => setTimeout(resolve, 500));
+    await route.continue();
+  });
+
+  await page.getByRole("button", { name: "新建作品" }).click();
+  const submit = page.getByRole("button", { name: "创建并开始构思" });
+  await submit.dblclick();
+  await expect(page.getByRole("button", { name: /正在创建/ })).toBeDisabled();
+  await expect(page).toHaveURL(/\/incubator$/, { timeout: 45_000 });
+
+  const after = await (await page.request.get("/api/v1/projects")).json() as Array<{ id: string; title: string }>;
+  expect(after).toHaveLength(before.length + 1);
+  const created = after.find((item) => !before.some((previous) => previous.id === item.id));
+  expect(created?.title).toMatch(/^未命名作品 /);
+
+  await page.goto("/overview");
+  await page.getByRole("button", { name: `修改《${created!.title}》书名` }).click();
+  await page.getByLabel("新的作品名称").fill(`重新命名-${testInfo.project.name}`);
+  await page.getByRole("button", { name: "保存新名称" }).click();
+  await expect(page.getByRole("button", { name: `修改《重新命名-${testInfo.project.name}》书名` })).toBeVisible();
+});
 
 test("review, accept and undo an AI planning change", async ({ page }, testInfo) => {
   const project = await createProject(page, testInfo, "proposal");
@@ -68,6 +97,26 @@ test("safety audit workspace exposes backup and diagnostics without covering Age
   await expect(page.getByRole("article", { name: "审计时间线" })).toBeVisible();
   await expect(page.getByRole("article", { name: "模型调用记录" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+});
+
+test("provider presets stay with the Provider list and the top gear opens system management", async ({ page }) => {
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "模型与费用设置" })).toBeVisible();
+  await expect(page.locator(".settings-heading button")).toHaveCount(0);
+  const presets = page.locator(".provider-presets");
+  await expect(presets.getByText("快速添加 Provider")).toBeVisible();
+  await expect(presets.getByRole("button", { name: /DeepSeek/ })).toBeVisible();
+  await expect(presets.getByRole("button", { name: /火山/ })).toBeVisible();
+
+  const projects = await (await page.request.get("/api/v1/projects")).json() as Array<{ id: string }>;
+  const before = await (await page.request.get(`/api/v1/projects/${projects[0].id}/backups`)).json() as unknown[];
+  await page.getByRole("button", { name: "打开安全与系统管理" }).click();
+  await expect(page).toHaveURL(/\/settings\?tab=safety$/);
+  await expect(page.getByRole("heading", { name: "备份恢复与调用诊断" })).toBeVisible();
+  const after = await (await page.request.get(`/api/v1/projects/${projects[0].id}/backups`)).json() as unknown[];
+  expect(after).toHaveLength(before.length);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
 });
 
 test("chapter workbench persists a locked contract and queued job", async ({ page }, testInfo) => {
@@ -131,6 +180,32 @@ test("automation desk exposes trial sizes, blockers and persisted policy", async
   await page.reload();
   await expect(page.getByLabel("运行时间")).toHaveValue("07:35");
   await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
+});
+
+test("story incubator restores its six-stage discovery workspace", async ({ page }, testInfo) => {
+  await createProject(page, testInfo, "incubator", 1000);
+  await page.getByRole("link", { name: /创意孵化/ }).click();
+  await expect(page.getByRole("heading", { name: "故事创意孵化室" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "创意孵化步骤" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "故事 Agent" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /检查方向/ })).toBeVisible();
+  await expect(page.getByLabel("计划章节数")).toHaveValue("1000");
+  const genre = page.getByLabel("题材方向（可混合填写）");
+  await expect(genre).toHaveValue("");
+  await genre.fill("古代悬疑探案 + 女性成长 + 言情");
+  await expect(genre).toHaveValue("古代悬疑探案 + 女性成长 + 言情");
+  await expect(page.getByLabel("限定研究网站/域名（每行一个，可选）")).toBeVisible();
+
+  await page.getByTestId("incubator-stage-2").click();
+  await expect(page.getByText("市场证据工作台")).toBeVisible();
+  await expect(page.getByText(/仅研究公开网页/)).toBeVisible();
+  await expect(page.getByLabel("Tavily API Key")).toHaveAttribute("type", "password");
+  await expect(page.getByLabel("Firecrawl API Key")).toHaveAttribute("type", "password");
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "故事创意孵化室" })).toBeVisible();
+
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
 });

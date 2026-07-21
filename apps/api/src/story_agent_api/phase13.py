@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from .models import (
     CanonDocument,
@@ -14,6 +18,10 @@ from .models import (
     IdeationMessage,
     IdeationSession,
     MarketResearchBrief,
+    ModelConfig,
+    ModelProvider,
+    ModelRoleBinding,
+    ModelRun,
     OpeningCandidate,
     OpeningExperiment,
     ReaderEvaluation,
@@ -34,11 +42,13 @@ from .research_providers import (
     DeterministicSearchProvider,
     FirecrawlContentFetchProvider,
     ResearchProviderError,
+    ResearchSourcePolicy,
     SearchProvider,
     TavilySearchProvider,
 )
 from .schemas import (
     CompetitorExclude,
+    ExternalCreativeDirection,
     IdeationMessageCreate,
     IdeationSessionCreate,
     IncubationCanonProposalCreate,
@@ -53,6 +63,7 @@ from .schemas import (
     StoryBriefProposalCreate,
     StoryOpportunityAction,
     StoryOpportunityCreate,
+    StoryOpportunityDraft,
 )
 from .services import StoryError, dumps, safe_json_loads, stable_digest
 
@@ -98,6 +109,94 @@ class Phase13Service:
         self.service = service
         self.search_provider: SearchProvider = DeterministicSearchProvider()
         self.fetch_provider: ContentFetchProvider = DeterministicContentFetchProvider()
+
+    def _complete_model_json(
+        self,
+        project: Any,
+        role: str,
+        run_role: str,
+        request_id: str,
+        system: str,
+        payload: dict[str, Any],
+        *,
+        budget_job_id: str | None = None,
+        max_output_tokens: int | None = None,
+        max_retries: int | None = None,
+        stream_response: bool = False,
+    ) -> tuple[dict[str, Any], str]:
+        """Run one bounded JSON call plus one explicit repair attempt.
+
+        Phase 8 owns the provider, credential, retry and ModelRun mechanics.
+        Keeping the call outside every Phase 13 write transaction lets callers
+        re-check their frozen authority immediately before persistence.
+        """
+        messages = [
+            {"role": "system", "content": f"{system}\nReturn one JSON object only."},
+            {"role": "user", "content": dumps(payload)},
+        ]
+        if budget_job_id:
+            self._assert_research_model_budget(project, budget_job_id)
+        text, run_id = self.service.phase8._complete_role(
+            project, role, messages, request_id, response_json=True, run_role=run_role,
+            max_output_tokens=max_output_tokens, max_retries=max_retries, stream_response=stream_response,
+        )
+        if budget_job_id:
+            self._charge_research_model_run(project, budget_job_id, run_id)
+        try:
+            value = json.loads(text)
+            if isinstance(value, dict):
+                return value, run_id
+        except (TypeError, ValueError):
+            pass
+        if budget_job_id:
+            self._assert_research_model_budget(project, budget_job_id)
+        repair, repair_run_id = self.service.phase8._complete_role(
+            project,
+            role,
+            [
+                {"role": "system", "content": "Repair the invalid response. Return one JSON object only; do not add commentary."},
+                {"role": "user", "content": dumps({"invalidResponse": text[:4000], "requiredPayload": payload})},
+            ],
+            request_id,
+            response_json=True,
+            run_role=f"{run_role}:repair",
+            max_output_tokens=max_output_tokens,
+            max_retries=max_retries,
+            stream_response=stream_response,
+        )
+        if budget_job_id:
+            self._charge_research_model_run(project, budget_job_id, repair_run_id)
+        try:
+            value = json.loads(repair)
+        except (TypeError, ValueError) as exc:
+            raise StoryError(422, "INCUBATOR_MODEL_JSON_INVALID", "The model did not return a valid JSON object after one repair attempt.") from exc
+        if not isinstance(value, dict):
+            raise StoryError(422, "INCUBATOR_MODEL_JSON_INVALID", "The model did not return a JSON object after one repair attempt.")
+        return value, repair_run_id
+
+    def _assert_research_model_budget(self, project: Any, job_id: str) -> None:
+        """Stop before another paid model call once the job budget is spent."""
+        with self.service.db.project(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            if not job or job.project_id != project.id:
+                raise StoryError(404, "RESEARCH_JOB_NOT_FOUND", "Research job was not found.")
+            limits = safe_json_loads(job.limits_json, {})
+            if job.status == "cancelled":
+                raise StoryError(409, "RESEARCH_JOB_CANCELLED", "Research job was cancelled.")
+            if self._runtime_exceeded(job.started_at, limits):
+                raise StoryError(409, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.")
+            if job.estimated_cost >= float(limits.get("maxCost", 5.0)):
+                raise StoryError(409, "RESEARCH_COST_LIMIT", "The research task exhausted its cost budget.")
+
+    def _charge_research_model_run(self, project: Any, job_id: str, run_id: str) -> None:
+        """Include completed model cost in the research job's authoritative budget."""
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            run = session.get(ModelRun, run_id)
+            if not job or job.project_id != project.id or not run:
+                raise StoryError(409, "RESEARCH_JOB_DRIFT", "Research job changed while model cost was recorded.")
+            job.estimated_cost += max(0.0, float(run.estimated_cost or 0.0))
+            job.updated_at = _now()
 
     # ------------------------------------------------------------------
     # Research brief and job lifecycle
@@ -147,6 +246,25 @@ class Phase13Service:
 
     def create_job(self, project_id: str, payload: ResearchJobCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
+        search_secret_ref = payload.search_secret_ref
+        fetch_secret_ref = payload.fetch_secret_ref
+        try:
+            if payload.search_api_key:
+                search_secret_ref = f"research-provider:{project.id}:tavily"
+                self.service.secret_store.set_secret(search_secret_ref, payload.search_api_key)
+            elif payload.search_provider == "tavily" and not search_secret_ref:
+                reusable = f"research-provider:{project.id}:tavily"
+                if self.service.secret_store.get_secret(reusable):
+                    search_secret_ref = reusable
+            if payload.fetch_api_key:
+                fetch_secret_ref = f"research-provider:{project.id}:firecrawl"
+                self.service.secret_store.set_secret(fetch_secret_ref, payload.fetch_api_key)
+            elif payload.fetch_provider == "firecrawl" and not fetch_secret_ref:
+                reusable = f"research-provider:{project.id}:firecrawl"
+                if self.service.secret_store.get_secret(reusable):
+                    fetch_secret_ref = reusable
+        except Exception as exc:
+            raise StoryError(503, "CREDENTIAL_STORE_UNAVAILABLE", "Unable to save research credentials in the operating-system credential store.") from exc
         with self.service.db.project_write(project.id, project.folder_path) as session:
             brief = session.get(MarketResearchBrief, payload.brief_id) if payload.brief_id else session.scalar(select(MarketResearchBrief).where(
                 MarketResearchBrief.project_id == project.id, MarketResearchBrief.status == "current"
@@ -157,7 +275,7 @@ class Phase13Service:
                 raise StoryError(409, "RESEARCH_BRIEF_SUPERSEDED", "Research jobs can only be created from the current research brief.")
             if brief.revision != payload.expected_brief_revision:
                 raise StoryError(409, "RESEARCH_BRIEF_REVISION_CONFLICT", "Research brief revision conflict.", {"currentRevision": brief.revision})
-            request_fingerprint = stable_digest({"brief": brief.id, "revision": brief.revision, "payload": payload.model_dump(mode="json", by_alias=True, exclude={"run_immediately"})})
+            request_fingerprint = stable_digest({"brief": brief.id, "revision": brief.revision, "payload": payload.model_dump(mode="json", by_alias=True, exclude={"run_immediately", "search_api_key", "fetch_api_key"})})
             if payload.idempotency_key:
                 existing = session.scalar(select(ResearchJob).where(
                     ResearchJob.project_id == project.id, ResearchJob.idempotency_key == payload.idempotency_key
@@ -174,9 +292,9 @@ class Phase13Service:
             now = _now()
             config = {
                 "searchProvider": payload.search_provider,
-                "searchSecretRef": payload.search_secret_ref,
+                "searchSecretRef": search_secret_ref,
                 "fetchProvider": payload.fetch_provider,
-                "fetchSecretRef": payload.fetch_secret_ref,
+                "fetchSecretRef": fetch_secret_ref,
             }
             row = ResearchJob(
                 id=str(uuid4()), project_id=project.id, brief_id=brief.id, brief_revision=brief.revision,
@@ -268,7 +386,12 @@ class Phase13Service:
             snapshot = self._brief_dict(brief)
             limits = safe_json_loads(job.limits_json, {})
             attempt = job.attempt
-        planned = self._planned_queries(snapshot)[:int(limits.get("maxQueries", 6))]
+        try:
+            self._providers_for(job)
+            planned = self._model_queries(project, snapshot, request_id, job_id)
+        except StoryError as exc:
+            return self._fail_job(project, job_id, exc.code, exc.message, request_id)
+        planned = planned[:int(limits.get("maxQueries", 6))]
         for sequence, (perspective, query_text) in enumerate(planned, start=1):
             if self._job_has_brief_drift(project, job_id):
                 return self._fail_job(project, job_id, "RESEARCH_BRIEF_DRIFT", "The research brief changed while the job was running.", request_id)
@@ -293,6 +416,10 @@ class Phase13Service:
                 search_provider, _ = self._providers_for(job)
                 response = search_provider.search(query_text, snapshot["includedDomains"], snapshot["researchDateRange"], int(limits.get("maxPages", 30)))
             except ResearchProviderError as exc:
+                with self.service.db.project_write(project.id, project.folder_path) as session:
+                    query = session.scalar(select(ResearchQuery).where(ResearchQuery.job_id == job_id, ResearchQuery.fingerprint == fingerprint))
+                    if query:
+                        query.status, query.error_code, query.error_message, query.completed_at = "failed", exc.code, exc.message, _now()
                 return self._fail_job(project, job_id, exc.code, exc.message, request_id)
             except StoryError as exc:
                 return self._fail_job(project, job_id, exc.code, exc.message, request_id)
@@ -371,9 +498,184 @@ class Phase13Service:
                 job.updated_at = _now()
         if self._runtime_exceeded(job.started_at, limits):
             return self._fail_job(project, job_id, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.", request_id)
-        return self._analyze_job(project, job_id, request_id)
+        try:
+            return self._analyze_job(project, job_id, request_id)
+        except StoryError as exc:
+            return self._fail_job(project, job_id, exc.code, exc.message, request_id)
 
     def _analyze_job(self, project: Any, job_id: str, request_id: str) -> dict[str, Any]:
+        with self.service.db.project(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            if job.status == "cancelled":
+                return self._job_dict(job)
+            versions = list(session.scalars(select(ResearchSourceVersion).where(ResearchSourceVersion.job_id == job.id)).all())
+            sources = {item.id: item for item in session.scalars(select(ResearchSource).where(ResearchSource.job_id == job.id)).all()}
+            query_perspectives = {item.id: item.perspective for item in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id)).all()}
+            frozen = {
+                "revision": job.revision,
+                "briefChecksum": job.brief_checksum,
+                "reportRevision": job.report_revision,
+                "startedAt": job.started_at,
+                "limits": safe_json_loads(job.limits_json, {}),
+            }
+        extracted: list[tuple[ResearchSourceVersion, int, dict[str, Any]]] = []
+        external_reports: list[dict[str, Any]] = []
+        for version in versions:
+            source = sources.get(version.source_id)
+            if not source or source.excluded or not version.bounded_content:
+                continue
+            if self._job_has_brief_drift(project, job_id):
+                return self._fail_job(project, job_id, "RESEARCH_BRIEF_DRIFT", "The research brief changed while evidence was analyzed.", request_id)
+            if not self._job_is_active(project, job_id):
+                return self.get_job(job_id)
+            if self._runtime_exceeded(frozen["startedAt"], frozen["limits"]):
+                return self._fail_job(project, job_id, "RESEARCH_RUNTIME_LIMIT", "The research task exceeded its runtime budget.", request_id)
+            content = version.bounded_content
+            is_integrated_report = source.source_type == "manual" and query_perspectives.get(source.query_id) == "integrated_report"
+            if is_integrated_report:
+                excerpt = content[:600].strip()
+                if excerpt:
+                    extracted.append((version, 0, {"evidence": [{
+                        "claimType": "inference",
+                        "claim": "A user-supplied external research report was provided for human review.",
+                        "excerpt": excerpt,
+                        "locator": {"start": 0, "end": len(excerpt)},
+                        "confidence": 0.45,
+                    }]}))
+                    external_reports.append({"sourceVersionId": version.id, "title": source.title, "reportContent": content[:6000]})
+                continue
+            chunks = [(0, content)] if not is_integrated_report else [(offset, content[offset:offset + 4000]) for offset in range(0, len(content), 4000)]
+            for offset, source_content in chunks:
+                output, model_run_id = self._complete_model_json(
+                    project,
+                    "research_analyst",
+                    "research_analyst:evidence",
+                    request_id,
+                    "Extract at most two short evidence items. Each item needs claimType (fact/opinion/inference), claim, excerpt copied exactly from sourceContent, locator start/end offsets, confidence 0..1, and perspectives. Do not reproduce long text or invent evidence.",
+                    {"phase14Step": "evidence", "sourceVersionId": version.id, "sourceContent": source_content},
+                    budget_job_id=job_id,
+                    max_output_tokens=1800,
+                    max_retries=0,
+                )
+                extracted.append((version, offset, output))
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            if job.status == "cancelled":
+                return self._job_dict(job)
+            if job.revision != frozen["revision"] or job.brief_checksum != frozen["briefChecksum"]:
+                return self._fail_job_in_session(session, job, "RESEARCH_BRIEF_DRIFT", "Research changed while evidence was analyzed.", request_id)
+            job.status, job.updated_at = "analyzing", _now()
+            evidence_rows: list[ResearchEvidence] = []
+            for version, offset, output in extracted:
+                for raw in output.get("evidence", []) if isinstance(output.get("evidence"), list) else []:
+                    if not isinstance(raw, dict):
+                        continue
+                    excerpt = str(raw.get("excerpt") or "").strip()[:600]
+                    start = raw.get("locator", {}).get("start") if isinstance(raw.get("locator"), dict) else None
+                    end = raw.get("locator", {}).get("end") if isinstance(raw.get("locator"), dict) else None
+                    if isinstance(start, int):
+                        start += offset
+                    if isinstance(end, int):
+                        end += offset
+                    if not excerpt or excerpt not in version.bounded_content or not isinstance(start, int) or not isinstance(end, int) or start < 0 or end > len(version.bounded_content) or version.bounded_content[start:end] != excerpt:
+                        continue
+                    existing = session.scalar(select(ResearchEvidence).where(ResearchEvidence.source_version_id == version.id, ResearchEvidence.excerpt == excerpt))
+                    if existing:
+                        evidence_rows.append(existing)
+                        continue
+                    claim_type = str(raw.get("claimType") or "inference")
+                    if claim_type not in {"fact", "opinion", "inference"}:
+                        continue
+                    row = ResearchEvidence(id=str(uuid4()), project_id=project.id, job_id=job.id, source_id=version.source_id, source_version_id=version.id, claim_type=claim_type, claim=str(raw.get("claim") or "").strip()[:1000], excerpt=excerpt, locator_json=dumps({"start": start, "end": end}), confidence=max(0.0, min(1.0, float(raw.get("confidence", 0.0)))), checksum=stable_digest({"claim": raw.get("claim"), "excerpt": excerpt}), created_at=_now())
+                    session.add(row)
+                    evidence_rows.append(row)
+            session.flush()
+            evidence_payload = [self._evidence_dict(row) for row in evidence_rows]
+        if self._job_has_brief_drift(project, job_id):
+            return self._fail_job(project, job_id, "RESEARCH_BRIEF_DRIFT", "The research brief changed before report analysis.", request_id)
+        if not self._job_is_active(project, job_id):
+            return self.get_job(job_id)
+        report, _ = self._complete_model_json(
+            project,
+            "research_analyst",
+            "research_analyst:report",
+            request_id,
+            "Analyze supplied short evidence into at most two competitor profiles and four concise research findings. External research reports are user-supplied secondary material: do not turn them into verified facts, and mark conclusions based on them as inference or opinion with uncertainties. Facts must cite evidenceIds; unsupported items must be inference with uncertainties. Do not imitate authors or reconstruct source text.",
+            {"phase14Step": "research_report", "evidence": evidence_payload, "sources": [{"id": source.id, "title": source.title, "domain": source.domain} for source in sources.values()], "externalReports": external_reports},
+            budget_job_id=job_id,
+            max_output_tokens=4096,
+        )
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            if job.status == "cancelled" or job.revision != frozen["revision"] or job.brief_checksum != frozen["briefChecksum"]:
+                return self._fail_job_in_session(session, job, "RESEARCH_BRIEF_DRIFT", "Research changed while the report was analyzed.", request_id)
+            report_revision = job.report_revision + 1
+            evidence_ids = {row.id for row in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()}
+            for raw in report.get("competitors", []) if isinstance(report.get("competitors"), list) else []:
+                if not isinstance(raw, dict):
+                    continue
+                refs = set(raw.get("evidenceIds", []))
+                if not refs or not refs.issubset(evidence_ids):
+                    continue
+                profile = raw.get("profile") if isinstance(raw.get("profile"), dict) else {}
+                name = str(raw.get("name") or "").strip()[:240]
+                if name:
+                    session.add(CompetitorProfile(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=report_revision, name=name, profile_json=dumps(profile), evidence_ids_json=dumps(sorted(refs)), confidence=max(0.0, min(1.0, float(raw.get("confidence", 0.0)))), checksum=stable_digest({"name": name, "profile": profile, "evidence": sorted(refs)}), status="active", revision=1, created_at=_now(), updated_at=_now()))
+            for raw in report.get("findings", []) if isinstance(report.get("findings"), list) else []:
+                if not isinstance(raw, dict):
+                    continue
+                refs = set(raw.get("evidenceIds", []))
+                claim_type = str(raw.get("claimType") or "inference")
+                if not refs.issubset(evidence_ids):
+                    continue
+                if claim_type == "fact" and not refs:
+                    continue
+                uncertainties = raw.get("uncertainties", [])
+                if claim_type in {"opinion", "inference"} and not uncertainties:
+                    continue
+                statement = str(raw.get("statement") or "").strip()[:2000]
+                if not statement:
+                    continue
+                session.add(ResearchFinding(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=report_revision, category=str(raw.get("category") or "general")[:80], statement=statement, claim_type=claim_type if claim_type in {"fact", "opinion", "inference"} else "inference", evidence_ids_json=dumps(sorted(refs)), confidence=max(0.0, min(1.0, float(raw.get("confidence", 0.0)))), uncertainties_json=dumps(uncertainties), checksum=stable_digest(raw), status="active", revision=1, created_at=_now()))
+            source_types = sorted({source.source_type for source in sources.values() if source.status == "fetched" and not source.excluded})
+            limits = safe_json_loads(job.limits_json, {})
+            evidence_sources = {row.source_id for row in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()}
+            evidence_query_ids = {source.query_id for source in sources.values() if source.id in evidence_sources and source.query_id}
+            evidence_perspectives = sorted({query.perspective for query in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id, ResearchQuery.id.in_(evidence_query_ids))).all()}) if evidence_query_ids else []
+            query_rows = list(session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job.id)).all())
+            source_counts = {query_id: count for query_id, count in session.execute(select(ResearchSource.query_id, func.count(ResearchSource.id)).where(ResearchSource.job_id == job.id).group_by(ResearchSource.query_id)).all()}
+            manual_report_query_ids = {query.id for query in query_rows if query.perspective == "integrated_report"}
+            integrated_report_evidence = any(source.query_id in manual_report_query_ids for source in sources.values() if source.id in evidence_sources)
+            coverage = {
+                "sourceTypes": source_types,
+                "sourceTypeCount": len(source_types),
+                "evidenceCount": len(evidence_ids),
+                "minimumSourceTypes": int(limits.get("minimumSourceTypes", 3)),
+                "coveredPerspectives": sorted({query.perspective for query in query_rows if query.status == "succeeded"}),
+                "evidencePerspectives": evidence_perspectives,
+                "searchResultCount": sum(query.result_count for query in query_rows),
+                "discoveredSourceCount": sum(source_counts.get(query.id, 0) for query in query_rows),
+                "failedQueryCount": sum(1 for query in query_rows if query.status == "failed"),
+                "failedFetchCount": sum(1 for source in sources.values() if source.status == "failed"),
+                "manualSourceCount": sum(1 for source in sources.values() if source.status == "fetched" and source.source_type == "manual" and not source.excluded),
+                "integratedManualReportEvidence": integrated_report_evidence,
+            }
+            standard_coverage = len(source_types) >= coverage["minimumSourceTypes"] and set(evidence_perspectives) == set(PERSPECTIVES)
+            manual_coverage = coverage["manualSourceCount"] >= len(PERSPECTIVES) and set(evidence_perspectives) == set(PERSPECTIVES)
+            integrated_report_coverage = integrated_report_evidence and bool(evidence_ids)
+            coverage["manualCoverageMet"] = manual_coverage or integrated_report_coverage
+            coverage["integratedManualReportCoverageMet"] = integrated_report_coverage
+            job.coverage_json, job.report_revision = dumps(coverage), report_revision
+            job.report_checksum = stable_digest({"job": job.id, "reportRevision": report_revision, "coverage": coverage, "evidence": sorted(evidence_ids)})
+            enough = standard_coverage or manual_coverage or integrated_report_coverage
+            job.status, job.completed_at, job.updated_at, job.revision = ("awaiting_review" if enough else "insufficient_evidence"), _now(), _now(), job.revision + 1
+            session.add(self.service._audit("research_job.awaiting_review" if enough else "research_job.insufficient_evidence", "research_job", job.id, coverage, request_id))
+            return self._job_dict(job)
+
+    def _analyze_job_placeholder(self, project: Any, job_id: str, request_id: str) -> dict[str, Any]:
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)
             assert job
@@ -471,6 +773,84 @@ class Phase13Service:
                 by_source.setdefault(version.source_id, []).append(version)
             return [self._source_dict(source, by_source.get(source.id, [])) for source in session.scalars(select(ResearchSource).where(ResearchSource.job_id == job_id).order_by(ResearchSource.created_at)).all()]
 
+    def list_queries(self, job_id: str) -> list[dict[str, Any]]:
+        project, _ = self._project_for_job(job_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            return [self._query_dict(item) for item in session.scalars(select(ResearchQuery).where(ResearchQuery.job_id == job_id).order_by(ResearchQuery.sequence_number, ResearchQuery.created_at)).all()]
+
+    def add_manual_material(self, job_id: str, payload: Any, request_id: str) -> dict[str, Any]:
+        """Store user-supplied research as a versioned, auditable source.
+
+        Manual material is intentionally never fetched.  It is only eligible
+        for the same extraction and approval pipeline used by public sources.
+        """
+        project, _ = self._project_for_job(job_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status not in {"failed", "cancelled", "insufficient_evidence", "awaiting_review"}:
+                raise StoryError(409, "RESEARCH_MANUAL_MATERIAL_NOT_ALLOWED", "Manual material can only be added to a stopped research job.")
+            if not self._brief_matches_job(session, job):
+                raise StoryError(409, "RESEARCH_BRIEF_DRIFT", "The research brief changed and this job can no longer accept material.")
+            limits = safe_json_loads(job.limits_json, {})
+            content = str(payload.content).strip()[:int(limits.get("maxCharsPerPage", 20_000))]
+            now = _now()
+            source_id = str(uuid4())
+            perspective = payload.perspective or "integrated_report"
+            source_url = str(payload.source_url or "").strip()
+            canonical = ResearchSourcePolicy().validate_url(source_url) if source_url else f"manual://research/{source_id}"
+            if session.scalar(select(ResearchSource.id).where(ResearchSource.job_id == job.id, ResearchSource.canonical_url == canonical)):
+                raise StoryError(409, "RESEARCH_MANUAL_SOURCE_DUPLICATE", "This source is already attached to the research job.")
+            domain = urlsplit(canonical).hostname or "manual-entry"
+            query = ResearchQuery(
+                id=str(uuid4()), project_id=project.id, job_id=job.id, attempt=job.attempt,
+                perspective=perspective, query_text=f"Manual research: {payload.title}"[:1000],
+                sequence_number=(session.scalar(select(func.max(ResearchQuery.sequence_number)).where(ResearchQuery.job_id == job.id)) or 0) + 1,
+                fingerprint=stable_digest({"manual": True, "perspective": perspective, "title": payload.title, "content": content}),
+                status="succeeded", result_count=1, created_at=now, completed_at=now,
+                provider_metadata_json=dumps({"origin": "manual", "kind": "integrated_report" if payload.perspective is None else "perspective_material"}),
+            )
+            source = ResearchSource(
+                id=source_id, project_id=project.id, job_id=job.id, query_id=query.id,
+                canonical_url=canonical, title=str(payload.title).strip(), domain=domain,
+                source_type="manual", provider_metadata_json=dumps({"origin": "manual", "kind": "integrated_report" if payload.perspective is None else "perspective_material", "sourceUrlProvided": bool(source_url)}),
+                status="fetched", created_at=now, updated_at=now,
+            )
+            version = ResearchSourceVersion(
+                id=str(uuid4()), project_id=project.id, job_id=job.id, source_id=source.id, version_number=1,
+                final_url=canonical, content_checksum=stable_digest({"url": canonical, "content": content}),
+                bounded_content=content, summary="User-supplied research material.", char_count=len(content), truncated=len(content) < len(str(payload.content).strip()),
+                fetch_metadata_json=dumps({"origin": "manual"}), fetched_at=now,
+            )
+            session.add_all([query, source, version])
+            job.query_count += 1
+            job.page_count += 1
+            job.fetched_chars += len(content)
+            job.status, job.error_code, job.error_message = "insufficient_evidence", None, None
+            job.revision, job.updated_at = job.revision + 1, now
+            session.add(self.service._audit("research_manual_material.added", "research_job", job.id, {"sourceId": source.id, "perspective": perspective, "kind": "integrated_report" if payload.perspective is None else "perspective_material", "hasSourceUrl": bool(source_url)}, request_id))
+            return self._job_dict(job)
+
+    def analyze_manual_materials(self, job_id: str, payload: Any, request_id: str) -> dict[str, Any]:
+        project, _ = self._project_for_job(job_id)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status not in {"failed", "cancelled", "insufficient_evidence", "awaiting_review"}:
+                raise StoryError(409, "RESEARCH_MANUAL_ANALYSIS_NOT_ALLOWED", "Manual material can only be analyzed after the research job has stopped.")
+            count = session.scalar(select(func.count(ResearchSourceVersion.id)).where(ResearchSourceVersion.job_id == job.id, ResearchSourceVersion.bounded_content != "")) or 0
+            if not count:
+                raise StoryError(409, "RESEARCH_MANUAL_MATERIAL_REQUIRED", "Add research material before requesting analysis.")
+            job.status, job.error_code, job.error_message = "analyzing", None, None
+            job.revision, job.updated_at, job.started_at = job.revision + 1, _now(), _now()
+            session.add(self.service._audit("research_manual_material.analysis_started", "research_job", job.id, {"sourceVersionCount": count}, request_id))
+        try:
+            return self._analyze_job(project, job_id, request_id)
+        except StoryError as exc:
+            return self._fail_job(project, job_id, exc.code, exc.message, request_id)
+
     def list_evidence(self, job_id: str) -> list[dict[str, Any]]:
         project, _ = self._project_for_job(job_id)
         with self.service.db.project(project.id, project.folder_path) as session:
@@ -549,30 +929,267 @@ class Phase13Service:
 
     def create_opportunities(self, job_id: str, payload: StoryOpportunityCreate, request_id: str) -> list[dict[str, Any]]:
         project, _ = self._project_for_job(job_id)
+        generated: list[dict[str, Any]] | None = None
+        creative_input = (payload.creative_input or "").strip()
+        if creative_input:
+            return self._create_external_creative_opportunities(project, job_id, payload, request_id, creative_input)
+        creative_input_checksum = stable_digest({"creativeInput": creative_input}) if creative_input else None
+        if payload.opportunities is None:
+            with self.service.db.project(project.id, project.folder_path) as session:
+                job = session.get(ResearchJob, job_id)
+                assert job
+                self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+                if job.status != "accepted":
+                    raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the evidence-complete research report before creating story opportunities.")
+                if creative_input and session.scalar(select(StoryOpportunity.id).where(
+                    StoryOpportunity.job_id == job.id,
+                    StoryOpportunity.status == "accepted",
+                    StoryOpportunity.is_current.is_(True),
+                )):
+                    raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
+                evidence = [self._evidence_dict(item) for item in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()]
+                # Story opportunity generation needs the audited evidence IDs
+                # and concise claims, not full source excerpts or project
+                # metadata. Keeping this snapshot small avoids needlessly
+                # slow model calls while preserving citation validation below.
+                report = {
+                    "jobId": job.id,
+                    "reportRevision": job.report_revision,
+                    "reportChecksum": job.report_checksum,
+                    "findings": [{
+                        "id": item.id,
+                        "category": item.category,
+                        "statement": item.statement[:600],
+                        "claimType": item.claim_type,
+                        "evidenceIds": safe_json_loads(item.evidence_ids_json, []),
+                        "confidence": item.confidence,
+                        "uncertainties": safe_json_loads(item.uncertainties_json, [])[:3],
+                    } for item in session.scalars(select(ResearchFinding).where(
+                        ResearchFinding.job_id == job.id,
+                        ResearchFinding.report_revision == job.report_revision,
+                    )).all()],
+                    "evidence": [{
+                        "id": item["id"],
+                        "claimType": item["claimType"],
+                        "claim": item["claim"][:600],
+                        "confidence": item["confidence"],
+                    } for item in evidence],
+                }
+            generated = []
+            for candidate_index in range(1, 4):
+                opportunity_role = "research_analyst" if creative_input else "story_incubator"
+                opportunity_run_role = (
+                    "research_analyst:external-opportunities"
+                    if creative_input and candidate_index == 1
+                    else f"research_analyst:external-opportunities:{candidate_index}"
+                    if creative_input
+                    else "story_incubator:opportunities"
+                    if candidate_index == 1
+                    else f"story_incubator:opportunities:{candidate_index}"
+                )
+                output, model_run_id = self._complete_model_json(
+                    project,
+                    opportunity_role,
+                    opportunity_run_role,
+                    request_id,
+                    "Generate exactly one compact story-direction card grounded only in the supplied evidence IDs. This is not a StoryBrief or Canon: never write a complete world, character bible, plot outline, chapter plan, ending, rationale, or explanation. External creative input is a user preference, not market evidence: use it to guide the direction, but never present it as a researched fact or cite it as evidence. Keep title under 20 Chinese characters; summary under 90 Chinese characters; highConcept under 50 Chinese characters; each protagonist/desire/conflict/world/promise/serial field under 36 Chinese characters; differentiation, risks, and uncertainties at most two short items each. Return JSON only, under 1200 tokens, with exactly this shape: {\"opportunities\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\",\"protagonist\":\"...\",\"coreDesire\":\"...\",\"coreConflict\":\"...\",\"worldMechanism\":\"...\",\"firstThreeChapterPromise\":\"...\",\"serialEngine\":\"...\",\"differentiation\":[\"...\"],\"risks\":[\"...\"],\"scoreComponents\":{\"platformFit\":0,\"openingHook\":0,\"emotionalPayoff\":0,\"differentiation\":0,\"serialEngine\":0,\"characterStickiness\":0,\"worldEngine\":0,\"readability\":0},\"evidenceIds\":[\"evidence-id\"],\"evidenceCoverage\":0.0,\"confidence\":0.0,\"uncertainties\":[\"...\"]}]}. All listed scalar fields and all eight scoreComponents keys are required. The opportunities value must be an array containing exactly one complete card. Do not return a bare card, a single opportunity key, prose, or markdown. Never imitate an author or copy source text.",
+                    {
+                        "phase14Step": "opportunities",
+                        "candidateIndex": candidate_index,
+                        "previousDirections": [item.get("highConcept") for item in generated],
+                        "report": report,
+                        "externalCreativeInput": creative_input or None,
+                        "scoreLimits": SCORE_LIMITS,
+                    },
+                    max_output_tokens=1600,
+                    max_retries=0,
+                    stream_response=True,
+                )
+                candidate = self._single_generated_opportunity(output)
+                try:
+                    if candidate is None:
+                        raise ValueError("The model omitted a single opportunity card.")
+                    generated.append(StoryOpportunityDraft.model_validate(candidate).model_dump(mode="json", by_alias=True))
+                except (ValidationError, ValueError) as exc:
+                    self._record_opportunity_schema_failure(project, model_run_id, exc)
+                    repaired, repair_run_id = self._complete_model_json(
+                        project,
+                        opportunity_role,
+                        f"{opportunity_run_role}:repair",
+                        request_id,
+                        "Repair one invalid story opportunity card. Return JSON only with exactly {\"opportunities\":[one complete card]}. Preserve only supported evidence IDs and never invent evidence. Required card fields are title, summary, highConcept, protagonist, coreDesire, coreConflict, worldMechanism, firstThreeChapterPromise, serialEngine, differentiation, risks, scoreComponents with platformFit, openingHook, emotionalPayoff, differentiation, serialEngine, characterStickiness, worldEngine, readability, evidenceIds, evidenceCoverage, confidence, and uncertainties.",
+                        {"phase14Step": "opportunity_repair", "invalidCard": candidate, "scoreLimits": SCORE_LIMITS, "allowedEvidenceIds": [item["id"] for item in evidence]},
+                        max_output_tokens=1600,
+                        max_retries=0,
+                        stream_response=True,
+                    )
+                    repaired_candidate = self._single_generated_opportunity(repaired)
+                    try:
+                        if repaired_candidate is None:
+                            raise ValueError("The repair omitted a single opportunity card.")
+                        generated.append(StoryOpportunityDraft.model_validate(repaired_candidate).model_dump(mode="json", by_alias=True))
+                    except (ValidationError, ValueError) as repair_exc:
+                        self._record_opportunity_schema_failure(project, repair_run_id, repair_exc)
+                        raise StoryError(422, "STORY_OPPORTUNITY_MODEL_INVALID", "The story incubator returned an incomplete opportunity card after one repair.") from repair_exc
         with self.service.db.project_write(project.id, project.folder_path) as session:
             job = session.get(ResearchJob, job_id)
             assert job
             self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
             if job.status != "accepted":
                 raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the evidence-complete research report before creating story opportunities.")
-            drafts = payload.opportunities or self._default_opportunities(session, job)
+            if generated is not None and job.report_checksum != report["reportChecksum"]:
+                raise StoryError(409, "RESEARCH_REPORT_DRIFT", "The research report changed while opportunities were generated.")
+            if creative_input and session.scalar(select(StoryOpportunity.id).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "accepted",
+                StoryOpportunity.is_current.is_(True),
+            )):
+                raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
+            drafts = payload.opportunities or generated
             if len(drafts) < 3 or len(drafts) > 5:
                 raise StoryError(422, "STORY_OPPORTUNITY_COUNT_INVALID", "Create three to five opportunities.")
             evidence_ids = {item.id for item in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id)).all()}
+            replaced_pending_count = 0
+            if creative_input:
+                now = _now()
+                for previous in session.scalars(select(StoryOpportunity).where(
+                    StoryOpportunity.job_id == job.id,
+                    StoryOpportunity.status == "pending",
+                )).all():
+                    previous.status, previous.revision, previous.updated_at = "superseded", previous.revision + 1, now
+                    replaced_pending_count += 1
             rows: list[StoryOpportunity] = []
             for draft_model in drafts:
                 draft = draft_model.model_dump(mode="json", by_alias=True) if hasattr(draft_model, "model_dump") else draft_model
                 scores, total = self._validate_scores(draft.get("scoreComponents", {}))
                 refs = set(draft.get("evidenceIds", []))
-                if not refs.issubset(evidence_ids):
+                if not refs or not refs.issubset(evidence_ids):
                     raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "An opportunity references evidence outside this research job.")
+                by_component = draft.get("evidenceByComponent", {})
+                if not isinstance(by_component, dict):
+                    raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Opportunity component evidence must be an object.")
+                component_refs: set[str] = set()
+                for component, raw_refs in by_component.items():
+                    if component not in SCORE_LIMITS or not isinstance(raw_refs, list):
+                        raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Opportunity component evidence is malformed.")
+                    values = {str(item) for item in raw_refs}
+                    if not values.issubset(evidence_ids):
+                        raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Opportunity component evidence references another research job.")
+                    component_refs.update(values)
+                if component_refs and not component_refs.issubset(refs):
+                    raise StoryError(422, "OPPORTUNITY_EVIDENCE_INVALID", "Component evidence must also appear in the opportunity evidence list.")
+                title = str(draft.get("title") or draft["highConcept"]).strip()[:80]
+                summary = str(draft.get("summary") or draft["highConcept"]).strip()[:600]
                 story = {key: draft.get(key) for key in ("protagonist", "coreDesire", "coreConflict", "worldMechanism", "firstThreeChapterPromise", "serialEngine", "differentiation", "risks", "evidenceByComponent")}
+                if creative_input_checksum:
+                    story["externalCreativeInputChecksum"] = creative_input_checksum
+                story.update({"title": title, "summary": summary})
                 checksum = stable_digest({"highConcept": draft["highConcept"], "story": story, "scores": scores, "evidence": sorted(refs), "report": job.report_checksum})
                 row = StoryOpportunity(id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision, report_checksum=job.report_checksum, high_concept=draft["highConcept"], story_json=dumps(story), score_components_json=dumps(scores), total_score=total, evidence_coverage=draft["evidenceCoverage"], confidence=draft["confidence"], uncertainties_json=dumps(draft.get("uncertainties", [])), evidence_ids_json=dumps(sorted(refs)), checksum=checksum, status="pending", is_current=False, revision=1, created_at=_now(), updated_at=_now())
                 session.add(row)
                 rows.append(row)
-            session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows)}, request_id))
+            session.add(self.service._audit("story_opportunities.created", "research_job", job.id, {"count": len(rows), "replacedPendingCount": replaced_pending_count, "externalCreativeInputChecksum": creative_input_checksum, "externalCreativeInputChars": len(creative_input)}, request_id))
             session.flush()
+            return [self._opportunity_dict(row) for row in rows]
+
+    def _create_external_creative_opportunities(
+        self,
+        project: Any,
+        job_id: str,
+        payload: StoryOpportunityCreate,
+        request_id: str,
+        creative_input: str,
+    ) -> list[dict[str, Any]]:
+        with self.service.db.project(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status != "accepted":
+                raise StoryError(409, "RESEARCH_NOT_ACCEPTED", "Accept the research report before importing creative directions.")
+            if session.scalar(select(StoryOpportunity.id).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "accepted",
+                StoryOpportunity.is_current.is_(True),
+            )):
+                raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
+            frozen = {"reportChecksum": job.report_checksum, "reportRevision": job.report_revision}
+        output, model_run_id = self._complete_model_json(
+            project,
+            "research_analyst",
+            "research_analyst:external-directions",
+            request_id,
+            "Extract only the distinct story directions actually present in the user's external creative input. Return one to six compact directions. If the input contains one direction, return one; do not invent extra directions to reach any target count. Each direction needs only title, summary, and highConcept. Treat this as user creative preference, never as market research or factual evidence. Return JSON only: {\"directions\":[{\"title\":\"...\",\"summary\":\"...\",\"highConcept\":\"...\"}]}. No scores, evidence IDs, world bible, plot outline, or commentary.",
+            {"phase14Step": "external_directions", "externalCreativeInput": creative_input},
+            max_output_tokens=1200,
+            max_retries=0,
+            stream_response=True,
+        )
+        raw_directions = output.get("directions") if isinstance(output.get("directions"), list) else None
+        if not raw_directions or not 1 <= len(raw_directions) <= 6 or not all(isinstance(item, dict) for item in raw_directions):
+            self._record_opportunity_schema_failure(project, model_run_id, ValueError("The model did not return one to six external directions."))
+            raise StoryError(422, "EXTERNAL_CREATIVE_DIRECTIONS_INVALID", "The analysis model did not return one to six usable story directions.")
+        try:
+            directions = [ExternalCreativeDirection.model_validate(item).model_dump(mode="json", by_alias=True) for item in raw_directions]
+        except ValidationError as exc:
+            self._record_opportunity_schema_failure(project, model_run_id, exc)
+            raise StoryError(422, "EXTERNAL_CREATIVE_DIRECTIONS_INVALID", "The analysis model returned incomplete external story directions.") from exc
+        input_checksum = stable_digest({"creativeInput": creative_input})
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            job = session.get(ResearchJob, job_id)
+            assert job
+            self._expect_revision(job, payload.expected_job_revision, "RESEARCH_JOB_REVISION_CONFLICT")
+            if job.status != "accepted" or job.report_checksum != frozen["reportChecksum"] or job.report_revision != frozen["reportRevision"]:
+                raise StoryError(409, "RESEARCH_REPORT_DRIFT", "The research report changed while external directions were analyzed.")
+            if session.scalar(select(StoryOpportunity.id).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "accepted",
+                StoryOpportunity.is_current.is_(True),
+            )):
+                raise StoryError(409, "STORY_OPPORTUNITY_ALREADY_ACCEPTED", "A selected story direction cannot be replaced after co-creation begins.")
+            now = _now()
+            replaced_pending_count = 0
+            for previous in session.scalars(select(StoryOpportunity).where(
+                StoryOpportunity.job_id == job.id,
+                StoryOpportunity.status == "pending",
+            )).all():
+                previous.status, previous.revision, previous.updated_at = "superseded", previous.revision + 1, now
+                replaced_pending_count += 1
+            rows: list[StoryOpportunity] = []
+            zero_scores = {key: 0 for key in SCORE_LIMITS}
+            for direction in directions:
+                story = {
+                    "title": direction["title"], "summary": direction["summary"], "inputOrigin": "externalCreativeInput",
+                    "externalCreativeInputChecksum": input_checksum, "protagonist": "notEstablished", "coreDesire": "notEstablished",
+                    "coreConflict": "notEstablished", "worldMechanism": "notEstablished", "firstThreeChapterPromise": "notEstablished",
+                    "serialEngine": "notEstablished", "differentiation": [], "risks": [], "evidenceByComponent": {},
+                }
+                row = StoryOpportunity(
+                    id=str(uuid4()), project_id=project.id, job_id=job.id, report_revision=job.report_revision,
+                    report_checksum=job.report_checksum, high_concept=direction["highConcept"], story_json=dumps(story),
+                    score_components_json=dumps(zero_scores), total_score=0, evidence_coverage=0.0, confidence=0.0,
+                    uncertainties_json=dumps(["User-supplied external creative direction; not market evidence."]), evidence_ids_json="[]",
+                    checksum=stable_digest({"highConcept": direction["highConcept"], "story": story, "report": job.report_checksum}),
+                    status="pending", is_current=False, revision=1, created_at=now, updated_at=now,
+                )
+                session.add(row)
+                rows.append(row)
+            session.add(self.service._audit("story_opportunities.external_imported", "research_job", job.id, {
+                "count": len(rows), "replacedPendingCount": replaced_pending_count,
+                "externalCreativeInputChecksum": input_checksum, "externalCreativeInputChars": len(creative_input),
+            }, request_id))
+            session.flush()
+            return [self._opportunity_dict(row) for row in rows]
+
+    def list_opportunities(self, project_id: str, job_id: str | None = None) -> list[dict[str, Any]]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            query = select(StoryOpportunity).where(StoryOpportunity.project_id == project.id)
+            if job_id:
+                job = session.get(ResearchJob, job_id)
+                if not job or job.project_id != project.id:
+                    raise StoryError(404, "RESEARCH_JOB_NOT_FOUND", "Research job was not found for this project.")
+                query = query.where(StoryOpportunity.job_id == job_id)
+            rows = session.scalars(query.order_by(StoryOpportunity.created_at.desc())).all()
             return [self._opportunity_dict(row) for row in rows]
 
     def decide_opportunity(self, opportunity_id: str, payload: StoryOpportunityAction, request_id: str, *, accepted: bool) -> dict[str, Any]:
@@ -633,35 +1250,182 @@ class Phase13Service:
 
     def add_ideation_message(self, session_id: str, payload: IdeationMessageCreate, request_id: str) -> dict[str, Any]:
         project, session_row = self._project_for_ideation_session(session_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            row = session.get(IdeationSession, session_row.id)
+            assert row
+            self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+            opportunity, job = self._assert_ideation_upstream(session, row)
+            frozen_state = safe_json_loads(row.state_json, {})
+            messages = self._session_messages(session, row.id)
+        output, model_run_id = self._complete_model_json(
+            project,
+            "story_incubator",
+            "story_incubator:ideation",
+            request_id,
+            "Respond to one creative co-creation turn. Return reply, confirmedDecisions, openQuestions, aiSuggestions, conflicts, and evidenceIds. Keep unsupported assertions uncertain and never treat the response as an accepted StoryBrief.",
+            {"phase14Step": "ideation", "userMessage": payload.content, "state": frozen_state, "messages": messages, "opportunity": self._opportunity_dict(opportunity), "researchReportChecksum": job.report_checksum},
+            stream_response=True,
+        )
+        reply = str(output.get("reply") or "").strip()
+        if not reply:
+            raise StoryError(422, "IDEATION_MODEL_INVALID", "The story incubator did not return a co-creation reply.")
+        state = {key: output.get(key, frozen_state.get(key, [])) for key in ("confirmedDecisions", "openQuestions", "aiSuggestions", "conflicts", "evidenceIds")}
+        if not all(isinstance(value, list) for value in state.values()):
+            raise StoryError(422, "IDEATION_MODEL_INVALID", "The story incubator returned an invalid co-creation state.")
         with self.service.db.project_write(project.id, project.folder_path) as session:
             row = session.get(IdeationSession, session_row.id)
             assert row
             self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
-            self._assert_ideation_upstream(session, row)
+            _, job = self._assert_ideation_upstream(session, row)
+            job_evidence_ids = set(session.scalars(select(ResearchEvidence.id).where(ResearchEvidence.job_id == job.id)).all())
+            state_evidence_ids = {str(item) for item in state["evidenceIds"]}
+            if not state_evidence_ids.issubset(job_evidence_ids):
+                raise StoryError(422, "IDEATION_EVIDENCE_INVALID", "The co-creation reply references evidence outside its frozen research report.")
             seq = (session.scalar(select(func.max(IdeationMessage.sequence_number)).where(IdeationMessage.session_id == row.id)) or 0) + 1
             user = IdeationMessage(id=str(uuid4()), project_id=project.id, session_id=row.id, sequence_number=seq, role="user", content=payload.content, structured_state_json="{}", evidence_ids_json="[]", created_at=_now())
             session.add(user)
-            state = safe_json_loads(row.state_json, {})
-            state.setdefault("openQuestions", []).append(payload.content[:500])
-            reply = "Recorded as a creative constraint. It remains proposal material until a StoryBrief proposal is explicitly accepted."
-            assistant = IdeationMessage(id=str(uuid4()), project_id=project.id, session_id=row.id, sequence_number=seq + 1, role="assistant", content=reply, structured_state_json=dumps(state), evidence_ids_json=dumps(state.get("evidenceIds", [])), created_at=_now())
+            assistant = IdeationMessage(id=str(uuid4()), project_id=project.id, session_id=row.id, sequence_number=seq + 1, role="assistant", content=reply, structured_state_json=dumps(state), evidence_ids_json=dumps(state["evidenceIds"]), model_run_id=model_run_id, created_at=_now())
             session.add(assistant)
             row.state_json, row.revision, row.updated_at = dumps(state), row.revision + 1, _now()
             session.add(self.service._audit("ideation_message.recorded", "ideation_session", row.id, {}, request_id))
             return self._message_dict(assistant)
 
+    def create_ideation_kickoff_section(self, session_id: str, section: str, payload: Any, request_id: str) -> dict[str, Any]:
+        """Generate and persist one independently retryable co-creation section."""
+        specs = {
+            "core": (
+                "故事内核与创作承诺",
+                "为选定方向写一份不超过450字的中文讨论材料，只谈故事内核、读者承诺、主题、主要情绪回报和结局方向。不要写完整剧情、人物小传、世界规则、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+                "ideation_kickoff_core_text",
+            ),
+            "world": (
+                "世界与叙事发动机",
+                "为选定方向写一份不超过650字的中文讨论材料，只谈必要的时空背景、社会或自然规则、核心冲突、前三章阅读承诺、长线推进机制和信息揭示窗口。不要写完整剧情、人物小传、题材专属系统细节、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+                "ideation_kickoff_world_text",
+            ),
+            "characters": (
+                "人物与关系合同",
+                "为选定方向写一份不超过700字的中文讨论材料，提出故事当前真正需要的主角和关键配角候选，人数不设固定值。每个人物写明身份、年龄或人生阶段、核心欲望、主要弱点、关系作用和人物弧方向。不要补写能力体系、完整剧情、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+                "ideation_kickoff_characters_text",
+            ),
+            "genre": (
+                "题材专属台账",
+                "先判断这个故事真正需要哪些题材专属台账，再用不超过650字列出建议。悬疑可包含案件、线索、嫌疑人和真相链；玄幻可包含等级、能力、法宝与代价；职业文可包含行业流程；科幻可包含技术边界；言情可包含关系阶段与情感底线。只生成适用于当前故事的类别，不适用的不要硬加。不要写完整剧情、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+                "ideation_kickoff_genre_text",
+            ),
+            "boundaries": (
+                "叙事边界与待确认问题",
+                "为选定方向写一份不超过450字的中文讨论材料，只列出建议的叙事视角、语气、节奏、禁写内容、不可模仿边界，以及2至8个必须由作者拍板的问题。不要补写剧情、人物、世界观、JSON、Markdown代码块或解释。所有内容都只是待作者确认的建议。",
+                "ideation_kickoff_boundaries_text",
+            ),
+        }
+        if section not in specs:
+            raise StoryError(404, "IDEATION_KICKOFF_SECTION_NOT_FOUND", "共创底稿分段不存在。")
+        label, instruction, phase_step = specs[section]
+        project, session_row = self._project_for_ideation_session(session_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            row = session.get(IdeationSession, session_row.id)
+            assert row
+            self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+            opportunity, job = self._assert_ideation_upstream(session, row)
+            state = safe_json_loads(row.state_json, {})
+            frozen = {
+                "opportunityRevision": opportunity.revision,
+                "opportunityChecksum": opportunity.checksum,
+                "researchReportChecksum": job.report_checksum,
+            }
+        text, model_run_id = self._complete_ideation_kickoff_text(
+            project,
+            request_id,
+            section,
+            label,
+            instruction,
+            {
+                "phase14Step": phase_step,
+                "opportunity": self._opportunity_dict(opportunity),
+                "researchReportChecksum": job.report_checksum,
+                "existingSections": state.get("kickoffSections", {}),
+            },
+        )
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            row = session.get(IdeationSession, session_row.id)
+            assert row
+            self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+            opportunity, job = self._assert_ideation_upstream(session, row)
+            if opportunity.revision != frozen["opportunityRevision"] or opportunity.checksum != frozen["opportunityChecksum"] or job.report_checksum != frozen["researchReportChecksum"]:
+                raise StoryError(409, "IDEATION_UPSTREAM_DRIFT", "The selected direction or research report changed while the kickoff draft was generated.")
+            current_state = safe_json_loads(row.state_json, {})
+            sections = dict(current_state.get("kickoffSections", {}))
+            previous = sections.get(section, {}) if isinstance(sections.get(section), dict) else {}
+            sections[section] = {
+                "label": label,
+                "status": "ready",
+                "content": text,
+                "modelRunId": model_run_id,
+                "revision": int(previous.get("revision", 0)) + 1,
+                "generatedAt": _now().isoformat(),
+            }
+            next_state = {**current_state, "kickoffSections": sections}
+            suggestions = list(next_state.get("aiSuggestions", []))
+            notice = "共创底稿分段均为待讨论建议，不会自动成为正式设定。"
+            if notice not in suggestions:
+                suggestions.append(notice)
+            next_state["aiSuggestions"] = suggestions
+            row.state_json, row.revision, row.updated_at = dumps(next_state), row.revision + 1, _now()
+            session.add(self.service._audit("ideation_kickoff.section_generated", "ideation_session", row.id, {"section": section, "sectionRevision": sections[section]["revision"]}, request_id))
+            session.flush()
+            return self._session_dict(row, self._session_messages(session, row.id))
+
     def create_story_brief_proposal(self, session_id: str, payload: StoryBriefProposalCreate, request_id: str) -> dict[str, Any]:
         project, session_row = self._project_for_ideation_session(session_id)
+        generated: dict[str, Any] | None = None
+        model_run_id: str | None = None
+        with self.service.db.project(project.id, project.folder_path) as session:
+            row = session.get(IdeationSession, session_row.id)
+            assert row
+            self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+            self._assert_ideation_upstream(session, row)
+            user_message_count = int(session.scalar(select(func.count()).select_from(IdeationMessage).where(
+                IdeationMessage.session_id == row.id,
+                IdeationMessage.role == "user",
+            )) or 0)
+            if user_message_count < 2:
+                raise StoryError(
+                    409,
+                    "IDEATION_DISCUSSION_REQUIRED",
+                    "Discuss the selected direction for at least two user turns before freezing a StoryBrief.",
+                    {"currentUserTurns": user_message_count, "requiredUserTurns": 2},
+                )
+        if payload.brief is None:
+            with self.service.db.project(project.id, project.folder_path) as session:
+                row = session.get(IdeationSession, session_row.id)
+                assert row
+                self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
+                opportunity, job = self._assert_ideation_upstream(session, row)
+                state = safe_json_loads(row.state_json, {})
+                messages = self._session_messages(session, row.id)
+            output, model_run_id = self._complete_model_json(
+                project,
+                "story_incubator",
+                "story_incubator:story-brief",
+                request_id,
+                "Generate a complete structured StoryBrief from the accepted opportunity and co-creation session. Do not imitate authors or claim unsupported research facts.",
+                {"phase14Step": "story_brief", "projectTitle": project.title, "opportunity": self._opportunity_dict(opportunity), "researchReportChecksum": job.report_checksum, "state": state, "messages": messages},
+                stream_response=True,
+            )
+            generated = output.get("brief") if isinstance(output.get("brief"), dict) else output
         with self.service.db.project_write(project.id, project.folder_path) as session:
             row = session.get(IdeationSession, session_row.id)
             assert row
             self._expect_revision(row, payload.expected_session_revision, "IDEATION_SESSION_REVISION_CONFLICT")
             opportunity, job = self._assert_ideation_upstream(session, row)
             current = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
-            proposed = payload.brief or self._derive_brief(project.title, opportunity, row, job)
+            proposed = payload.brief or generated
+            if not isinstance(proposed, dict):
+                raise StoryError(422, "STORY_BRIEF_MODEL_INVALID", "The story incubator did not return a StoryBrief.")
             self._validate_brief(proposed)
             diff = {"baseVersionId": current.id if current else None, "changedFields": sorted(proposed)}
-            proposal = StoryBriefProposal(id=str(uuid4()), project_id=project.id, session_id=row.id, base_brief_version_id=current.id if current else None, opportunity_id=opportunity.id, opportunity_revision=opportunity.revision, opportunity_checksum=opportunity.checksum, research_job_id=job.id, research_report_checksum=job.report_checksum, proposed_brief_json=dumps(proposed), diff_json=dumps(diff), checksum=stable_digest(proposed), status="pending", revision=1, created_at=_now(), updated_at=_now())
+            proposal = StoryBriefProposal(id=str(uuid4()), project_id=project.id, session_id=row.id, base_brief_version_id=current.id if current else None, opportunity_id=opportunity.id, opportunity_revision=opportunity.revision, opportunity_checksum=opportunity.checksum, research_job_id=job.id, research_report_checksum=job.report_checksum, proposed_brief_json=dumps(proposed), diff_json=dumps(diff), checksum=stable_digest(proposed), model_run_id=model_run_id, status="pending", revision=1, created_at=_now(), updated_at=_now())
             session.add(proposal)
             session.add(self.service._audit("story_brief_proposal.created", "story_brief_proposal", proposal.id, {}, request_id))
             session.flush()
@@ -671,6 +1435,18 @@ class Phase13Service:
         project = self.service.get_project(project_id)
         with self.service.db.project(project.id, project.folder_path) as session:
             return [self._brief_version_dict(row) for row in session.scalars(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id).order_by(StoryBriefVersion.version_number.desc())).all()]
+
+    def list_story_brief_proposals(self, project_id: str, session_id: str | None = None) -> list[dict[str, Any]]:
+        project = self.service.get_project(project_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            query = select(StoryBriefProposal).where(StoryBriefProposal.project_id == project.id)
+            if session_id:
+                ideation = session.get(IdeationSession, session_id)
+                if not ideation or ideation.project_id != project.id:
+                    raise StoryError(404, "IDEATION_SESSION_NOT_FOUND", "Ideation session was not found for this project.")
+                query = query.where(StoryBriefProposal.session_id == session_id)
+            rows = session.scalars(query.order_by(StoryBriefProposal.created_at.desc())).all()
+            return [self._brief_proposal_dict(row) for row in rows]
 
     def current_story_brief(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
@@ -712,21 +1488,80 @@ class Phase13Service:
     # ------------------------------------------------------------------
     def create_canon_proposal(self, project_id: str, payload: IncubationCanonProposalCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
+        with self.service.db.project(project.id, project.folder_path) as session:
             brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
             if not brief:
                 raise StoryError(409, "STORY_BRIEF_NOT_ACCEPTED", "An accepted StoryBrief is required before creating a Canon draft.")
             self._expect_revision(brief, payload.expected_story_brief_revision, "STORY_BRIEF_REVISION_CONFLICT")
+            opportunity, job, doc = session.get(StoryOpportunity, brief.opportunity_id), session.get(ResearchJob, brief.research_job_id), session.get(CanonDocument, "story-core")
+            if not opportunity or not job or not doc or opportunity.status != "accepted" or not opportunity.is_current or job.status != "accepted" or opportunity.checksum != brief.opportunity_checksum or job.report_checksum != brief.research_report_checksum:
+                raise StoryError(409, "CANON_UPSTREAM_DRIFT", "The accepted StoryBrief upstream authority changed.")
+            brief_data = safe_json_loads(brief.brief_json, {})
+            frozen = {"briefId": brief.id, "briefRevision": brief.revision, "briefChecksum": brief.checksum, "opportunityId": opportunity.id, "reportChecksum": job.report_checksum, "canonRevision": doc.revision}
+        output, model_run_id = self._complete_model_json(
+            project,
+            "story_incubator",
+            "story_incubator:canon",
+            request_id,
+            "Generate a generic story Canon proposal. Return markdown, structured (entities, relations, rules), and do not introduce named-author imitation, Night Watch residue, forced power systems, or chapter plans.",
+            {"phase14Step": "canon", "storyBrief": brief_data, "instructions": payload.instructions},
+            stream_response=True,
+        )
+        markdown, generated_structured = str(output.get("markdown") or "").strip(), output.get("structured")
+        if not markdown or not isinstance(generated_structured, dict):
+            raise StoryError(422, "CANON_MODEL_INVALID", "The story incubator did not return a Canon proposal.")
+        analyzed, _ = self._complete_model_json(
+            project,
+            "research_analyst",
+            "research_analyst:canon-analyzer",
+            request_id,
+            "Independently extract the supplied Canon into structured entities, relations, and rules. Preserve only claims present in the Canon. Return structured only.",
+            {"phase14Step": "canon_analyze", "storyBrief": brief_data, "canonMarkdown": markdown},
+        )
+        structured = analyzed.get("structured") if isinstance(analyzed.get("structured"), dict) else analyzed
+        structured = structured if isinstance(structured, dict) else {}
+        structured["_generationCrossCheck"] = self._canon_cross_check(generated_structured, structured)
+        readiness = self._generic_canon_checks(markdown, structured, brief_data)
+        if not readiness["ready"]:
+            missing = [item["code"] for item in readiness["checks"] if item["status"] == "blocked"]
+            repaired, _ = self._complete_model_json(
+                project,
+                "story_incubator",
+                "story_incubator:canon-repair",
+                request_id,
+                "Repair only the listed Canon completeness failures. Return the complete markdown and structured entities, relations, and rules. Do not add unrelated systems or chapter plans.",
+                {"phase14Step": "canon_repair", "missingChecks": missing, "storyBrief": brief_data, "markdown": markdown, "structured": generated_structured},
+                stream_response=True,
+            )
+            repaired_markdown = str(repaired.get("markdown") or "").strip()
+            repaired_structured = repaired.get("structured")
+            if repaired_markdown and isinstance(repaired_structured, dict):
+                markdown, generated_structured = repaired_markdown, repaired_structured
+                analyzed, _ = self._complete_model_json(
+                    project,
+                    "research_analyst",
+                    "research_analyst:canon-analyzer-recheck",
+                    request_id,
+                    "Independently extract the supplied Canon into structured entities, relations, and rules. Preserve only claims present in the Canon. Return structured only.",
+                    {"phase14Step": "canon_analyze", "storyBrief": brief_data, "canonMarkdown": markdown},
+                )
+                structured = analyzed.get("structured") if isinstance(analyzed.get("structured"), dict) else analyzed
+                structured = structured if isinstance(structured, dict) else {}
+                structured["_generationCrossCheck"] = self._canon_cross_check(generated_structured, structured)
+                readiness = self._generic_canon_checks(markdown, structured, brief_data)
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
+            if not brief or brief.id != frozen["briefId"] or brief.revision != frozen["briefRevision"] or brief.checksum != frozen["briefChecksum"]:
+                raise StoryError(409, "CANON_STORY_BRIEF_DRIFT", "The StoryBrief changed while the Canon proposal was generated.")
             opportunity = session.get(StoryOpportunity, brief.opportunity_id)
             job = session.get(ResearchJob, brief.research_job_id)
-            if not opportunity or not job or opportunity.status != "accepted" or not opportunity.is_current or job.status != "accepted" or opportunity.checksum != brief.opportunity_checksum or job.report_checksum != brief.research_report_checksum:
+            if not opportunity or not job or opportunity.id != frozen["opportunityId"] or opportunity.status != "accepted" or not opportunity.is_current or job.status != "accepted" or job.report_checksum != frozen["reportChecksum"]:
                 raise StoryError(409, "CANON_UPSTREAM_DRIFT", "The accepted StoryBrief upstream authority changed.")
             doc = session.get(CanonDocument, "story-core")
-            assert doc
-            brief_data = safe_json_loads(brief.brief_json, {})
-            markdown, structured = self._generic_canon(project.title, brief_data, payload.instructions)
+            if not doc or doc.revision != frozen["canonRevision"]:
+                raise StoryError(409, "CANON_REVISION_CONFLICT", "Canon changed while the proposal was generated.")
             metadata = {"incubation": True, "storyBriefVersionId": brief.id, "storyBriefRevision": brief.revision, "storyBriefChecksum": brief.checksum, "opportunityId": opportunity.id, "researchReportChecksum": job.report_checksum, "brief": brief_data}
-            proposal = CanonGenerationProposal(id=str(uuid4()), project_id=project.id, base_revision=doc.revision, status="pending", brief_json=dumps(metadata), content_markdown=markdown, structured_json=dumps(structured), readiness_json=dumps(self._generic_canon_checks(markdown, structured)), model_run_id=None, revision=1, created_at=_now(), updated_at=_now())
+            proposal = CanonGenerationProposal(id=str(uuid4()), project_id=project.id, base_revision=doc.revision, status="pending" if readiness["ready"] else "failed", brief_json=dumps(metadata), content_markdown=markdown, structured_json=dumps(structured), readiness_json=dumps(readiness), model_run_id=model_run_id, revision=1, created_at=_now(), updated_at=_now())
             session.add(proposal)
             session.add(self.service._audit("incubation_canon_proposal.created", "canon_generation_proposal", proposal.id, {"storyBriefVersionId": brief.id}, request_id))
             session.flush()
@@ -748,7 +1583,7 @@ class Phase13Service:
 
     def create_opening_experiment(self, project_id: str, payload: OpeningExperimentCreate, request_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
-        with self.service.db.project_write(project.id, project.folder_path) as session:
+        with self.service.db.project(project.id, project.folder_path) as session:
             brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
             doc = session.get(CanonDocument, "story-core")
             if not brief or not doc:
@@ -760,17 +1595,43 @@ class Phase13Service:
             strategies = [item.model_dump(mode="json", by_alias=True) for item in payload.strategies] if payload.strategies else DEFAULT_OPENING_STRATEGIES
             if len({item["key"] for item in strategies}) != 3:
                 raise StoryError(422, "OPENING_STRATEGIES_INVALID", "Opening experiment requires three distinct strategies.")
-            canon_checksum = stable_digest({"markdown": doc.content_markdown, "revision": doc.revision})
+            frozen = {"briefId": brief.id, "briefRevision": brief.revision, "briefChecksum": brief.checksum, "canonRevision": doc.revision, "canonChecksum": stable_digest({"markdown": doc.content_markdown, "revision": doc.revision})}
+            brief_data, canon_markdown = safe_json_loads(brief.brief_json, {}), doc.content_markdown
+        generated: list[tuple[dict[str, Any], dict[str, Any], str, list[tuple[str, dict[str, Any], str]]]] = []
+        for strategy in strategies:
+            output, run_id = self._complete_model_json(project, "story_incubator", f"story_incubator:opening:{strategy['key']}", request_id, "Write one distinct first chapter for the given opening strategy. Return chapter with title and content only. Respect the StoryBrief word range and Canon. Do not imitate authors or reuse source text.", {"phase14Step": "opening", "strategy": strategy, "storyBrief": brief_data, "canonMarkdown": canon_markdown[:8000]}, stream_response=True)
+            chapter = output.get("chapter") if isinstance(output.get("chapter"), dict) else output
+            content = str(chapter.get("content") or "").strip() if isinstance(chapter, dict) else ""
+            title = str(chapter.get("title") or strategy["label"]).strip() if isinstance(chapter, dict) else ""
+            if not content:
+                raise StoryError(422, "OPENING_MODEL_INVALID", "The story incubator did not return an opening chapter.")
+            self._validate_opening_content(content, brief_data)
+            chapter = {"chapterNumber": 1, "title": title[:300], "content": content, "manualApproved": False}
+            reviews: list[tuple[str, dict[str, Any], str]] = []
+            for role in ("reader_simulator", "opening_editor"):
+                review, review_run_id = self._complete_model_json(project, role, f"{role}:opening-review", request_id, "Independently review this opening. Return scores, findings with source ranges and suggestions, recommendation, and summary. Do not read another reviewer and do not use fixed scores.", {"phase14Step": "opening_review", "strategy": strategy, "chapter": chapter, "storyBrief": brief_data})
+                if not isinstance(review.get("scores"), dict) or not str(review.get("summary") or "").strip():
+                    raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "The opening reviewer did not return a valid review.")
+                self._validate_opening_review(review, content)
+                reviews.append((role, review, review_run_id))
+            generated.append((strategy, chapter, run_id, reviews))
+        contents = [item[1]["content"] for item in generated]
+        if any(self._opening_similarity(contents[left], contents[right]) >= 0.85 for left in range(len(contents)) for right in range(left + 1, len(contents))):
+            raise StoryError(422, "OPENING_CANDIDATES_NOT_DISTINCT", "Opening candidates are too similar to be meaningful alternatives.")
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
+            doc = session.get(CanonDocument, "story-core")
+            if not brief or not doc or brief.id != frozen["briefId"] or brief.revision != frozen["briefRevision"] or brief.checksum != frozen["briefChecksum"] or doc.revision != frozen["canonRevision"] or stable_digest({"markdown": doc.content_markdown, "revision": doc.revision}) != frozen["canonChecksum"]:
+                raise StoryError(409, "OPENING_UPSTREAM_DRIFT", "StoryBrief or Canon changed while openings were generated.")
+            canon_checksum = frozen["canonChecksum"]
             experiment = OpeningExperiment(id=str(uuid4()), project_id=project.id, story_brief_version_id=brief.id, story_brief_revision=brief.revision, story_brief_checksum=brief.checksum, canon_document_id=doc.id, canon_revision=doc.revision, canon_checksum=canon_checksum, strategies_json=dumps(strategies), status="generating", revision=1, created_at=_now(), updated_at=_now())
             session.add(experiment)
-            brief_data = safe_json_loads(brief.brief_json, {})
-            for strategy in strategies:
-                chapter = {**self._opening_chapter(brief_data, strategy), "manualApproved": False}
-                candidate = OpeningCandidate(id=str(uuid4()), project_id=project.id, experiment_id=experiment.id, strategy_key=strategy["key"], strategy_label=strategy["label"], strategy_json=dumps(strategy), chapters_json=dumps([chapter]), chapter_count=1, text_checksum=stable_digest(chapter), status="candidate", revision=1, created_at=_now(), updated_at=_now())
+            for strategy, chapter, run_id, reviews in generated:
+                candidate = OpeningCandidate(id=str(uuid4()), project_id=project.id, experiment_id=experiment.id, strategy_key=strategy["key"], strategy_label=strategy["label"], strategy_json=dumps(strategy), chapters_json=dumps([chapter]), chapter_count=1, text_checksum=stable_digest(chapter), model_run_id=run_id, status="candidate", revision=1, created_at=_now(), updated_at=_now())
                 session.add(candidate)
-                for role in ("reader_simulator", "opening_editor"):
-                    evaluation = self._evaluate_candidate(project.id, experiment.id, candidate, role)
-                    session.add(evaluation)
+                for role, review, review_run_id in reviews:
+                    scores, findings = review["scores"], review.get("findings", [])
+                    session.add(ReaderEvaluation(id=str(uuid4()), project_id=project.id, experiment_id=experiment.id, candidate_id=candidate.id, reviewer_role=role, scores_json=dumps(scores), findings_json=dumps(findings if isinstance(findings, list) else []), recommendation=str(review.get("recommendation") or "revise")[:40], summary=str(review["summary"])[:4000], model_run_id=review_run_id, checksum=stable_digest({"role": role, "scores": scores, "findings": findings}), created_at=_now()))
             experiment.status, experiment.revision, experiment.updated_at = "awaiting_selection", 2, _now()
             session.add(self.service._audit("opening_experiment.created", "opening_experiment", experiment.id, {"strategies": [item["key"] for item in strategies]}, request_id))
             session.flush()
@@ -817,6 +1678,33 @@ class Phase13Service:
 
     def expand_opening_to_three_chapters(self, experiment_id: str, payload: OpeningExpand, request_id: str) -> dict[str, Any]:
         project, experiment_row = self._project_for_experiment(experiment_id)
+        with self.service.db.project(project.id, project.folder_path) as session:
+            experiment = session.get(OpeningExperiment, experiment_row.id)
+            candidate = session.get(OpeningCandidate, payload.selected_candidate_id)
+            assert experiment
+            self._expect_revision(experiment, payload.expected_revision, "OPENING_EXPERIMENT_REVISION_CONFLICT")
+            if not candidate or candidate.project_id != project.id or candidate.experiment_id != experiment.id:
+                raise StoryError(404, "OPENING_CANDIDATE_NOT_FOUND", "Opening candidate was not found in this experiment.")
+            self._expect_revision(candidate, payload.expected_candidate_revision, "OPENING_CANDIDATE_REVISION_CONFLICT")
+            if experiment.selected_candidate_id != candidate.id or candidate.status != "selected":
+                raise StoryError(409, "OPENING_CANDIDATE_NOT_SELECTED", "Only a human-selected candidate may expand to three chapters.")
+            brief = session.get(StoryBriefVersion, experiment.story_brief_version_id)
+            frozen = {"experimentRevision": experiment.revision, "candidateRevision": candidate.revision, "candidateId": candidate.id}
+            chapters = safe_json_loads(candidate.chapters_json, [])
+        output, _ = self._complete_model_json(project, "story_incubator", "story_incubator:opening-expand", request_id, "Write experimental chapters two and three for the selected opening. Return chapters with exactly chapterNumber 2 and 3, title, content. They remain experiments and must not be official manuscript text.", {"phase14Step": "opening_expand", "storyBrief": safe_json_loads(brief.brief_json, {}) if brief else {}, "selectedChapters": chapters}, stream_response=True)
+        additions = output.get("chapters") if isinstance(output.get("chapters"), list) else []
+        if {item.get("chapterNumber") for item in additions if isinstance(item, dict)} != {2, 3}:
+            raise StoryError(422, "OPENING_EXPANSION_MODEL_INVALID", "The story incubator must return chapters two and three.")
+        addition_contents = [str(item.get("content") or "").strip() for item in additions if isinstance(item, dict)]
+        if any(not content for content in addition_contents):
+            raise StoryError(422, "OPENING_EXPANSION_MODEL_INVALID", "Expanded opening chapters cannot be empty.")
+        brief_data = safe_json_loads(brief.brief_json, {}) if brief else {}
+        for content in addition_contents:
+            self._validate_opening_content(content, brief_data)
+        existing_content = str(chapters[0].get("content") or "") if chapters and isinstance(chapters[0], dict) else ""
+        all_contents = [existing_content, *addition_contents]
+        if any(self._opening_similarity(all_contents[left], all_contents[right]) >= 0.85 for left in range(len(all_contents)) for right in range(left + 1, len(all_contents))):
+            raise StoryError(422, "OPENING_CHAPTERS_NOT_DISTINCT", "Expanded opening chapters must advance with distinct content.")
         with self.service.db.project_write(project.id, project.folder_path) as session:
             experiment = session.get(OpeningExperiment, experiment_row.id)
             candidate = session.get(OpeningCandidate, payload.selected_candidate_id)
@@ -827,10 +1715,12 @@ class Phase13Service:
             self._expect_revision(candidate, payload.expected_candidate_revision, "OPENING_CANDIDATE_REVISION_CONFLICT")
             if experiment.selected_candidate_id != candidate.id or candidate.status != "selected":
                 raise StoryError(409, "OPENING_CANDIDATE_NOT_SELECTED", "Only a human-selected candidate may expand to three chapters.")
+            if experiment.revision != frozen["experimentRevision"] or candidate.revision != frozen["candidateRevision"] or candidate.id != frozen["candidateId"]:
+                raise StoryError(409, "OPENING_UPSTREAM_DRIFT", "The selected opening changed while the expansion was generated.")
             chapters = safe_json_loads(candidate.chapters_json, [])
-            while len(chapters) < 3:
-                number = len(chapters) + 1
-                chapters.append({"chapterNumber": number, "title": f"Candidate chapter {number}", "content": f"Continuation experiment only. Chapter {number} creates a new decision and does not enter the official manuscript.", "manualApproved": False})
+            chapters.extend({"chapterNumber": item["chapterNumber"], "title": str(item.get("title") or "")[:300], "content": str(item.get("content") or ""), "manualApproved": False} for item in additions if isinstance(item, dict) and str(item.get("content") or "").strip())
+            if len(chapters) != 3:
+                raise StoryError(422, "OPENING_EXPANSION_MODEL_INVALID", "The expanded opening is incomplete.")
             candidate.chapters_json, candidate.chapter_count, candidate.text_checksum, candidate.revision, candidate.updated_at = dumps(chapters), 3, stable_digest(chapters), candidate.revision + 1, _now()
             experiment.status, experiment.revision, experiment.updated_at = "three_chapter_experiment", experiment.revision + 1, _now()
             session.add(self.service._audit("opening_experiment.expanded", "opening_experiment", experiment.id, {"candidateId": candidate.id}, request_id))
@@ -872,17 +1762,54 @@ class Phase13Service:
 
     def readiness(self, project_id: str) -> dict[str, Any]:
         project = self.service.get_project(project_id)
+        required_roles = {"research_planner", "research_analyst", "story_incubator", "reader_simulator", "opening_editor"}
+        role_labels = {
+            "research_planner": "市场调研规划",
+            "research_analyst": "研究证据分析",
+            "story_incubator": "故事创意孵化",
+            "reader_simulator": "目标读者模拟",
+            "opening_editor": "开篇编辑评审",
+        }
+        missing_roles: list[str] = []
+        unavailable_roles: list[str] = []
+        untested_providers: set[str] = set()
+        with self.service.db.catalog() as catalog_session:
+            bindings = catalog_session.scalars(
+                select(ModelRoleBinding)
+                .where(ModelRoleBinding.role.in_(required_roles))
+                .options(selectinload(ModelRoleBinding.model).selectinload(ModelConfig.provider))
+            ).all()
+            by_role = {binding.role: binding for binding in bindings}
+            for role in sorted(required_roles):
+                binding = by_role.get(role)
+                model = binding.model if binding else None
+                provider: ModelProvider | None = model.provider if model else None
+                if not model:
+                    missing_roles.append(role)
+                elif not model.is_enabled or not provider or not provider.is_enabled or not provider.api_key_ref:
+                    unavailable_roles.append(role)
+                elif provider.last_test_status != "success":
+                    untested_providers.add(provider.name)
+        if missing_roles:
+            model_check = {"code": "INCUBATION_MODEL_ROLE_MISSING", "status": "blocked", "detail": "请先绑定孵化所需模型角色：" + "、".join(role_labels[role] for role in missing_roles), "actionPath": "/settings"}
+        elif unavailable_roles:
+            model_check = {"code": "INCUBATION_MODEL_UNAVAILABLE", "status": "blocked", "detail": "请启用模型、Provider 和密钥：" + "、".join(role_labels[role] for role in unavailable_roles), "actionPath": "/settings"}
+        elif untested_providers:
+            model_check = {"code": "INCUBATION_PROVIDER_NOT_TESTED", "status": "blocked", "detail": "请先完成 Provider 连接测试：" + "、".join(sorted(untested_providers)), "actionPath": "/settings"}
+        else:
+            model_check = {"code": "INCUBATION_MODELS_READY", "status": "ready", "detail": "五个孵化模型角色均已可用，并且通过连接测试。", "actionPath": "/settings"}
         with self.service.db.project(project.id, project.folder_path) as session:
             brief = session.scalar(select(StoryBriefVersion).where(StoryBriefVersion.project_id == project.id, StoryBriefVersion.is_current.is_(True)))
             baseline = session.scalar(select(StyleBaseline).where(StyleBaseline.project_id == project.id, StyleBaseline.is_current.is_(True)))
             selected = session.scalar(select(OpeningCandidate).where(OpeningCandidate.project_id == project.id, OpeningCandidate.status == "selected"))
             doc = session.get(CanonDocument, "story-core")
             checks = [
-                {"code": "STORY_BRIEF_ACCEPTED", "status": "ready" if brief else "blocked", "detail": "Accepted StoryBrief exists." if brief else "Accept a StoryBrief proposal first."},
-                {"code": "CANON_DRAFT", "status": "ready" if doc and doc.status == "draft" and bool(doc.content_markdown.strip()) else "blocked", "detail": "Draft Canon exists." if doc and doc.status == "draft" else "Create and apply a Canon draft first."},
-                {"code": "OPENING_SELECTED", "status": "ready" if selected else "blocked", "detail": "A human selected an opening candidate." if selected else "Select an opening candidate explicitly."},
-                {"code": "STYLE_BASELINE", "status": "ready" if baseline else "blocked", "detail": "Three manually approved experimental chapters established the style baseline." if baseline else "Expand the selected candidate and approve all three experimental chapters."},
-                {"code": "FIRST_THREE_MANUAL_ONLY", "status": "warning", "detail": "The first three production chapters require later manual approval; automation is not opened by incubation."},
+                model_check,
+                {"code": "STORY_BRIEF_ACCEPTED", "status": "ready" if brief else "blocked", "detail": "StoryBrief 已由你确认。" if brief else "请先确认一个 StoryBrief 提案。"},
+                {"code": "CANON_DRAFT", "status": "ready" if doc and doc.status == "draft" and bool(doc.content_markdown.strip()) else "blocked", "detail": "Canon 草稿已经建立。" if doc and doc.status == "draft" else "请先生成并应用 Canon 候选。"},
+                {"code": "OPENING_SELECTED", "status": "ready" if selected else "blocked", "detail": "开篇方向已由你选择。" if selected else "请从三个开篇候选中明确选择一个方向。"},
+                {"code": "STYLE_BASELINE", "status": "ready" if baseline else "blocked", "detail": "三章人工批准的实验稿已建立文风基线。" if baseline else "请扩写选中的开篇，并人工批准全部三章实验稿。"},
+                {"code": "FIRST_THREE_MANUAL_ONLY", "status": "warning", "detail": "正式作品的前三章仍需人工批准；创意孵化不会自动开启托管。"},
             ]
             ready = all(item["status"] == "ready" for item in checks if item["status"] != "warning")
             return {"projectId": project.id, "ready": ready, "stage": "ready_for_manual_handoff" if ready else "incubating", "checks": checks, "currentStoryBriefId": brief.id if brief else None, "selectedOpeningCandidateId": selected.id if selected else None, "styleBaselineId": baseline.id if baseline else None, "updatedAt": _now()}
@@ -1154,6 +2081,71 @@ class Phase13Service:
         suffixes = ("platform trends", "leading works", "reader praise", "reader dropoff reasons", "opening hook strategy", "serial retention engine")
         return list(zip(PERSPECTIVES, [f"{base} {suffix}" for suffix in suffixes], strict=True))
 
+    def _model_queries(self, project: Any, brief: dict[str, Any], request_id: str, job_id: str) -> list[tuple[str, str]]:
+        output, _ = self._complete_model_json(
+            project,
+            "research_planner",
+            "research_planner:query-plan",
+            request_id,
+            (
+                "You are a market-research query planner. Produce exactly one concise public-web query for each required perspective. "
+                "Return this exact JSON shape: {\"queries\":[{\"perspective\":\"platform_trends\",\"query\":\"...\"}]}. "
+                "The queries array must contain all supplied perspective keys exactly once. "
+                "Do not invent facts, copyrighted text, or named-author imitation."
+            ),
+            {
+                "phase14Step": "query_plan",
+                "brief": brief,
+                "perspectives": list(PERSPECTIVES),
+                "requiredOutput": {"queries": [{"perspective": "one supplied perspective key", "query": "one concise public-web query"}]},
+            },
+            budget_job_id=job_id,
+        )
+        try:
+            return self._validate_model_queries(output)
+        except StoryError as first_error:
+            repaired, _ = self._complete_model_json(
+                project,
+                "research_planner",
+                "research_planner:query-plan:schema-repair",
+                request_id,
+                (
+                    "Repair the query plan structure without changing the research brief. "
+                    "Return exactly one queries array containing every required perspective exactly once. "
+                    "Each item must contain only a supplied perspective key and a non-empty public-web query."
+                ),
+                {
+                    "phase14Step": "query_plan_schema_repair",
+                    "brief": brief,
+                    "perspectives": list(PERSPECTIVES),
+                    "invalidOutput": output,
+                    "validationError": first_error.code,
+                    "requiredOutput": {"queries": [{"perspective": "one supplied perspective key", "query": "one concise public-web query"}]},
+                },
+                budget_job_id=job_id,
+            )
+            return self._validate_model_queries(repaired)
+
+    @staticmethod
+    def _validate_model_queries(output: dict[str, Any]) -> list[tuple[str, str]]:
+        items = output.get("queries")
+        if not isinstance(items, list):
+            raise StoryError(422, "RESEARCH_QUERY_PLAN_INVALID", "The research planner did not return a queries array.")
+        planned: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            perspective = str(item.get("perspective") or "").strip()
+            query = str(item.get("query") or "").strip()
+            if perspective not in PERSPECTIVES or not query or perspective in seen:
+                raise StoryError(422, "RESEARCH_QUERY_PLAN_INVALID", "The research planner returned an invalid or duplicate perspective.")
+            seen.add(perspective)
+            planned.append((perspective, query[:1000]))
+        if set(seen) != set(PERSPECTIVES):
+            raise StoryError(422, "RESEARCH_QUERY_PLAN_INCOMPLETE", "The research planner must cover every required perspective.")
+        return planned
+
     @staticmethod
     def _source_type(domain: str) -> str:
         domain = domain.lower()
@@ -1224,25 +2216,85 @@ class Phase13Service:
         return stable_digest({"job": job.id, "reportRevision": job.report_revision, "evidence": evidence, "competitors": competitors})
 
     @staticmethod
+    def _single_generated_opportunity(output: dict[str, Any]) -> dict[str, Any] | None:
+        """Accept equivalent one-card JSON envelopes, then validate the card strictly."""
+        raw = output.get("opportunities")
+        if isinstance(raw, list):
+            return raw[0] if len(raw) == 1 and isinstance(raw[0], dict) else None
+        if isinstance(raw, dict):
+            return raw
+        for key in ("opportunity", "storyOpportunity", "candidate"):
+            raw = output.get(key)
+            if isinstance(raw, dict):
+                return raw
+        return output if {"highConcept", "scoreComponents", "evidenceIds"}.issubset(output) else None
+
+    def _record_opportunity_schema_failure(self, project: Any, run_id: str, error: ValidationError | ValueError) -> None:
+        """Keep diagnostics structural so invalid model bodies are never persisted."""
+        fields = ["opportunities"]
+        if isinstance(error, ValidationError):
+            fields = sorted(".".join(str(part) for part in item["loc"]) for item in error.errors())
+        with self.service.db.project_write(project.id, project.folder_path) as session:
+            row = session.get(ModelRun, run_id)
+            if not row:
+                return
+            diagnostic = safe_json_loads(row.diagnostic_json, {})
+            diagnostic["schemaValidation"] = {"schema": "StoryOpportunityDraft", "invalidFields": fields}
+            row.status = "failed"
+            row.error_code = "opportunity_schema_invalid"
+            row.diagnostic_json = dumps(diagnostic)
+
+    @staticmethod
     def _validate_scores(raw: dict[str, Any]) -> tuple[dict[str, int], int]:
         normalized = {key: int(raw.get(key, -1)) for key in SCORE_LIMITS}
         if any(value < 0 or value > SCORE_LIMITS[key] for key, value in normalized.items()):
             raise StoryError(422, "OPPORTUNITY_SCORE_COMPONENT_INVALID", "Each opportunity score component must be within its fixed weight.")
         total = sum(normalized.values())
-        if total != 100:
-            raise StoryError(422, "OPPORTUNITY_SCORE_TOTAL_INVALID", "Opportunity score components must total exactly 100.", {"total": total})
         return normalized, total
 
     def _default_opportunities(self, session: Any, job: ResearchJob) -> list[dict[str, Any]]:
-        evidence = [row.id for row in session.scalars(select(ResearchEvidence).where(ResearchEvidence.job_id == job.id).limit(3)).all()]
-        base = {"protagonist": "A determined protagonist", "coreDesire": "To change an immediate condition", "coreConflict": "Each gain creates a harder consequence", "worldMechanism": "A constrained public-world mechanism", "firstThreeChapterPromise": "A concrete hook, choice, and consequence", "serialEngine": "Escalating decisions with costs", "differentiation": ["Evidence-led premise"], "risks": ["Needs human refinement"], "scoreComponents": {"platformFit": 15, "openingHook": 15, "emotionalPayoff": 15, "differentiation": 15, "serialEngine": 15, "characterStickiness": 10, "worldEngine": 10, "readability": 5}, "evidenceIds": evidence, "evidenceCoverage": 0.5, "confidence": 0.5, "uncertainties": ["Generated from a bounded report"]}
-        return [{**base, "highConcept": f"Evidence-led direction {number}"} for number in range(1, 4)]
+        raise StoryError(500, "MODEL_BACKED_OPPORTUNITIES_REQUIRED", "Story opportunities must be generated by the configured model role.")
 
     def _assert_ideation_upstream(self, session: Any, row: IdeationSession) -> tuple[StoryOpportunity, ResearchJob]:
         opportunity, job = session.get(StoryOpportunity, row.opportunity_id), session.get(ResearchJob, row.research_job_id)
         if not opportunity or not job or opportunity.project_id != row.project_id or opportunity.checksum != row.opportunity_checksum or opportunity.revision != row.opportunity_revision or job.report_checksum != row.research_report_checksum:
             raise StoryError(409, "IDEATION_UPSTREAM_DRIFT", "The accepted opportunity or research report changed.")
         return opportunity, job
+
+    def _complete_ideation_kickoff_text(
+        self,
+        project: Any,
+        request_id: str,
+        section: str,
+        label: str,
+        instruction: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str]:
+        try:
+            text, run_id = self.service.phase8._complete_role(
+                project,
+                "story_incubator",
+                [
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": dumps(payload)},
+                ],
+                request_id,
+                response_json=False,
+                run_role=f"story_incubator:ideation-kickoff:{section}-text",
+                max_output_tokens=4096,
+                max_retries=0,
+                stream_response=True,
+            )
+        except StoryError as exc:
+            if exc.code == "MODEL_CONTENT_TRUNCATED":
+                raise StoryError(502, f"IDEATION_KICKOFF_{section.upper()}_TRUNCATED", f"{label}生成被模型截断；该部分尚未保存。") from exc
+            raise
+        bounded = text.strip()
+        if not bounded:
+            raise StoryError(422, f"IDEATION_KICKOFF_{section.upper()}_EMPTY", f"{label}没有返回内容；未保存任何底稿。")
+        if len(bounded) > 6000:
+            raise StoryError(422, f"IDEATION_KICKOFF_{section.upper()}_TOO_LONG", f"{label}返回内容超过安全上限；未截断、也未保存半成品。")
+        return bounded, run_id
 
     @staticmethod
     def _validate_brief(brief: dict[str, Any]) -> None:
@@ -1268,9 +2320,121 @@ class Phase13Service:
         return markdown, {"entities": entities, "relations": [], "rules": rules}
 
     @staticmethod
-    def _generic_canon_checks(markdown: str, structured: dict[str, Any]) -> dict[str, Any]:
-        checks = [{"code": "CANON_GENERIC_CORE", "status": "ready" if "Story Core" in markdown else "blocked", "detail": "Story core present."}, {"code": "CANON_GENERIC_CONFLICT", "status": "ready" if "Conflict:" in markdown else "blocked", "detail": "Core conflict present."}, {"code": "CANON_GENERIC_BOUNDARIES", "status": "ready" if "Boundaries" in markdown else "blocked", "detail": "Boundaries present."}, {"code": "CANON_GENERIC_NO_NIGHT_WATCH", "status": "ready" if not any(term in markdown for term in ("夜巡人", "沈砚", "雾城", "七卷", "六阶")) else "blocked", "detail": "No night-watch template residue."}]
+    def _canon_cross_check(generated: dict[str, Any], analyzed: dict[str, Any]) -> dict[str, Any]:
+        def names(payload: dict[str, Any], collection: str, field: str) -> set[str]:
+            items = payload.get(collection, [])
+            if not isinstance(items, list):
+                return set()
+            return {str(item.get(field) or "").strip().casefold() for item in items if isinstance(item, dict) and str(item.get(field) or "").strip()}
+
+        generated_entities, analyzed_entities = names(generated, "entities", "canonicalName"), names(analyzed, "entities", "canonicalName")
+        generated_rules, analyzed_rules = names(generated, "rules", "ruleCode"), names(analyzed, "rules", "ruleCode")
+        missing_entities = sorted(generated_entities - analyzed_entities)
+        unexpected_entities = sorted(analyzed_entities - generated_entities)
+        missing_rules = sorted(generated_rules - analyzed_rules)
+        unexpected_rules = sorted(analyzed_rules - generated_rules)
+        return {
+            "ready": not missing_entities and not unexpected_entities and not missing_rules and not unexpected_rules,
+            "missingEntities": missing_entities,
+            "unexpectedEntities": unexpected_entities,
+            "missingRules": missing_rules,
+            "unexpectedRules": unexpected_rules,
+        }
+
+    @staticmethod
+    def _generic_canon_checks(markdown: str, structured: dict[str, Any], brief: dict[str, Any] | None = None) -> dict[str, Any]:
+        brief = brief or {}
+        entities = structured.get("entities", [])
+        relations = structured.get("relations", [])
+        rules = structured.get("rules", [])
+        entities_valid = isinstance(entities, list) and bool(entities) and all(
+            isinstance(item, dict)
+            and bool(str(item.get("canonicalName") or "").strip())
+            and bool(str(item.get("entityTypeName") or "").strip())
+            and isinstance(item.get("attributesJson", {}), dict)
+            for item in entities
+        )
+        relations_valid = isinstance(relations, list) and all(isinstance(item, dict) for item in relations)
+        rules_valid = isinstance(rules, list) and bool(rules) and all(
+            isinstance(item, dict)
+            and bool(str(item.get("ruleCode") or "").strip())
+            and bool(str(item.get("statement") or "").strip())
+            and isinstance(item.get("constraintJson", {}), dict)
+            for item in rules
+        )
+        normalized = markdown.casefold()
+        protagonist = str(brief.get("protagonist") or "").strip().casefold()
+        entity_names = {str(item.get("canonicalName") or "").strip().casefold() for item in entities if isinstance(item, dict)} if isinstance(entities, list) else set()
+        cross_check = structured.get("_generationCrossCheck", {"ready": True})
+        # A single generic phrase such as “雾城” must not make an otherwise
+        # valid user concept impossible. Treat the old seed as leaked only
+        # when distinctive names appear without being requested by the Brief,
+        # or when several weaker template terms travel together.
+        brief_text = dumps(brief)
+        night_watch_terms = ("夜巡人", "沈砚", "夜巡司", "巡夜灯", "镇纸钉", "潮湿账页", "雾城", "七卷", "六阶")
+        residue = {term for term in night_watch_terms if term in markdown and term not in brief_text}
+        distinctive_residue = residue.intersection({"沈砚", "夜巡司", "巡夜灯", "镇纸钉", "潮湿账页"})
+        residue_blocked = bool(distinctive_residue) or len(residue) >= 2
+        checks = [
+            {"code": "CANON_GENERIC_CORE", "status": "ready" if ("story core" in normalized or "故事内核" in markdown) else "blocked", "detail": "Story core must be explicit."},
+            {"code": "CANON_GENERIC_CONFLICT", "status": "ready" if ("conflict" in normalized or "冲突" in markdown) else "blocked", "detail": "Core conflict must be explicit."},
+            {"code": "CANON_GENERIC_BOUNDARIES", "status": "ready" if ("boundar" in normalized or "边界" in markdown or "禁止" in markdown) else "blocked", "detail": "Writing boundaries must be explicit."},
+            {"code": "CANON_GENERIC_ENTITIES", "status": "ready" if entities_valid else "blocked", "detail": "At least one valid structured entity is required."},
+            {"code": "CANON_GENERIC_RELATIONS", "status": "ready" if relations_valid else "blocked", "detail": "Relations must be a structured list."},
+            {"code": "CANON_GENERIC_RULES", "status": "ready" if rules_valid else "blocked", "detail": "At least one enforceable structured rule is required."},
+            {"code": "CANON_GENERIC_PROTAGONIST", "status": "ready" if (not protagonist or protagonist in entity_names) else "blocked", "detail": "The StoryBrief protagonist must exist in structured Canon."},
+            {"code": "CANON_GENERIC_ANALYZER_CROSSCHECK", "status": "ready" if isinstance(cross_check, dict) and cross_check.get("ready") is True else "blocked", "detail": "Independent Canon extraction must agree with generated entities and rules."},
+            {"code": "CANON_GENERIC_NO_NIGHT_WATCH", "status": "blocked" if residue_blocked else "ready", "detail": "No unrequested Night Watch template residue is allowed in a generic project.", "evidence": sorted(residue)},
+        ]
         return {"ready": all(item["status"] == "ready" for item in checks), "checks": checks}
+
+    @staticmethod
+    def _narrative_length(content: str) -> int:
+        cjk = len(re.findall(r"[\u3400-\u9fff]", content))
+        latin_words = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", content))
+        return cjk + latin_words
+
+    @staticmethod
+    def _chapter_word_range(brief: dict[str, Any]) -> tuple[int, int]:
+        raw = brief.get("chapterWordRange", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        minimum = int(raw.get("min", 800) or 800)
+        maximum = int(raw.get("max", 3000) or 3000)
+        if minimum < 100 or maximum < minimum or maximum > 20_000:
+            raise StoryError(422, "STORY_BRIEF_WORD_RANGE_INVALID", "StoryBrief chapterWordRange must be a valid min/max range.")
+        return minimum, maximum
+
+    @classmethod
+    def _validate_opening_content(cls, content: str, brief: dict[str, Any]) -> None:
+        minimum, maximum = cls._chapter_word_range(brief)
+        length = cls._narrative_length(content)
+        if length < minimum or length > maximum:
+            raise StoryError(422, "OPENING_WORD_RANGE_INVALID", "Opening chapter is outside the StoryBrief word range.", {"length": length, "minimum": minimum, "maximum": maximum})
+
+    @staticmethod
+    def _opening_similarity(left: str, right: str) -> float:
+        def grams(value: str) -> set[str]:
+            normalized = re.sub(r"\s+", "", value.casefold())
+            return {normalized[index:index + 3] for index in range(max(0, len(normalized) - 2))}
+        left_grams, right_grams = grams(left), grams(right)
+        if not left_grams or not right_grams:
+            return 1.0 if left.strip() == right.strip() else 0.0
+        return len(left_grams & right_grams) / len(left_grams | right_grams)
+
+    @staticmethod
+    def _validate_opening_review(review: dict[str, Any], content: str) -> None:
+        required_scores = {"firstScreenHook", "characterDesire", "emotionalPull", "sceneTension", "expositionDensity", "terminologyRepetition", "dialogueActionExplanationBalance", "continueReading"}
+        scores = review.get("scores")
+        if not isinstance(scores, dict) or not required_scores.issubset(scores) or any(not isinstance(scores[key], (int, float)) or scores[key] < 0 or scores[key] > 100 for key in required_scores):
+            raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "Opening review must contain every bounded score.")
+        findings = review.get("findings", [])
+        if not isinstance(findings, list):
+            raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "Opening review findings must be a list.")
+        for finding in findings:
+            location = finding.get("range", {}) if isinstance(finding, dict) else {}
+            if not isinstance(location, dict) or not isinstance(location.get("start"), int) or not isinstance(location.get("end"), int) or location["start"] < 0 or location["end"] < location["start"] or location["end"] > len(content) or not str(finding.get("suggestion") or "").strip():
+                raise StoryError(422, "OPENING_REVIEW_MODEL_INVALID", "Every opening finding must contain a valid source range and suggestion.")
 
     @staticmethod
     def _opening_chapter(brief: dict[str, Any], strategy: dict[str, Any]) -> dict[str, Any]:
@@ -1305,6 +2469,10 @@ class Phase13Service:
             "fetchSecretConfigured": bool(config.get("fetchSecretRef")),
         }
         return {"id": row.id, "projectId": row.project_id, "briefId": row.brief_id, "briefRevision": row.brief_revision, "briefChecksum": row.brief_checksum, "attempt": row.attempt, "status": row.status, "idempotencyKey": row.idempotency_key, "providerConfig": public_config, "limits": safe_json_loads(row.limits_json, {}), "coverage": safe_json_loads(row.coverage_json, {}), "reportChecksum": row.report_checksum, "reportRevision": row.report_revision, "queryCount": row.query_count, "pageCount": row.page_count, "fetchedChars": row.fetched_chars, "requestUnits": row.request_units, "estimatedCost": row.estimated_cost, "errorCode": row.error_code, "errorMessage": row.error_message, "diagnostic": None, "revision": row.revision, "createdAt": row.created_at, "startedAt": row.started_at, "completedAt": row.completed_at, "updatedAt": row.updated_at}
+
+    @staticmethod
+    def _query_dict(row: ResearchQuery) -> dict[str, Any]:
+        return {"id": row.id, "jobId": row.job_id, "perspective": row.perspective, "query": row.query_text, "sequenceNumber": row.sequence_number, "status": row.status, "resultCount": row.result_count, "errorCode": row.error_code, "errorMessage": row.error_message, "createdAt": row.created_at, "completedAt": row.completed_at}
 
     @staticmethod
     def _source_dict(row: ResearchSource, versions: list[ResearchSourceVersion]) -> dict[str, Any]:

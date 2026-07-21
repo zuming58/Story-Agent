@@ -88,6 +88,7 @@ from .schemas import (
     ForeshadowOut,
     KnowledgeBoundaryOut,
     ModelConfigCreate,
+    ModelConnectionTestOut,
     ModelConfigOut,
     ModelConfigUpdate,
     ModelProviderCreate,
@@ -95,6 +96,7 @@ from .schemas import (
     ModelProviderUpdate,
     ModelRunOut,
     ModelRoleBindingOut,
+    ModelRoleBindingBulkUpdate,
     ModelRoleBindingUpdate,
     PlanNodeCreate,
     PlanNodeOut,
@@ -124,6 +126,7 @@ from .schemas import (
     ShortStoryReadinessOut,
     CompetitorExclude,
     CompetitorProfileOut,
+    IdeationKickoffSectionCreate,
     IdeationMessageCreate,
     IdeationMessageOut,
     IdeationSessionCreate,
@@ -143,6 +146,8 @@ from .schemas import (
     ResearchJobAction,
     ResearchJobCreate,
     ResearchJobOut,
+    ResearchQueryOut,
+    ManualResearchMaterialCreate,
     ResearchSourceOut,
     StoryBriefProposalAction,
     StoryBriefProposalCreate,
@@ -219,6 +224,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def create_deepseek_preset() -> object:
         return service.create_deepseek_preset()
 
+    @app.post("/api/v1/model-providers/volcengine-coding-plan-preset", response_model=ModelProviderOut, status_code=201)
+    def create_volcengine_coding_plan_preset() -> object:
+        return service.create_volcengine_coding_plan_preset()
+
     @app.get("/api/v1/model-providers/{provider_id}", response_model=ModelProviderOut)
     def get_model_provider(provider_id: str) -> object:
         return service.get_model_provider(provider_id)
@@ -247,6 +256,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def update_model_config(model_id: str, payload: ModelConfigUpdate) -> object:
         return service.update_model_config(model_id, payload)
 
+    @app.post("/api/v1/models/{model_id}/test", response_model=ModelConnectionTestOut)
+    def test_model_config(model_id: str) -> object:
+        return service.test_model_config(model_id)
+
     @app.delete("/api/v1/models/{model_id}", status_code=204)
     def delete_model_config(model_id: str) -> None:
         service.delete_model_config(model_id)
@@ -254,6 +267,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.get("/api/v1/model-role-bindings", response_model=list[ModelRoleBindingOut])
     def list_model_role_bindings() -> object:
         return service.list_model_role_bindings()
+
+    @app.put("/api/v1/model-role-bindings/bulk", response_model=list[ModelRoleBindingOut])
+    def update_model_role_bindings(payload: ModelRoleBindingBulkUpdate) -> object:
+        return service.update_model_role_bindings(payload.model_ids)
 
     @app.put("/api/v1/model-role-bindings/{role}", response_model=ModelRoleBindingOut)
     def update_model_role_binding(role: str, payload: ModelRoleBindingUpdate) -> object:
@@ -688,6 +705,18 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def list_research_sources(job_id: str) -> object:
         return service.phase13.list_sources(job_id)
 
+    @app.get("/api/v1/research/jobs/{job_id}/queries", response_model=list[ResearchQueryOut])
+    def list_research_queries(job_id: str) -> object:
+        return service.phase13.list_queries(job_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/manual-materials", response_model=ResearchJobOut)
+    def add_manual_research_material(job_id: str, payload: ManualResearchMaterialCreate, request: Request) -> object:
+        return service.phase13.add_manual_material(job_id, payload, request.state.request_id)
+
+    @app.post("/api/v1/research/jobs/{job_id}/analyze-manual-materials", response_model=ResearchJobOut)
+    def analyze_manual_research_materials(job_id: str, payload: ResearchJobAction, request: Request) -> object:
+        return service.phase13.analyze_manual_materials(job_id, payload, request.state.request_id)
+
     @app.get("/api/v1/research/jobs/{job_id}/evidence", response_model=list[ResearchEvidenceOut])
     def list_research_evidence(job_id: str) -> object:
         return service.phase13.list_evidence(job_id)
@@ -703,6 +732,10 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     @app.post("/api/v1/research/jobs/{job_id}/opportunities", response_model=list[StoryOpportunityOut], status_code=201)
     def create_story_opportunities(job_id: str, payload: StoryOpportunityCreate, request: Request) -> object:
         return service.phase13.create_opportunities(job_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/story-opportunities", response_model=list[StoryOpportunityOut])
+    def list_story_opportunities(project_id: str, job_id: str | None = None) -> object:
+        return service.phase13.list_opportunities(project_id, job_id)
 
     @app.post("/api/v1/competitors/{competitor_id}/exclude", response_model=CompetitorProfileOut)
     def exclude_competitor(competitor_id: str, payload: CompetitorExclude, request: Request) -> object:
@@ -732,9 +765,17 @@ def create_app(settings: Settings | None = None, secret_store: SecretStore | Non
     def add_ideation_message(session_id: str, payload: IdeationMessageCreate, request: Request) -> object:
         return service.phase13.add_ideation_message(session_id, payload, request.state.request_id)
 
+    @app.post("/api/v1/ideation/sessions/{session_id}/kickoff-sections/{section}", response_model=IdeationSessionOut, status_code=201)
+    def create_ideation_kickoff_section(session_id: str, section: str, payload: IdeationKickoffSectionCreate, request: Request) -> object:
+        return service.phase13.create_ideation_kickoff_section(session_id, section, payload, request.state.request_id)
+
     @app.post("/api/v1/ideation/sessions/{session_id}/story-brief-proposals", response_model=StoryBriefProposalOut, status_code=201)
     def create_story_brief_proposal(session_id: str, payload: StoryBriefProposalCreate, request: Request) -> object:
         return service.phase13.create_story_brief_proposal(session_id, payload, request.state.request_id)
+
+    @app.get("/api/v1/projects/{project_id}/story-brief/proposals", response_model=list[StoryBriefProposalOut])
+    def list_story_brief_proposals(project_id: str, session_id: str | None = None) -> object:
+        return service.phase13.list_story_brief_proposals(project_id, session_id)
 
     @app.get("/api/v1/projects/{project_id}/story-brief/versions", response_model=list[StoryBriefVersionOut])
     def list_story_brief_versions(project_id: str) -> object:

@@ -339,12 +339,26 @@ class ModelRoleBindingUpdate(ApiModel):
     daily_cost_limit: float | None = Field(default=None, ge=0)
 
 
+class ModelRoleBindingBulkUpdate(ApiModel):
+    model_ids: dict[str, str | None] = Field(min_length=1, max_length=20)
+
+
 class ProviderConnectionTestOut(ApiModel):
     ok: bool
     status: Literal["success", "missing_api_key", "auth_failed", "timeout", "network_error", "invalid_response", "credential_unavailable"]
     provider_id: str
     provider_name: str
     model: str | None = None
+    message: str
+
+
+class ModelConnectionTestOut(ApiModel):
+    ok: bool
+    status: Literal["success", "missing_api_key", "auth_failed", "timeout", "network_error", "invalid_response", "credential_unavailable", "rate_limited", "server_error", "request_failed", "content_truncated"]
+    model_config_id: str
+    configured_model_id: str
+    actual_model_id: str | None = None
+    duration_ms: int
     message: str
 
 
@@ -1692,6 +1706,7 @@ class ResearchJobCreate(ApiModel):
     idempotency_key: str | None = Field(default=None, max_length=120)
     search_provider: Literal["tavily", "deterministic"] = "tavily"
     search_secret_ref: str | None = Field(default=None, max_length=240)
+    search_api_key: str | None = Field(default=None, min_length=1, max_length=2000, exclude=True, repr=False)
     # Direct application-side fetching is intentionally not offered here.  A
     # hostname can pass an initial public-DNS validation and subsequently be
     # rebound to a private address by the time an HTTP client connects.  Use a
@@ -1699,12 +1714,21 @@ class ResearchJobCreate(ApiModel):
     # until a pinned-address transport exists.
     fetch_provider: Literal["firecrawl", "deterministic"] = "firecrawl"
     fetch_secret_ref: str | None = Field(default=None, max_length=240)
+    fetch_api_key: str | None = Field(default=None, min_length=1, max_length=2000, exclude=True, repr=False)
     limits: ResearchLimits = Field(default_factory=ResearchLimits)
     run_immediately: bool = True
 
 
 class ResearchJobAction(ApiModel):
     expected_revision: int = Field(ge=1)
+
+
+class ManualResearchMaterialCreate(ApiModel):
+    expected_revision: int = Field(ge=1)
+    perspective: Literal["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"] | None = None
+    title: str = Field(default="External research report", min_length=1, max_length=240)
+    content: str = Field(min_length=300, max_length=20_000)
+    source_url: str | None = Field(default=None, max_length=2000)
 
 
 class ResearchJobOut(ApiModel):
@@ -1734,6 +1758,20 @@ class ResearchJobOut(ApiModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     updated_at: datetime
+
+
+class ResearchQueryOut(ApiModel):
+    id: str
+    job_id: str
+    perspective: str
+    query: str
+    sequence_number: int
+    status: str
+    result_count: int
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 class ResearchSourceVersionOut(ApiModel):
@@ -1841,6 +1879,8 @@ class OpportunityScore(ApiModel):
 
 
 class StoryOpportunityDraft(ApiModel):
+    title: str | None = Field(default=None, max_length=80)
+    summary: str | None = Field(default=None, max_length=600)
     high_concept: str = Field(min_length=1, max_length=4000)
     protagonist: str = Field(min_length=1, max_length=2000)
     core_desire: str = Field(min_length=1, max_length=2000)
@@ -1858,9 +1898,16 @@ class StoryOpportunityDraft(ApiModel):
     uncertainties: list[str] = Field(default_factory=list)
 
 
+class ExternalCreativeDirection(ApiModel):
+    title: str = Field(min_length=1, max_length=80)
+    summary: str = Field(min_length=1, max_length=600)
+    high_concept: str = Field(min_length=1, max_length=4000)
+
+
 class StoryOpportunityCreate(ApiModel):
     expected_job_revision: int = Field(ge=1)
     opportunities: list[StoryOpportunityDraft] | None = Field(default=None, min_length=3, max_length=5)
+    creative_input: str | None = Field(default=None, max_length=30000)
 
 
 class StoryOpportunityAction(ApiModel):
@@ -1898,6 +1945,10 @@ class IdeationSessionCreate(ApiModel):
 class IdeationMessageCreate(ApiModel):
     expected_session_revision: int = Field(ge=1)
     content: str = Field(min_length=1, max_length=12_000)
+
+
+class IdeationKickoffSectionCreate(ApiModel):
+    expected_session_revision: int = Field(ge=1)
 
 
 class IdeationMessageOut(ApiModel):

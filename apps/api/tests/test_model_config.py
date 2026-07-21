@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +28,23 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         body = b'{"data":[{"id":"fake-planner"}]}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/chat/completions" or self.headers.get("Authorization", "") != "Bearer unit-test-secret-value":
+            self.send_response(401)
+            self.end_headers()
+            return
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+        body = json.dumps({
+            "model": payload.get("model"),
+            "choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -69,6 +87,16 @@ def test_provider_secret_is_stored_outside_sqlite_and_connection_test_uses_fake_
         assert tested.json()["status"] == "success"
         assert tested.json()["model"] == "fake-planner"
         assert "unit-test-secret-value" not in tested.text
+
+        model = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={
+            "modelId": "fake-specific-model", "displayName": "Fake specific model",
+        })
+        assert model.status_code == 201
+        model_test = client.post(f"/api/v1/models/{model.json()['id']}/test")
+        assert model_test.status_code == 200
+        assert model_test.json()["ok"] is True
+        assert model_test.json()["configuredModelId"] == "fake-specific-model"
+        assert model_test.json()["actualModelId"] == "fake-specific-model"
     finally:
         server.shutdown()
         server.server_close()
@@ -108,6 +136,23 @@ def test_deepseek_preset_is_idempotent_and_uses_current_model_identifier(client:
     assert models[0]["outputPricePerMillion"] == 0.87
 
 
+def test_volcengine_coding_plan_preset_is_idempotent_and_keeps_subscription_pricing_unset(client: TestClient) -> None:
+    first = client.post("/api/v1/model-providers/volcengine-coding-plan-preset")
+    second = client.post("/api/v1/model-providers/volcengine-coding-plan-preset")
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]
+    assert first.json()["name"] == "火山引擎 Coding Plan"
+    assert first.json()["baseUrl"] == "https://ark.cn-beijing.volces.com/api/coding/v3"
+    assert first.json()["hasApiKey"] is False
+
+    models = client.get(f"/api/v1/model-providers/{first.json()['id']}/models").json()
+    by_model_id = {item["modelId"]: item for item in models}
+    assert set(by_model_id) == {"Kimi-K2.6", "DeepSeek-V4-Pro"}
+    assert by_model_id["Kimi-K2.6"]["inputPricePerMillion"] is None
+    assert by_model_id["DeepSeek-V4-Pro"]["outputPricePerMillion"] is None
+
+
 def test_models_and_role_bindings_protect_provider_delete(client: TestClient) -> None:
     provider = client.post("/api/v1/model-providers", json={
         "name": "DeepSeek 中转",
@@ -137,6 +182,45 @@ def test_models_and_role_bindings_protect_provider_delete(client: TestClient) ->
 
     roles = client.get("/api/v1/model-role-bindings").json()
     assert {item["role"] for item in roles} >= {"architect", "planner", "chinese_writer", "embedding"}
+
+
+def test_bulk_model_role_binding_is_atomic_and_preserves_cost_limits(client: TestClient) -> None:
+    provider = client.post("/api/v1/model-providers", json={
+        "name": "双模型测试 Provider",
+        "baseUrl": "https://api.example.test",
+    }).json()
+    writer = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={
+        "modelId": "fiction-writer",
+        "displayName": "正文模型",
+    }).json()
+    reviewer = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={
+        "modelId": "structure-reviewer",
+        "displayName": "审校模型",
+    }).json()
+
+    assert client.put("/api/v1/model-role-bindings/planner", json={"modelId": reviewer["id"], "dailyCostLimit": 12}).status_code == 200
+    applied = client.put("/api/v1/model-role-bindings/bulk", json={
+        "modelIds": {
+            "chinese_writer": writer["id"],
+            "reviser": writer["id"],
+            "planner": reviewer["id"],
+            "continuity_reviewer": reviewer["id"],
+        },
+    })
+    assert applied.status_code == 200
+    by_role = {item["role"]: item for item in client.get("/api/v1/model-role-bindings").json()}
+    assert by_role["chinese_writer"]["modelId"] == writer["id"]
+    assert by_role["reviser"]["modelId"] == writer["id"]
+    assert by_role["planner"]["modelId"] == reviewer["id"]
+    assert by_role["planner"]["dailyCostLimit"] == 12
+
+    rejected = client.put("/api/v1/model-role-bindings/bulk", json={
+        "modelIds": {"chinese_writer": writer["id"], "story_editor": "missing-model"},
+    })
+    assert rejected.status_code == 404
+    assert rejected.json()["code"] == "MODEL_CONFIG_NOT_FOUND"
+    after_reject = {item["role"]: item for item in client.get("/api/v1/model-role-bindings").json()}
+    assert after_reject["story_editor"]["modelId"] is None
 
 
 def test_model_price_database_guards_reject_negative_values(client: TestClient, data_dir: Path) -> None:

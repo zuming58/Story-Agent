@@ -214,6 +214,9 @@ class Phase8Service:
         *,
         response_json: bool = False,
         run_role: str | None = None,
+        max_output_tokens: int | None = None,
+        max_retries: int | None = None,
+        stream_response: bool = False,
     ) -> tuple[str, str]:
         resolved = self.service._resolve_role_model(role)
         if not resolved:
@@ -248,18 +251,18 @@ class Phase8Service:
             provider_row.base_url,
             api_key,
             provider_row.timeout_seconds,
-            provider_row.max_retries,
+            provider_row.max_retries if max_retries is None else max(0, min(max_retries, 1)),
         )
         payload: dict[str, Any] = {
             "model": model.model_id,
             "messages": messages,
             "temperature": min(float(model.temperature), 0.35),
-            "max_tokens": min(model.max_output_tokens, 8192),
+            "max_tokens": min(model.max_output_tokens, max_output_tokens or 8192, 8192),
         }
         if response_json:
             payload["response_format"] = {"type": "json_object"}
         try:
-            result = asyncio.run(client.complete_chat(payload))
+            result = asyncio.run(client.complete_chat_streaming(payload) if stream_response else client.complete_chat(payload))
         except ModelProviderError as exc:
             partial = client.last_result
             with self.service.db.project_write(project.id, project.folder_path) as session:
@@ -653,13 +656,14 @@ class Phase8Service:
             if current_revision != row.base_revision:
                 raise StoryError(409, "CANON_REVISION_CONFLICT", "Canon 已在提案生成后发生变化。", {"currentRevision": current_revision})
             structured = loads(row.structured_json) or {}
-            incubation = loads(row.brief_json).get("incubation") is True if row.brief_json else False
+            incubation_metadata = loads(row.brief_json) or {} if row.brief_json else {}
+            incubation = incubation_metadata.get("incubation") is True
             if incubation:
                 self.service.phase13.assert_canon_proposal_upstream(session, row)
             # Readiness is derived data. Recompute it at the write boundary so
             # a proposal cannot be accepted or rejected because a stored
             # validator snapshot predates the current deterministic rules.
-            readiness = self.service.phase13._generic_canon_checks(row.content_markdown, structured) if incubation else self._canon_checks(row.content_markdown, structured)
+            readiness = self.service.phase13._generic_canon_checks(row.content_markdown, structured, incubation_metadata.get("brief")) if incubation else self._canon_checks(row.content_markdown, structured)
             row.readiness_json = dumps(readiness)
             if not readiness.get("ready"):
                 raise StoryError(409, "CANON_PROPOSAL_INCOMPLETE", "Canon 提案未通过完整性检查。", readiness)

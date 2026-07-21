@@ -335,13 +335,16 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .project-overview-page header p { margin: 0; color: #798895; font-size: 12px; }
 .project-create-button { position: relative; z-index: 1; justify-self: end; flex: 0 0 auto; height: 38px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #a57a43; background: #2b241a; color: #e0b875; border-radius: 4px; padding: 0 15px; cursor: pointer; }
 .project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 13px; padding-top: 24px; }
-.project-card { min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 108px; padding: 16px; border: 1px solid #26394a; border-radius: 5px; background: #0a1725; text-align: left; cursor: pointer; }
-.project-card:hover, .project-card.is-active { border-color: #9a7340; background: #111b24; }
+.project-card-shell { position: relative; min-width: 0; }
+.project-card { width: 100%; min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 108px; padding: 16px 48px 16px 16px; border: 1px solid #26394a; border-radius: 5px; background: #0a1725; text-align: left; cursor: pointer; }
+.project-card:hover, .project-card-shell.is-active .project-card { border-color: #9a7340; background: #111b24; }
 .project-card-icon { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid #5d4931; color: #d4a45f; background: #171a1d; border-radius: 50%; }
 .project-card strong, .project-card span, .project-card small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-card strong { color: #d8dde2; font: 600 16px/1.5 "Noto Serif SC", serif; }
 .project-card span { color: #8c99a5; font-size: 10px; margin-top: 3px; }
 .project-card small { display: flex; align-items: center; gap: 4px; color: #566777; font-size: 8px; margin-top: 9px; }
+.project-rename-button { position: absolute; z-index: 2; right: 12px; top: 12px; width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #647586; cursor: pointer; }
+.project-rename-button:hover, .project-rename-button:focus-visible { border-color: #6e5738; background: #1d1c1b; color: #ddb56f; outline: none; }
 
 .safety-page { min-width: 780px; min-height: 100%; padding: 18px 22px; background: #081522; }
 .safety-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 16px; }
@@ -380,10 +383,17 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .project-dialog h2 { margin: 0; color: #e9dfcf; font: 600 21px/1.4 "Noto Serif SC", serif; }
 .project-dialog > p { margin: 7px 0 18px; color: #738290; font-size: 11px; }
 .project-dialog label { display: grid; gap: 6px; margin-bottom: 13px; color: #9aa7b2; font-size: 11px; }
+.project-dialog label small { color: #637689; font-size: 10px; font-weight: 400; }
 .project-dialog input, .project-dialog select { height: 34px; border: 1px solid #304456; border-radius: 4px; background: #081522; color: #d0d6dc; padding: 0 9px; }
+.project-dialog input::placeholder { color: #536576; }
+.project-dialog-hint { margin: -5px 0 13px !important; padding: 9px 10px; border-left: 2px solid #80633d; background: rgba(168, 124, 67, .06); color: #83919d !important; line-height: 1.6; }
+.project-dialog-error { margin: 2px 0 0 !important; padding: 9px 10px; border: 1px solid #6d3d42; border-radius: 4px; background: rgba(211, 76, 82, .08); color: #e79291 !important; line-height: 1.55; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
-.dialog-actions button { height: 34px; border: 1px solid #35485a; background: #111f2d; color: #93a0ac; border-radius: 4px; padding: 0 14px; cursor: pointer; }
+.dialog-actions button { height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #35485a; background: #111f2d; color: #93a0ac; border-radius: 4px; padding: 0 14px; cursor: pointer; }
 .dialog-actions button.primary { border-color: #a57a43; background: #2b241a; color: #e0b875; }
+.dialog-actions button:disabled, .dialog-close:disabled { cursor: wait; opacity: .62; }
+.spin { animation: project-spin .85s linear infinite; }
+@keyframes project-spin { to { transform: rotate(360deg); } }
 .dialog-close { position: absolute; right: 12px; top: 12px; width: 30px; height: 30px; display: grid; place-items: center; border: 0; background: transparent; color: #788895; cursor: pointer; }
 
 .settings-page { min-width: 760px; min-height: 100%; padding: 26px 22px 18px; background: #081522; }
@@ -404,7 +414,9 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .provider-row small, .provider-row em { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; font-style: normal; }
 .provider-row small { color: #6e7d8b; }
 .provider-row em { color: #c3a371; }
+.provider-presets { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; padding: 10px; border-top: 1px solid #1e3040; }.provider-presets > div { grid-column: 1 / -1; display: grid; gap: 3px; }.provider-presets strong { color: #d7dce1; font-size: 11px; }.provider-presets span { color: #70808e; font-size: 9px; line-height: 1.5; }.provider-presets button { min-height: 31px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid #31485a; border-radius: 4px; background: #0b1a28; color: #b7c4ce; padding: 5px 7px; cursor: pointer; font-size: 10px; }.provider-presets button:disabled { border-color: #294032; background: #0e241b; color: #65b98a; cursor: default; }
 .settings-form { display: grid; gap: 9px; padding: 10px; border-top: 1px solid #1e3040; }
+.settings-form-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }.settings-form-title strong { color: #d7dce1; font-size: 11px; }.settings-form-title span { color: #70808e; font-size: 9px; text-align: right; }
 .settings-form.compact { border-top-color: #26394a; }
 .settings-form label, .provider-detail label { display: grid; gap: 5px; color: #97a5b0; font-size: 10px; }
 .settings-form input, .provider-detail input, .role-row select { width: 100%; min-width: 0; height: 31px; border: 1px solid #2b4053; border-radius: 4px; background: #081522; color: #cbd2d8; padding: 0 8px; font-size: 11px; }
@@ -427,6 +439,14 @@ td .icon-button { min-width: 23px; min-height: 23px; display: inline-grid; }
 .role-list { gap: 8px; }
 .role-row { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 8px; color: #9ba8b3; font-size: 10px; }
 .role-row > span { color: #c4a874; }
+.model-strategy { display: grid; gap: 8px; padding: 11px 10px; border-bottom: 1px solid #2b3f50; background: linear-gradient(135deg, rgba(43,37,29,.76), rgba(9,23,36,.9)); }
+.model-strategy-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.model-strategy-heading strong { color: #e1c17f; font-size: 12px; }.model-strategy-heading span { color: #778795; font-size: 9px; }
+.model-strategy > p, .model-strategy > small { margin: 0; color: #93a1ac; font-size: 10px; line-height: 1.55; }.model-strategy > small { color: #718190; }
+.model-strategy label { display: grid; gap: 5px; color: #c8ae7d; font-size: 10px; }.model-strategy select { width: 100%; min-width: 0; height: 31px; border: 1px solid #3c5061; border-radius: 4px; background: #081522; color: #cbd2d8; padding: 0 8px; font-size: 11px; }
+.model-strategy .settings-primary { justify-self: start; }.model-strategy-warning { color: #e5a83d !important; }
+.role-group { display: grid; gap: 8px; padding-top: 2px; }.role-group + .role-group { margin-top: 5px; padding-top: 10px; border-top: 1px solid #1e3040; }
+.role-group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }.role-group-heading strong { color: #d4dce2; font-size: 11px; }.role-group-heading span { color: #70808e; font-size: 9px; text-align: right; }
 .settings-diagnostic { margin: 4px 10px 12px; padding: 10px; border-left: 2px solid #596ce0; background: rgba(108, 124, 255, .07); }
 .settings-diagnostic strong { color: #cfd5ff; font-size: 11px; }
 .settings-diagnostic p { margin: 6px 0 0; color: #7e8b99; font-size: 9px; line-height: 1.6; }

@@ -1,12 +1,87 @@
 from __future__ import annotations
 
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+
+import pytest
+import httpx
+
 from story_agent_api.research_providers import (
     DeterministicContentFetchProvider,
     DeterministicSearchProvider,
     FetchResponse,
     SearchResponse,
     SearchResult,
+    TavilySearchProvider,
 )
+from story_agent_api.services import StoryError
+
+
+class _FakeModelHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        response = json.dumps({"data": [{"id": "fake-incubator"}]}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
+
+    def do_POST(self):  # noqa: N802
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        payload = json.loads(body or b"{}")
+        joined = "\n".join(item.get("content", "") for item in payload.get("messages", []) if isinstance(item, dict))
+        step = next((name for name in ("query_plan", "evidence", "research_report", "external_directions", "opportunity_repair", "opportunities", "ideation_kickoff_core_text", "ideation_kickoff_world_text", "ideation_kickoff_characters_text", "ideation_kickoff_genre_text", "ideation_kickoff_boundaries_text", "ideation", "story_brief", "canon_analyze", "canon_repair", "canon", "opening_expand", "opening", "opening_review") if f'"phase14Step":"{name}"' in joined or f'"phase14Step": "{name}"' in joined), "")
+        perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
+        if step == "query_plan": value = {"queries": [{"perspective": item, "query": f"undecided urban mystery adult readers {item.replace('_', ' ')}".replace("genre leaders", "leading works").replace("reader praise", "reader praise").replace("reader dropoff", "reader dropoff reasons").replace("opening strategy", "opening hook strategy").replace("serial engine", "serial retention engine")} for item in perspectives]}
+        elif step == "evidence":
+            source = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")) ["sourceContent"]
+            first, second = source[:40], source[40:80]
+            value = {"evidence": [
+                {"claimType": "fact", "claim": "bounded source evidence", "excerpt": first, "locator": {"start": 0, "end": len(first)}, "confidence": 0.7},
+                {"claimType": "opinion", "claim": "bounded source opinion", "excerpt": second, "locator": {"start": 40, "end": 40 + len(second)}, "confidence": 0.6},
+            ]}
+        elif step == "research_report":
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); evidence = data["evidence"]; value = {"competitors": [{"name": "Comparable", "profile": {"readingPromise": "A bounded promise"}, "evidenceIds": [evidence[0]["id"]], "confidence": 0.6}], "findings": [{"category": "opening_strategy", "statement": "Evidence-backed finding.", "claimType": "inference", "evidenceIds": [evidence[0]["id"]], "confidence": 0.6, "uncertainties": ["sample"]}]}
+        elif step == "external_directions": value = {"directions": [{"title": "External one", "summary": "A focused imported direction.", "highConcept": "Imported direction one."}, {"title": "External two", "summary": "A second focused imported direction.", "highConcept": "Imported direction two."}]}
+        elif step in {"opportunities", "opportunity_repair"}:
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user")); ids = [item["id"] for item in data["report"]["evidence"]] if step == "opportunities" else data["allowedEvidenceIds"]; score = {"platformFit": 12, "openingHook": 12, "emotionalPayoff": 10, "differentiation": 10, "serialEngine": 10, "characterStickiness": 8, "worldEngine": 8, "readability": 4}; n = int(data.get("candidateIndex", 1)); value = {"opportunities": [{"title": f"Direction {n}", "summary": f"A concise overview for direction {n}.", "highConcept": f"Direction {n}", "protagonist": "Ming", "coreDesire": "Find truth", "coreConflict": "Truth costs trust", "worldMechanism": "notEstablished", "firstThreeChapterPromise": "A choice", "serialEngine": "notEstablished", "differentiation": ["original"], "risks": [], "scoreComponents": score, "evidenceIds": ids, "evidenceCoverage": 0.8, "confidence": 0.6, "uncertainties": []}]}
+        elif step == "ideation_kickoff_core_text": value = {"note": "A costly truth-seeking story with a trust payoff."}
+        elif step == "ideation_kickoff_world_text": value = {"note": "A provisional world, opening promise, and serial engine."}
+        elif step == "ideation_kickoff_characters_text": value = {"note": "Ming and a rival carry the central relationship and conflict."}
+        elif step == "ideation_kickoff_genre_text": value = {"note": "The mystery needs a clue, suspect, and reveal ledger."}
+        elif step == "ideation_kickoff_boundaries_text": value = {"note": "No imitation; the author must decide the first loss and key relationship."}
+        elif step == "ideation": value = {"reply": "A concrete constraint is recorded.", "confirmedDecisions": [], "openQuestions": [], "aiSuggestions": [], "conflicts": [], "evidenceIds": []}
+        elif step == "story_brief": value = {"brief": {"format":"long-form","platform":"undecided","audience":"adult readers","chapterWordRange":{"min":100,"max":1000},"premise":"A costly search","readerPromise":"A choice","theme":"trust","tone":"scene-led","pov":"close third","pace":"purposeful","endingDirection":"consequence","protagonist":"Ming","coreDesire":"Find truth","coreConflict":"Truth costs trust","worldMechanism":"notApplicable","serialEngine":"Escalation","emotionalRewards":["tension"],"differentiators":["original"],"forbiddenContent":[],"referenceTraits":["abstract"]}}
+        elif step in {"canon", "canon_repair"}: value = {"markdown": "# Story Core\nMing searches for truth.\n## Conflict\nTruth costs trust.\n## Boundaries\nNo imitation and no unsupported facts.", "structured": {"entities": [{"canonicalName":"Ming","entityTypeName":"person","aliasesJson":[],"attributesJson":{"desire":"Find truth"}}], "relations": [], "rules": [{"ruleCode":"TRUTH-COST","category":"story","statement":"Truth costs trust.","severity":"high","constraintJson":{"hard":True}}]}}
+        elif step == "canon_analyze": value = {"structured": {"entities": [{"canonicalName":"Ming","entityTypeName":"person","aliasesJson":[],"attributesJson":{"desire":"Find truth"}}], "relations": [], "rules": [{"ruleCode":"TRUTH-COST","category":"story","statement":"Truth costs trust.","severity":"high","constraintJson":{"hard":True}}]}}
+        elif step == "opening_review": value = {"scores": {"firstScreenHook":78,"characterDesire":76,"emotionalPull":72,"sceneTension":75,"expositionDensity":20,"terminologyRepetition":5,"dialogueActionExplanationBalance":74,"continueReading":77}, "findings": [], "recommendation": "continue", "summary": "Independent review."}
+        elif step == "opening_expand": value = {"chapters": [{"chapterNumber": 2, "title": "Two", "content": ("Ming follows the physical consequence into a crowded station and must choose whom to trust before the doors close. " * 12)}, {"chapterNumber": 3, "title": "Three", "content": ("At dawn, a witness changes the bargain and Ming risks a private memory to keep the investigation alive. " * 12)}]}
+        else:
+            data = json.loads(next(item.get("content", "{}") for item in payload["messages"] if item.get("role") == "user"))
+            key = data.get("strategy", {}).get("key", "opening")
+            seeds = {"strong-event":"A public alarm forces Ming to rescue a stranger while losing the only safe exit. ", "strong-character":"Ming rejects an easy lie and pays for the decision in front of someone important. ", "strong-mystery":"A sealed message answers a question Ming has never asked and demands a choice before sunrise. "}
+            value = {"chapter": {"title": key, "content": seeds.get(key, seeds["strong-event"]) * 14}}
+        if payload.get("stream"):
+            events = [
+                {"model": "fake-incubator", "choices": [{"delta": {"reasoning_content": "planning"}, "finish_reason": None}]},
+                {"model": "fake-incubator", "choices": [{"delta": {"content": json.dumps(value)}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            response = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+            encoded = response.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Content-Length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
+            return
+        response = json.dumps({"model":"fake-incubator", "choices":[{"message":{"content":json.dumps(value)},"finish_reason":"stop"}], "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
+    def log_message(self, *_args): return
+
+
+def _configure_models(client):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModelHandler); threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    provider = client.post("/api/v1/model-providers", json={"name":"Phase 14 Fake","baseUrl":f"http://{host}:{port}","timeoutSeconds":5,"maxRetries":0,"apiKey":"fake"}).json()
+    model = client.post(f"/api/v1/model-providers/{provider['id']}/models", json={"modelId":"fake-incubator","displayName":"Fake"}).json()
+    for role in ("research_planner", "research_analyst", "story_incubator", "reader_simulator", "opening_editor"):
+        assert client.put(f"/api/v1/model-role-bindings/{role}", json={"modelId":model["id"]}).status_code == 200
+    assert client.post(f"/api/v1/model-providers/{provider['id']}/test").json()["ok"] is True
+    return server
 
 
 def _project(client):
@@ -31,6 +106,7 @@ def _configure_research(client):
         search.fixtures[query] = [SearchResult(url=url, title=perspective, domain=url.split("/")[2])]
         fetch.fixtures[url] = FetchResponse(requested_url=url, final_url=url, title=perspective, content=f"Evidence for {perspective}. " * 20)
     service = client.app.state.story_service
+    _configure_models(client)
     service.phase13.search_provider = search
     service.phase13.fetch_provider = fetch
     return search, fetch
@@ -51,9 +127,18 @@ def _brief(client, project_id, expected_revision=0, **overrides):
     return response.json()
 
 
-def test_research_to_opening_selection_is_isolated_and_deterministic(client):
+def test_research_to_opening_selection_is_isolated_and_deterministic(client, monkeypatch):
     project = _project(client)
     search, fetch = _configure_research(client)
+    phase13 = client.app.state.story_service.phase13
+    original_complete = phase13._complete_model_json
+    calls = []
+
+    def capture_complete(*args, **kwargs):
+        calls.append({"run_role": args[2], "kwargs": kwargs})
+        return original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(phase13, "_complete_model_json", capture_complete)
     brief = _brief(client, project["id"])
     job_response = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
         "expectedBriefRevision": brief["revision"],
@@ -62,28 +147,31 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     })
     assert job_response.status_code == 201, job_response.text
     job = job_response.json()
-    assert job["status"] == "awaiting_review"
+    assert job["status"] == "awaiting_review", job
     assert len(search.calls) == 6
     assert len(fetch.calls) == 6
     sources = client.get(f"/api/v1/research/jobs/{job['id']}/sources")
     assert sources.status_code == 200
     assert len(sources.json()) == 6
+    queries = client.get(f"/api/v1/research/jobs/{job['id']}/queries")
+    assert queries.status_code == 200
+    assert len(queries.json()) == 6
+    assert all(item["status"] == "succeeded" and item["resultCount"] == 1 for item in queries.json())
     evidence = client.get(f"/api/v1/research/jobs/{job['id']}/evidence").json()
-    assert len(evidence) == 6
+    assert len(evidence) >= 6
     research_accepted = client.post(f"/api/v1/research/jobs/{job['id']}/accept", json={"expectedRevision": job["revision"]})
     assert research_accepted.status_code == 200, research_accepted.text
     job = research_accepted.json()
 
-    score = {"platformFit": 15, "openingHook": 15, "emotionalPayoff": 15, "differentiation": 15, "serialEngine": 15, "characterStickiness": 10, "worldEngine": 10, "readability": 5}
     opportunities = client.post(f"/api/v1/research/jobs/{job['id']}/opportunities", json={
         "expectedJobRevision": job["revision"],
-        "opportunities": [{
-            "highConcept": f"Direction {number}", "protagonist": "Ming", "coreDesire": "Find a missing sibling", "coreConflict": "Every clue costs trust", "worldMechanism": "notApplicable", "firstThreeChapterPromise": "A clue, a choice, and a consequence", "serialEngine": "Each clue opens another obligation", "scoreComponents": score, "evidenceIds": [item["id"] for item in evidence], "evidenceCoverage": 1, "confidence": 0.7,
-        } for number in range(1, 4)],
     })
     assert opportunities.status_code == 201, opportunities.text
     first = opportunities.json()[0]
-    assert first["totalScore"] == 100
+    assert first["totalScore"] == 74
+    restored_opportunities = client.get(f"/api/v1/projects/{project['id']}/story-opportunities?jobId={job['id']}")
+    assert restored_opportunities.status_code == 200
+    assert {item["id"] for item in restored_opportunities.json()} == {item["id"] for item in opportunities.json()}
     accepted = client.post(f"/api/v1/story-opportunities/{first['id']}/accept", json={"expectedRevision": first["revision"]})
     assert accepted.status_code == 200, accepted.text
     opportunity = accepted.json()
@@ -91,10 +179,34 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     ideation = client.post(f"/api/v1/projects/{project['id']}/ideation/sessions", json={"opportunityId": opportunity["id"], "expectedOpportunityRevision": opportunity["revision"]})
     assert ideation.status_code == 201, ideation.text
     session = ideation.json()
-    message = client.post(f"/api/v1/ideation/sessions/{session['id']}/messages", json={"expectedSessionRevision": session["revision"], "content": "No archive-number exposition."})
+    for index, section in enumerate(("core", "characters", "world", "genre", "boundaries"), start=1):
+        kickoff = client.post(f"/api/v1/ideation/sessions/{session['id']}/kickoff-sections/{section}", json={"expectedSessionRevision": session["revision"]})
+        assert kickoff.status_code == 201, kickoff.text
+        session = kickoff.json()
+        assert session["state"]["kickoffSections"][section]["status"] == "ready"
+        assert session["state"]["kickoffSections"][section]["revision"] == 1
+        assert len(session["state"]["kickoffSections"]) == index
+        assert session["messages"] == []
+    core_before = session["state"]["kickoffSections"]["core"]["content"]
+    regenerated = client.post(f"/api/v1/ideation/sessions/{session['id']}/kickoff-sections/world", json={"expectedSessionRevision": session["revision"]})
+    assert regenerated.status_code == 201, regenerated.text
+    restored_session = regenerated.json()
+    assert restored_session["state"]["kickoffSections"]["world"]["revision"] == 2
+    assert restored_session["state"]["kickoffSections"]["core"]["content"] == core_before
+    assert not restored_session["state"]["confirmedDecisions"]
+    assert restored_session["messages"] == []
+    message = client.post(f"/api/v1/ideation/sessions/{session['id']}/messages", json={"expectedSessionRevision": restored_session["revision"], "content": "No archive-number exposition."})
     assert message.status_code == 201, message.text
-    proposal = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": session["revision"] + 1})
+    premature = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": restored_session["revision"] + 1})
+    assert premature.status_code == 409
+    assert premature.json()["code"] == "IDEATION_DISCUSSION_REQUIRED"
+    second_message = client.post(f"/api/v1/ideation/sessions/{session['id']}/messages", json={"expectedSessionRevision": restored_session["revision"] + 1, "content": "The protagonist must make a costly choice in the first screen."})
+    assert second_message.status_code == 201, second_message.text
+    proposal = client.post(f"/api/v1/ideation/sessions/{session['id']}/story-brief-proposals", json={"expectedSessionRevision": restored_session["revision"] + 2})
     assert proposal.status_code == 201, proposal.text
+    restored_proposals = client.get(f"/api/v1/projects/{project['id']}/story-brief/proposals?sessionId={session['id']}")
+    assert restored_proposals.status_code == 200
+    assert restored_proposals.json()[0]["id"] == proposal.json()["id"]
     applied = client.post(f"/api/v1/story-brief-proposals/{proposal.json()['id']}/apply", json={"expectedRevision": proposal.json()["revision"]})
     assert applied.status_code == 200, applied.text
     brief_version = client.get(f"/api/v1/projects/{project['id']}/story-brief/current").json()
@@ -135,6 +247,288 @@ def test_research_to_opening_selection_is_isolated_and_deterministic(client):
     readiness = client.get(f"/api/v1/projects/{project['id']}/incubation-readiness")
     assert readiness.json()["ready"] is True
     assert client.post(f"/api/v1/projects/{project['id']}/canon/lock", json={"expectedRevision": current_canon["revision"]}).status_code == 200
+    runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
+    roles = {item["role"] for item in runs}
+    assert {"research_planner:query-plan", "research_analyst:report", "story_incubator:opportunities", "story_incubator:ideation-kickoff:core-text", "story_incubator:ideation-kickoff:world-text", "story_incubator:ideation-kickoff:characters-text", "story_incubator:ideation-kickoff:genre-text", "story_incubator:ideation-kickoff:boundaries-text", "story_incubator:story-brief", "story_incubator:canon", "research_analyst:canon-analyzer", "reader_simulator:opening-review", "opening_editor:opening-review"}.issubset(roles)
+    assert "research_analyst:ideation-kickoff-normalize" not in roles
+    incubator_calls = [item for item in calls if item["run_role"].startswith("story_incubator:")]
+    assert {"story_incubator:ideation", "story_incubator:story-brief", "story_incubator:canon", "story_incubator:opening-expand"}.issubset({item["run_role"] for item in incubator_calls})
+    assert any(item["run_role"].startswith("story_incubator:opportunities") for item in incubator_calls)
+    assert any(item["run_role"].startswith("story_incubator:opening:") for item in incubator_calls)
+    assert all(item["kwargs"].get("stream_response") is True for item in incubator_calls)
+
+
+def test_query_plan_repairs_valid_json_with_missing_queries(client, monkeypatch):
+    phase13 = client.app.state.story_service.phase13
+    calls = []
+    perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
+    outputs = [
+        {"analysis": "The plan should cover six perspectives."},
+        {"queries": [{"perspective": item, "query": f"public query for {item}"} for item in perspectives]},
+    ]
+
+    def fake_complete(*args, **kwargs):
+        calls.append({"runRole": args[2], "payload": args[5]})
+        return outputs.pop(0), f"run-{len(calls)}"
+
+    monkeypatch.setattr(phase13, "_complete_model_json", fake_complete)
+    planned = phase13._model_queries(SimpleNamespace(id="project-test"), {"genre": "mixed genre"}, "request-test", "job-test")
+
+    assert [perspective for perspective, _ in planned] == perspectives
+    assert [item["runRole"] for item in calls] == ["research_planner:query-plan", "research_planner:query-plan:schema-repair"]
+    assert calls[1]["payload"]["validationError"] == "RESEARCH_QUERY_PLAN_INVALID"
+
+
+def test_query_plan_still_fails_when_schema_repair_is_incomplete(client, monkeypatch):
+    phase13 = client.app.state.story_service.phase13
+    outputs = [
+        {"queries": []},
+        {"queries": [{"perspective": "platform_trends", "query": "one query only"}]},
+    ]
+
+    monkeypatch.setattr(phase13, "_complete_model_json", lambda *args, **kwargs: (outputs.pop(0), "run-test"))
+    with pytest.raises(StoryError) as error:
+        phase13._model_queries(SimpleNamespace(id="project-test"), {"genre": "mixed genre"}, "request-test", "job-test")
+
+    assert error.value.code == "RESEARCH_QUERY_PLAN_INCOMPLETE"
+
+
+@pytest.mark.parametrize(("status", "code"), [(401, "SEARCH_AUTH_FAILED"), (403, "SEARCH_AUTH_FAILED"), (429, "SEARCH_RATE_LIMITED"), (500, "SEARCH_PROVIDER_FAILED")])
+def test_tavily_http_failures_are_safe_and_actionable(monkeypatch, status, code):
+    def post(*_args, **_kwargs):
+        return httpx.Response(status, request=httpx.Request("POST", "https://api.tavily.com/search"))
+
+    monkeypatch.setattr("story_agent_api.research_providers.httpx.post", post)
+    provider = TavilySearchProvider("not-a-real-key")
+    with pytest.raises(Exception) as error:
+        provider.search("test query", [], None, 1)
+    assert getattr(error.value, "code", None) == code
+    assert "not-a-real-key" not in str(error.value)
+
+
+def test_manual_research_materials_remain_versioned_and_require_full_coverage(client):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    })
+    assert created.status_code == 201
+    stopped = client.post(f"/api/v1/research/jobs/{created.json()['id']}/cancel", json={"expectedRevision": created.json()["revision"]})
+    assert stopped.status_code == 200
+    job = stopped.json()
+    perspectives = ["platform_trends", "genre_leaders", "reader_praise", "reader_dropoff", "opening_strategy", "serial_engine"]
+    for perspective in perspectives:
+        material = client.post(f"/api/v1/research/jobs/{job['id']}/manual-materials", json={
+            "expectedRevision": job["revision"], "perspective": perspective, "title": f"Manual {perspective}",
+            "content": (f"User supplied research for {perspective}. " * 8),
+        })
+        assert material.status_code == 200, material.text
+        job = material.json()
+    queries = client.get(f"/api/v1/research/jobs/{job['id']}/queries").json()
+    assert {item["perspective"] for item in queries} == set(perspectives)
+    assert all(item["resultCount"] == 1 for item in queries)
+    analyzed = client.post(f"/api/v1/research/jobs/{job['id']}/analyze-manual-materials", json={"expectedRevision": job["revision"]})
+    assert analyzed.status_code == 200, analyzed.text
+    assert analyzed.json()["status"] == "awaiting_review"
+    assert analyzed.json()["coverage"]["manualCoverageMet"] is True
+    sources = client.get(f"/api/v1/research/jobs/{job['id']}/sources").json()
+    assert len(sources) == 6
+    assert all(item["sourceType"] == "manual" and item["providerMetadata"]["origin"] == "manual" for item in sources)
+
+
+def test_single_integrated_manual_report_can_reach_human_research_review(client):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    }).json()
+    stopped = client.post(f"/api/v1/research/jobs/{created['id']}/cancel", json={"expectedRevision": created["revision"]}).json()
+    report = client.post(f"/api/v1/research/jobs/{stopped['id']}/manual-materials", json={
+        "expectedRevision": stopped["revision"], "title": "External reader and competitor research",
+        "content": "Female readers prefer a proactive protagonist, a concrete opening crisis, and escalating relationship stakes. " * 5,
+    })
+    assert report.status_code == 200, report.text
+    query = client.get(f"/api/v1/research/jobs/{stopped['id']}/queries").json()
+    assert query[-1]["perspective"] == "integrated_report"
+    analyzed = client.post(f"/api/v1/research/jobs/{stopped['id']}/analyze-manual-materials", json={"expectedRevision": report.json()["revision"]})
+    assert analyzed.status_code == 200, analyzed.text
+    assert analyzed.json()["status"] == "awaiting_review"
+    assert analyzed.json()["coverage"]["integratedManualReportCoverageMet"] is True
+    runs = client.get(f"/api/v1/projects/{project['id']}/model-runs").json()
+    roles = {item["role"] for item in runs}
+    assert "research_analyst:report" in roles
+    assert "research_analyst:evidence" not in roles
+    accepted = client.post(f"/api/v1/research/jobs/{stopped['id']}/accept", json={"expectedRevision": analyzed.json()["revision"]})
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_story_opportunities_use_a_compact_model_snapshot(client, monkeypatch):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    }).json()
+    stopped = client.post(f"/api/v1/research/jobs/{created['id']}/cancel", json={"expectedRevision": created["revision"]}).json()
+    report = client.post(f"/api/v1/research/jobs/{stopped['id']}/manual-materials", json={
+        "expectedRevision": stopped["revision"], "title": "Compact opportunity report",
+        "content": "Readers respond to proactive choices, a concrete opening crisis, and escalating stakes. " * 20,
+    }).json()
+    analyzed = client.post(f"/api/v1/research/jobs/{stopped['id']}/analyze-manual-materials", json={"expectedRevision": report["revision"]}).json()
+    accepted = client.post(f"/api/v1/research/jobs/{stopped['id']}/accept", json={"expectedRevision": analyzed["revision"]}).json()
+
+    phase13 = client.app.state.story_service.phase13
+    original = phase13._complete_model_json
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append({"role": args[2], "payload": args[5], "kwargs": kwargs})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(phase13, "_complete_model_json", capture)
+    external_input = "Keep the moral dilemma and the sibling relationship, but avoid a chosen-one destiny."
+    response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"], "creativeInput": external_input})
+
+    assert response.status_code == 201, response.text
+    assert len(response.json()) == 2
+    assert response.json()[0]["story"]["title"] == "External one"
+    assert response.json()[0]["story"]["inputOrigin"] == "externalCreativeInput"
+    assert response.json()[0]["story"]["externalCreativeInputChecksum"]
+    assert external_input not in json.dumps(response.json())
+    external_calls = [item for item in calls if item["role"] == "research_analyst:external-directions"]
+    assert len(external_calls) == 1
+    assert external_calls[0]["kwargs"] == {"max_output_tokens": 1200, "max_retries": 0, "stream_response": True}
+    assert external_calls[0]["payload"]["externalCreativeInput"] == external_input
+
+    replacement = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={
+        "expectedJobRevision": accepted["revision"], "creativeInput": "Keep the family conflict, but rebuild the central mystery around public records.",
+    })
+    assert replacement.status_code == 201, replacement.text
+    all_opportunities = client.get(f"/api/v1/projects/{project['id']}/story-opportunities?jobId={stopped['id']}").json()
+    assert len([item for item in all_opportunities if item["status"] == "pending"]) == 2
+    assert len([item for item in all_opportunities if item["status"] == "superseded"]) == 2
+
+
+def test_story_opportunity_response_accepts_one_card_equivalent_envelopes(client):
+    phase13 = client.app.state.story_service.phase13
+    card = {"highConcept": "A bounded premise", "scoreComponents": {}, "evidenceIds": []}
+
+    assert phase13._single_generated_opportunity({"opportunities": [card]}) == card
+    assert phase13._single_generated_opportunity({"opportunities": card}) == card
+    assert phase13._single_generated_opportunity({"opportunity": card}) == card
+    assert phase13._single_generated_opportunity({"storyOpportunity": card}) == card
+    assert phase13._single_generated_opportunity(card) == card
+    assert phase13._single_generated_opportunity({"opportunities": [card, card]}) is None
+
+
+def test_story_opportunity_repairs_one_incomplete_model_card(client, monkeypatch):
+    project = _project(client)
+    _configure_models(client)
+    brief = _brief(client, project["id"])
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        "expectedBriefRevision": brief["revision"], "searchProvider": "deterministic", "fetchProvider": "deterministic", "runImmediately": False,
+    }).json()
+    stopped = client.post(f"/api/v1/research/jobs/{created['id']}/cancel", json={"expectedRevision": created["revision"]}).json()
+    report = client.post(f"/api/v1/research/jobs/{stopped['id']}/manual-materials", json={
+        "expectedRevision": stopped["revision"], "title": "Repair report", "content": "Readers need a choice with a visible cost. " * 20,
+    }).json()
+    analyzed = client.post(f"/api/v1/research/jobs/{stopped['id']}/analyze-manual-materials", json={"expectedRevision": report["revision"]}).json()
+    accepted = client.post(f"/api/v1/research/jobs/{stopped['id']}/accept", json={"expectedRevision": analyzed["revision"]}).json()
+
+    phase13 = client.app.state.story_service.phase13
+    original = phase13._complete_model_json
+    returned_incomplete = False
+
+    def incomplete_once(*args, **kwargs):
+        nonlocal returned_incomplete
+        if args[2] == "story_incubator:opportunities" and not returned_incomplete:
+            returned_incomplete = True
+            return {"opportunity": {"highConcept": "Incomplete"}}, "synthetic-invalid-run"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(phase13, "_complete_model_json", incomplete_once)
+    response = client.post(f"/api/v1/research/jobs/{stopped['id']}/opportunities", json={"expectedJobRevision": accepted["revision"]})
+
+    assert response.status_code == 201, response.text
+    assert len(response.json()) == 3
+    roles = {item["role"] for item in client.get(f"/api/v1/projects/{project['id']}/model-runs").json()}
+    assert "story_incubator:opportunities:repair" in roles
+
+
+def test_phase14_deterministic_canon_and_opening_gates(client):
+    phase13 = client.app.state.story_service.phase13
+    incomplete = phase13._generic_canon_checks(
+        "# Story Core\nConflict: a cost\n## Boundaries",
+        {"entities": [], "relations": [], "rules": [], "_generationCrossCheck": {"ready": True}},
+        {"protagonist": "Ming"},
+    )
+    assert incomplete["ready"] is False
+    assert {item["code"] for item in incomplete["checks"] if item["status"] == "blocked"} >= {"CANON_GENERIC_ENTITIES", "CANON_GENERIC_RULES", "CANON_GENERIC_PROTAGONIST"}
+
+    valid_structure = {
+        "entities": [{"canonicalName": "林知遥", "entityTypeName": "person", "attributesJson": {}}],
+        "relations": [],
+        "rules": [{"ruleCode": "CITY-01", "statement": "入夜后必须沿灯行走。", "constraintJson": {}}],
+        "_generationCrossCheck": {"ready": True},
+    }
+    generic_fog_city = phase13._generic_canon_checks(
+        "# 故事内核\n林知遥调查雾城失踪案。\n## 核心冲突\n真相与家人冲突。\n## 创作边界\n禁止无代价破局。",
+        valid_structure,
+        {"protagonist": "林知遥"},
+    )
+    assert generic_fog_city["ready"] is True
+    leaked_seed = phase13._generic_canon_checks(
+        "# 故事内核\n林知遥在夜巡司遇见沈砚。\n## 核心冲突\n调查冲突。\n## 创作边界\n禁止无代价破局。",
+        valid_structure,
+        {"protagonist": "林知遥"},
+    )
+    assert next(item for item in leaked_seed["checks"] if item["code"] == "CANON_GENERIC_NO_NIGHT_WATCH")["status"] == "blocked"
+
+    with pytest.raises(StoryError) as short:
+        phase13._validate_opening_content("too short", {"chapterWordRange": {"min": 100, "max": 200}})
+    assert short.value.code == "OPENING_WORD_RANGE_INVALID"
+
+    with pytest.raises(StoryError) as review:
+        phase13._validate_opening_review({"scores": {"continueReading": 90}, "findings": []}, "content")
+    assert review.value.code == "OPENING_REVIEW_MODEL_INVALID"
+
+
+def test_research_credentials_are_write_only_and_can_be_rotated_for_a_queued_job(client):
+    project = _project(client)
+    brief = _brief(client, project["id"])
+    payload = {
+        "expectedBriefRevision": brief["revision"],
+        "idempotencyKey": f"research:{brief['checksum']}",
+        "searchProvider": "tavily",
+        "fetchProvider": "firecrawl",
+        "searchApiKey": "tavily-secret-one",
+        "fetchApiKey": "firecrawl-secret-one",
+        "runImmediately": False,
+    }
+    created = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json=payload)
+    assert created.status_code == 201, created.text
+    assert created.json()["providerConfig"] == {
+        "searchProvider": "tavily",
+        "fetchProvider": "firecrawl",
+        "searchSecretConfigured": True,
+        "fetchSecretConfigured": True,
+    }
+    assert "tavily-secret-one" not in created.text
+    assert "firecrawl-secret-one" not in created.text
+
+    rotated = client.post(f"/api/v1/projects/{project['id']}/research/jobs", json={
+        **payload,
+        "searchApiKey": "tavily-secret-two",
+        "fetchApiKey": "firecrawl-secret-two",
+    })
+    assert rotated.status_code == 201, rotated.text
+    assert rotated.json()["id"] == created.json()["id"]
+    secret_store = client.app.state.story_service.secret_store
+    assert secret_store.get_secret(f"research-provider:{project['id']}:tavily") == "tavily-secret-two"
+    assert secret_store.get_secret(f"research-provider:{project['id']}:firecrawl") == "firecrawl-secret-two"
+    assert "secret-two" not in rotated.text
 
 
 def test_ssrf_policy_rejects_local_and_private_addresses():
@@ -205,6 +599,7 @@ def test_missing_provider_secret_is_persisted_and_competitor_exclusion_keeps_old
 
 def test_research_brief_drift_and_domain_scope_cannot_leak_into_a_job(client):
     project = _project(client)
+    _configure_models(client)
     service = client.app.state.story_service
     query = "undecided urban mystery adult readers platform trends"
     allowed = "https://allowed.example.test/trends"
@@ -263,6 +658,7 @@ def test_research_cost_limit_stops_the_job_before_results_are_persisted(client):
             return SearchResponse(results=[], estimated_cost=1.0)
 
     project = _project(client)
+    _configure_models(client)
     brief = _brief(client, project["id"])
     costly = CostlySearch()
     client.app.state.story_service.phase13.search_provider = costly
@@ -275,5 +671,5 @@ def test_research_cost_limit_stops_the_job_before_results_are_persisted(client):
     assert job.status_code == 201, job.text
     assert job.json()["status"] == "failed"
     assert job.json()["errorCode"] == "RESEARCH_COST_LIMIT"
-    assert costly.calls == 1
+    assert costly.calls == 0
     assert client.get(f"/api/v1/research/jobs/{job.json()['id']}/sources").json() == []

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +48,20 @@ describe("Story Agent shell", () => {
       if (url.includes("/audit-events")) return json([]);
       if (url.includes("/model-runs")) return json([]);
       if (url.includes("/trial-readiness")) return json(readinessMock);
+      if (url.includes("/research/briefs")) return json([]);
+      if (url.includes("/research/jobs")) return json([]);
+      if (url.includes("/story-opportunities")) return json([]);
+      if (url.includes("/ideation/sessions")) return json([]);
+      if (url.includes("/story-brief/proposals")) return json([]);
+      if (url.includes("/story-brief/versions")) return json([]);
+      if (url.includes("/canon/generation-proposals")) return json([]);
+      if (url.includes("/opening-experiments")) return json([]);
+      if (url.includes("/incubation-readiness")) return json({
+        projectId: project.id,
+        ready: false,
+        stage: "research_brief",
+        checks: [],
+      });
       if (url.includes("/canon")) return json(canonMock);
       if (url.includes("/automation/policy")) return json(policyMock);
       if (url.includes("/automation/runs")) return json([]);
@@ -81,6 +95,7 @@ describe("Story Agent shell", () => {
       if (url.endsWith("/model-providers")) return json([]);
       if (url.endsWith("/model-role-bindings")) return json([
         { role: "planner", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-12T00:00:00Z" },
+        { role: "research_planner", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-12T00:00:00Z" },
       ]);
       return json({ status: "ok" });
     }));
@@ -104,6 +119,8 @@ describe("Story Agent shell", () => {
     render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
 
     expect(await screen.findByRole("heading", { name: "模型与费用设置" })).toBeInTheDocument();
+    expect(screen.getByText("市场调研规划")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "火山 Coding Plan" })).toBeInTheDocument();
     const keyInput = screen.getByLabelText("新增 Provider API Key");
     await user.clear(screen.getByLabelText("新增 Provider 名称"));
     await user.type(screen.getByLabelText("新增 Provider 名称"), "测试 Provider");
@@ -114,6 +131,45 @@ describe("Story Agent shell", () => {
     expect(await screen.findByText("Provider 已保存，密钥输入已清空。")).toBeInTheDocument();
     expect(keyInput).toHaveValue("");
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+  });
+
+  it("applies the two-model role allocation across configured Providers", async () => {
+    const writerModel = { id: "model-writer", providerId: "provider-kimi", providerName: "Kimi", modelId: "kimi-writing", displayName: "Kimi 正文", temperature: 0.8, maxOutputTokens: 4096, supportsReasoning: false, isEnabled: true, inputPricePerMillion: 1, outputPricePerMillion: 2, createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" };
+    const reviewerModel = { id: "model-reviewer", providerId: "provider-deepseek", providerName: "DeepSeek", modelId: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", temperature: 0.3, maxOutputTokens: 4096, supportsReasoning: true, isEnabled: true, inputPricePerMillion: 1, outputPricePerMillion: 2, createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" };
+    const defaultFetch = vi.mocked(fetch).getMockImplementation();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/model-providers")) return json([
+        { id: "provider-kimi", name: "Kimi", providerType: "openai-compatible", baseUrl: "https://api.moonshot.test", timeoutSeconds: 30, maxRetries: 1, isEnabled: true, hasApiKey: true, apiKeyPreview: "1234", createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" },
+        { id: "provider-deepseek", name: "DeepSeek", providerType: "openai-compatible", baseUrl: "https://api.deepseek.test", timeoutSeconds: 30, maxRetries: 1, isEnabled: true, hasApiKey: true, apiKeyPreview: "5678", createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z" },
+      ]);
+      if (url.endsWith("/model-providers/provider-kimi/models")) return json([writerModel]);
+      if (url.endsWith("/model-providers/provider-deepseek/models")) return json([reviewerModel]);
+      if (url.endsWith("/model-role-bindings/bulk") && init?.method === "PUT") return json([]);
+      if (url.endsWith("/model-role-bindings")) return json([
+        { role: "chinese_writer", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-19T00:00:00Z" },
+        { role: "planner", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-19T00:00:00Z" },
+        { role: "embedding", modelId: null, model: null, dailyCostLimit: null, updatedAt: "2026-07-19T00:00:00Z" },
+      ]);
+      return defaultFetch?.(input, init) ?? json({ status: "ok" });
+    });
+
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    expect(await screen.findByText("双模型分工")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("正文与修订模型"), "model-writer");
+    await user.selectOptions(screen.getByLabelText("结构与审校模型"), "model-reviewer");
+    await user.click(screen.getByRole("button", { name: "套用双模型分工" }));
+    expect(await screen.findByText(/双模型分工已套用/)).toBeInTheDocument();
+
+    const bulkCall = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith("/model-role-bindings/bulk") && init?.method === "PUT");
+    expect(bulkCall).toBeDefined();
+    const payload = JSON.parse(String(bulkCall?.[1]?.body)) as { modelIds: Record<string, string> };
+    expect(payload.modelIds.chinese_writer).toBe("model-writer");
+    expect(payload.modelIds.planner).toBe("model-reviewer");
+    expect(payload.modelIds.embedding).toBeUndefined();
   });
 
   it("streams Agent replies with model run status", async () => {
@@ -142,6 +198,16 @@ describe("Story Agent shell", () => {
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
   });
 
+  it("opens safety and system management from the top bar without creating a backup", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/planning"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    await user.click(await screen.findByRole("button", { name: "打开安全与系统管理" }));
+    expect(await screen.findByRole("heading", { name: "备份恢复与调用诊断" })).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).includes("/backups") && init?.method === "POST")).toBe(false);
+  });
+
   it("opens the real chapter writing and quality workspaces", async () => {
     const user = userEvent.setup();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -164,6 +230,57 @@ describe("Story Agent shell", () => {
     expect(screen.getByRole("region", { name: "试写就绪检查" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /开始第 37—37 章/ })).toBeDisabled();
     expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+  });
+
+  it("opens the story incubation flow with a persistent Agent scope", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/incubator"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    expect(await screen.findByRole("heading", { name: "故事创意孵化室" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "创意孵化步骤" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /保存并进入调研/ })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "故事 Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /检查方向/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("计划章节数")).toHaveValue(1000));
+    const genre = screen.getByLabelText("题材方向（可混合填写）");
+    expect(genre).toHaveValue("");
+    await user.type(genre, "古代悬疑探案 + 女性成长 + 言情");
+    expect(genre).toHaveValue("古代悬疑探案 + 女性成长 + 言情");
+    expect(screen.getByLabelText("限定研究网站/域名（每行一个，可选）")).toBeInTheDocument();
+    expect(screen.getByLabelText("排除网站/域名（每行一个，可选）")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /市场调研/ }));
+    expect(await screen.findByText("市场证据工作台")).toBeInTheDocument();
+    expect(screen.getByText(/仅研究公开网页/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Tavily API Key")).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText("Firecrawl API Key")).toHaveAttribute("type", "password");
+  });
+
+  it("offers an explicit revision-safe sync when a saved brief differs from the project plan", async () => {
+    const savedBrief = {
+      id: "brief-120", projectId: project.id, versionNumber: 1, format: "long-form", platform: "番茄小说",
+      genre: "古代悬疑探案", audience: "成年读者", targetChapters: 120, targetWords: null,
+      emotionalValue: ["紧张"], researchDateRange: {}, includedDomains: [], excludedDomains: [], referenceWorks: [],
+      forbiddenContent: [], commercialGoals: [], notes: "", checksum: "brief-checksum", status: "current", revision: 3,
+      createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z",
+    };
+    const defaultFetch = vi.mocked(fetch).getMockImplementation();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/research/briefs") && !init?.method) return json([savedBrief]);
+      return defaultFetch?.(input, init) ?? json({ status: "ok" });
+    });
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><TooltipProvider><MemoryRouter initialEntries={["/incubator"]}><App /></MemoryRouter></TooltipProvider></QueryClientProvider>);
+
+    await waitFor(() => expect(screen.getByLabelText("计划章节数")).toHaveValue(120));
+    expect(screen.getByText("作品计划为 1000 章")).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).includes("/research/briefs") && init?.method === "POST")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "同步" }));
+    expect(screen.getByLabelText("计划章节数")).toHaveValue(1000);
+    expect(screen.getByText("保存后生成新的研究目标版本")).toBeInTheDocument();
   });
 
   it("saves the Canon story core as a database-backed draft", async () => {
